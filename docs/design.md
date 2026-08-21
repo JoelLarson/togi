@@ -140,28 +140,10 @@ This is what "minimal code context" resolves to.
 
 ## Phasing
 
-The v1 arc. Amendments to the original sketch are noted inline.
+1. Runner, findings schema, two report-only Go gates, XDG state, repo-id
+2. Diff scoping and config resolution
+3. The fix loop — worktree, adapter, integrity gates, rails
+4. Triage, the flywheel, and the wiki
+5. Rust, cost-class scheduling, ratchet, and the seal
 
-1. **Runner + findings schema + two report-only Go gates.**
-   Gates: `golangci-lint` (umbrella lint — stresses the normalizer and
-   many-to-one aliases) and `gocyclo` (structural ranges — stresses
-   `end_line` and containment).
-   *Amended:* XDG state and repo-id land **here**, not in phase 2 — they're
-   small, and everything writes state from day one; retrofitting storage is
-   worse than building on it. Fingerprints land **with the schema**, not
-   later — they're a schema field, and the ratchet, stalemate, and waivers
-   all key on them.
-   *Amended:* dogfood togi on togi from this phase's first report-only run.
-
-2. **Diff-scoping** (merge-base, touched-entity) **+ config resolution**
-   (three-layer merge, `config init` / `config show`).
-
-3. **Fix loop + adapter + integrity gates + budgets.**
-   *Amended:* explicitly includes the worktree, per-batch commits, and squash
-   landing — that machinery is fix-loop infrastructure, not a later concern.
-
-4. **Triage + flywheel + wiki + briefs** — `plan.json`, containment
-   subordination, principle pages, deterministic brief assembly.
-
-5. **Rust bindings + cost-class scheduler + ratchet + one glacial gate**
-   (mutation testing as the seal).
+Full detail, dependencies, and exit criteria: [roadmap.md](./roadmap.md).
