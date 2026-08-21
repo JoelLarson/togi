@@ -1,11 +1,21 @@
 package main
 
 import (
+	"fmt"
+	"io"
 	"os"
 )
 
-func main() {
-	if err := newRootCommand(streams{out: os.Stdout, err: os.Stderr}).Execute(); err != nil {
-		os.Exit(1)
+func run(args []string, out, errOut io.Writer) int {
+	cmd := newRootCommand(streams{out: out, err: errOut})
+	cmd.SetArgs(args)
+	if err := cmd.Execute(); err != nil {
+		_, _ = fmt.Fprintln(errOut, err)
+		return 1
 	}
+	return 0
+}
+
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
