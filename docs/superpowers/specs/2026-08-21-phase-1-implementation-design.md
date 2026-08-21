@@ -115,12 +115,17 @@ named-capture pattern declared by the binding and requires captures needed to
 construct a finding. gocyclo findings use `gocyclo/complexity` and include the
 reported complexity in the message.
 
+Regex message templates support static text and direct `.capture` references.
+Control flow, variables, functions, and indirect lookup are rejected during
+preflight so every referenced capture is known before tool output arrives.
+
 Each normalization batch opens one rooted source session. Relative tool paths
 are resolved beneath that root; absolute paths are accepted only when they can
 be converted to a path beneath the canonical root. Source access rejects
 non-regular files and caps a snippet line at 64 KiB. Normalizer errors describe
 the error class and direct operators to persisted raw output without repeating
-raw tool lines or capture values.
+raw tool lines or capture values. Source lines must also be valid UTF-8 before
+they become snippets or fingerprint input.
 
 An enricher interface receives normalized findings and repository context.
 The phase 1 implementation returns the input unchanged. The runner still calls

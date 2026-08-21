@@ -275,6 +275,9 @@ func TestRegexPreflightsBindingWithEmptyOutput(t *testing.T) {
 		{name: "template invocation without root dot", mutate: func(ctx *Context) {
 			ctx.Binding.Message = `{{define "nested"}}{{.file}}{{end}}{{template "nested"}}`
 		}},
+		{name: "range over captures", mutate: func(ctx *Context) {
+			ctx.Binding.Message = `{{range $name, $value := .}}{{$name}}={{$value}}{{end}}`
+		}},
 		{name: "qualified rule", mutate: func(ctx *Context) { ctx.Binding.RuleID = "complexity" }},
 		{name: "default severity", mutate: func(ctx *Context) { ctx.Binding.SeverityMap = nil }},
 		{name: "canonical severity", mutate: func(ctx *Context) {
@@ -680,6 +683,50 @@ func TestSourceLookupAcceptsMaximumLengthLine(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Snippet != want {
 		t.Fatalf("snippet length = %d, want %d", len(got[0].Snippet), len(want))
+	}
+}
+
+func TestSourceLookupRejectsInvalidUTF8WithoutExposingSource(t *testing.T) {
+	const sourceName = "RAW_SECRET_SOURCE.go"
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, sourceName), []byte{0xff, '\n'}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewRegistry().Normalize(
+		`regex:^(?P<file>.+):(?P<line>\d+)$`,
+		regexContext(root),
+		[]byte(sourceName+":1\n"),
+	)
+	if err == nil {
+		t.Fatal("error = nil, want invalid source UTF-8 error")
+	}
+	if !strings.Contains(err.Error(), "UTF-8") {
+		t.Fatalf("error = %q, want UTF-8 classification", err)
+	}
+	if strings.Contains(err.Error(), sourceName) || strings.Contains(err.Error(), "\\xff") {
+		t.Fatalf("error exposes source data or path: %q", err)
+	}
+}
+
+func TestSourceLookupIgnoresInvalidUTF8BeforeRequestedLine(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(root, "source.go"),
+		[]byte{0xff, '\n', 'v', 'a', 'l', 'i', 'd', '\n'},
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err := NewRegistry().Normalize(
+		`regex:^(?P<file>.+):(?P<line>\d+)$`,
+		regexContext(root),
+		[]byte("source.go:2\n"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Snippet != "valid" {
+		t.Fatalf("findings = %#v, want valid requested snippet", got)
 	}
 }
 

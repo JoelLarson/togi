@@ -116,10 +116,7 @@ func preflightRegex(pattern string, ctx Context) (*regexp.Regexp, *template.Temp
 	if compiled.SubexpIndex("line") < 0 {
 		return nil, nil, fmt.Errorf("regex normalizer requires named capture %q", "line")
 	}
-	message, err := template.New("message").
-		Funcs(template.FuncMap{"index": rejectIndirectCaptureLookup}).
-		Option("missingkey=error").
-		Parse(ctx.Binding.Message)
+	message, err := template.New("message").Option("missingkey=error").Parse(ctx.Binding.Message)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse regex message template: %w", err)
 	}
@@ -150,114 +147,42 @@ func preflightRegex(pattern string, ctx Context) (*regexp.Regexp, *template.Temp
 	return compiled, message, nil
 }
 
-func rejectIndirectCaptureLookup(any, ...any) (any, error) {
-	return nil, errors.New("indirect capture lookup is not allowed")
-}
-
 func validateTemplateCaptureReferences(message *template.Template, captures map[string]struct{}) error {
-	for _, defined := range message.Templates() {
-		if defined.Tree == nil || defined.Tree.Root == nil {
+	if len(message.Templates()) != 1 || message.Tree == nil || message.Tree.Root == nil {
+		return errors.New("regex message template supports only static text and direct capture references")
+	}
+	return validateTemplateList(message.Tree.Root, captures)
+}
+
+func validateTemplateList(list *parse.ListNode, captures map[string]struct{}) error {
+	for _, node := range list.Nodes {
+		switch node := node.(type) {
+		case *parse.TextNode:
 			continue
-		}
-		if err := validateTemplateNode(defined.Tree.Root, captures, true); err != nil {
-			return err
+		case *parse.ActionNode:
+			if err := validateDirectCaptureAction(node, captures); err != nil {
+				return err
+			}
+		default:
+			return errors.New("regex message template supports only static text and direct capture references")
 		}
 	}
 	return nil
 }
 
-func validateTemplateNode(node parse.Node, captures map[string]struct{}, dotIsCaptureMap bool) error {
-	if node == nil {
-		return nil
+func validateDirectCaptureAction(action *parse.ActionNode, captures map[string]struct{}) error {
+	pipe := action.Pipe
+	if pipe == nil || len(pipe.Decl) != 0 || len(pipe.Cmds) != 1 || len(pipe.Cmds[0].Args) != 1 {
+		return errors.New("regex message template supports only direct capture references")
 	}
-	switch node := node.(type) {
-	case *parse.ListNode:
-		for _, child := range node.Nodes {
-			if err := validateTemplateNode(child, captures, dotIsCaptureMap); err != nil {
-				return err
-			}
-		}
-	case *parse.ActionNode:
-		return validateTemplateNode(node.Pipe, captures, dotIsCaptureMap)
-	case *parse.IfNode:
-		return validateTemplateBranch(node.Pipe, node.List, node.ElseList, captures, dotIsCaptureMap, dotIsCaptureMap)
-	case *parse.RangeNode:
-		return validateTemplateBranch(node.Pipe, node.List, node.ElseList, captures, dotIsCaptureMap, false)
-	case *parse.WithNode:
-		return validateTemplateBranch(node.Pipe, node.List, node.ElseList, captures, dotIsCaptureMap, false)
-	case *parse.TemplateNode:
-		if node.Pipe != nil {
-			if err := validateTemplateNode(node.Pipe, captures, dotIsCaptureMap); err != nil {
-				return err
-			}
-		}
-		if !dotIsCaptureMap || !templatePipePassesRootDot(node.Pipe) {
-			return errors.New("regex message template must receive the root capture map")
-		}
-	case *parse.PipeNode:
-		for _, command := range node.Cmds {
-			if err := validateTemplateNode(command, captures, dotIsCaptureMap); err != nil {
-				return err
-			}
-		}
-	case *parse.CommandNode:
-		for _, argument := range node.Args {
-			if err := validateTemplateNode(argument, captures, dotIsCaptureMap); err != nil {
-				return err
-			}
-		}
-	case *parse.FieldNode:
-		if !dotIsCaptureMap {
-			return errors.New("regex message template references a capture after dot was rebound")
-		}
-		if len(node.Ident) != 1 {
-			return errors.New("regex message template requires direct capture references")
-		}
-		if _, ok := captures[node.Ident[0]]; !ok {
-			return fmt.Errorf("regex message template references unknown capture %q", node.Ident[0])
-		}
-	case *parse.ChainNode:
-		if len(node.Field) != 0 {
-			return errors.New("regex message template requires direct capture references")
-		}
-		return validateTemplateNode(node.Node, captures, dotIsCaptureMap)
-	case *parse.VariableNode:
-		if len(node.Ident) > 1 {
-			return errors.New("regex message template requires direct capture references")
-		}
-	case *parse.IdentifierNode:
-		if node.Ident == "index" {
-			return errors.New("regex message template requires direct capture references")
-		}
+	field, ok := pipe.Cmds[0].Args[0].(*parse.FieldNode)
+	if !ok || len(field.Ident) != 1 {
+		return errors.New("regex message template supports only direct capture references")
+	}
+	if _, ok := captures[field.Ident[0]]; !ok {
+		return fmt.Errorf("regex message template references unknown capture %q", field.Ident[0])
 	}
 	return nil
-}
-
-func validateTemplateBranch(pipe *parse.PipeNode, list, elseList *parse.ListNode, captures map[string]struct{}, currentDot, listDot bool) error {
-	if pipe != nil {
-		if err := validateTemplateNode(pipe, captures, currentDot); err != nil {
-			return err
-		}
-	}
-	if list != nil {
-		if err := validateTemplateNode(list, captures, listDot); err != nil {
-			return err
-		}
-	}
-	if elseList != nil {
-		if err := validateTemplateNode(elseList, captures, currentDot); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func templatePipePassesRootDot(pipe *parse.PipeNode) bool {
-	if pipe == nil || len(pipe.Cmds) != 1 || len(pipe.Cmds[0].Args) != 1 {
-		return false
-	}
-	_, ok := pipe.Cmds[0].Args[0].(*parse.DotNode)
-	return ok
 }
 
 func captureValues(compiled *regexp.Regexp, matches []string) map[string]string {

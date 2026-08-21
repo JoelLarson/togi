@@ -23,6 +23,7 @@ const (
 var (
 	errLinePastEOF = errors.New("source line is past end of file")
 	errLineTooLong = errors.New("source line exceeds 64 KiB")
+	errInvalidUTF8 = errors.New("source line is not valid UTF-8")
 )
 
 // Context supplies the gate metadata and repository used during normalization.
@@ -164,6 +165,9 @@ func (s *sourceSession) readLine(reportedFile string, line int) (string, string,
 	defer file.Close()
 	snippet, err := lineFromReader(file, line)
 	if err != nil {
+		if errors.Is(err, errInvalidUTF8) {
+			return "", "", fmt.Errorf("source line is not valid UTF-8; %s", rawOutputGuidance)
+		}
 		return "", "", fmt.Errorf("source line cannot be read; %s", rawOutputGuidance)
 	}
 	return filepath.ToSlash(cleanFile), snippet, nil
@@ -215,6 +219,9 @@ func lineFromReader(input io.Reader, wanted int) (string, error) {
 			return "", errLineTooLong
 		}
 		if current == wanted {
+			if !utf8.Valid(line) {
+				return "", errInvalidUTF8
+			}
 			return string(line), nil
 		}
 		if errors.Is(readErr, io.EOF) {

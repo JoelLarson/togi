@@ -710,7 +710,9 @@ allowing unrelated fields for forward compatibility, then explicitly
 validates `FromLinter`, `Text`, and `Pos.Filename/Line`. The regex parser
 requires unique `file` and `line` captures and preflights its template,
 tool-qualified rule ID, and canonical default severity even for empty output;
-`value` and `symbol` populate binding message templates.
+`value` and `symbol` populate binding message templates. Message templates are
+limited to static text and direct `.capture` references; range, control flow,
+variables, functions, and indirect dynamic lookup are rejected.
 
 Both parsers validate UTF-8 and open one rooted source session per nonempty
 normalization batch. Relative paths resolve beneath `Context.Root`; absolute
@@ -718,8 +720,9 @@ paths are converted to root-relative paths only when `filepath.Rel` keeps them
 beneath the canonical root. Rooted opens reject escapes, source files must be
 regular, and snippets are limited to 64 KiB excluding CR/LF. Errors never
 repeat raw output, capture values, or raw lines and instead point operators to
-the persisted raw artifact. Both parsers read exactly the reported source line,
-apply severity maps, and return ungrouped findings with fingerprints set.
+the persisted raw artifact. Source lines must be valid UTF-8 before string
+conversion or fingerprinting. Both parsers read exactly the reported source
+line, apply severity maps, and return ungrouped findings with fingerprints set.
 
 - [ ] **Step 4: Verify GREEN and commit**
 
