@@ -55,6 +55,51 @@ creates no surprise files. This is also how togi dogfoods itself: running togi
 on togi uses the shipped defaults, so ADR-0002 holds (nothing is read from the
 target tree) while the standards stay version-controlled and reviewable.
 
+## Gate manifest and binding schema
+
+**Proposed** — the first thing phase 1 will pressure-test, so treat the shape
+as settled and the field names as revisable.
+
+A gate is a directory: `gate.toml` plus one subdirectory per language.
+
+```toml
+# defaults/gates/complexity/gate.toml
+name        = "complexity"
+description = "Function-level complexity limits"
+cost_class  = "fast"                  # instant | fast | slow | glacial
+fix_policy  = "llm-fix"               # autofix-only | autofix-then-llm | llm-fix | report-only
+scope       = "diff"                  # diff | repo
+blocking    = ["error", "warning"]    # severities that block merge-ready
+timeout     = "60s"                   # optional; cost_class implies a default
+```
+
+```toml
+# defaults/gates/complexity/go/binding.toml
+language   = "go"
+tool       = "gocyclo"
+command    = ["gocyclo", "-over", "{{.threshold}}", "./..."]
+normalizer = "regex:^(?P<value>\\d+) \\S+ (?P<symbol>\\S+) (?P<file>[^:]+):(?P<line>\\d+):\\d+$"
+
+[settings]
+threshold = 15                        # per-project overridable; substituted into command
+
+[severity_map]
+default = "warning"                   # tool vocabulary -> error | warning | info
+
+[version]
+command    = ["gocyclo", "-version"]
+pattern    = "v?(\\d+\\.\\d+\\.\\d+)"
+constraint = ">=0.6.0"                # phase 1 warns on mismatch; phase 3 errors
+
+[aliases]                             # rule_id -> principle page (ADR-0006)
+"gocyclo/complexity" = "small-composable-functions"
+```
+
+Notes: `command` is a `text/template` over `[settings]`, which is what makes
+thresholds per-project overridable. Aliases may glob (`"golangci-lint/*"`).
+Bindings for tools emitting structured output name a compiled normalizer
+(`golangci-json`, `sarif`, `clippy-json`) instead of a regex.
+
 ## CLI surface
 
 ```
