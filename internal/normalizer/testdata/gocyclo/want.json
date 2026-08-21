@@ -1,0 +1,24 @@
+[
+  {
+    "gate": "complexity",
+    "language": "go",
+    "rule_id": "gocyclo/complexity",
+    "severity": "warning",
+    "file": "source.go",
+    "line": 3,
+    "snippet": "func first() {",
+    "message": "cyclomatic complexity 18 in first",
+    "fingerprint": "54336d8fed3f8e2b8b0eeb2ee98f87d4b7ac91d5c1ee638423cce3385d327e99"
+  },
+  {
+    "gate": "complexity",
+    "language": "go",
+    "rule_id": "gocyclo/complexity",
+    "severity": "warning",
+    "file": "source.go",
+    "line": 7,
+    "snippet": "func second() {",
+    "message": "cyclomatic complexity 21 in second",
+    "fingerprint": "516275ce6c0f2cb16db6cff618b7e0f1d9a97669fecda07deb76aeb16842f108"
+  }
+]

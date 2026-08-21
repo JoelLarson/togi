@@ -1,0 +1,18 @@
+[
+  {
+    "gate": "lint",
+    "language": "go",
+    "rule_id": "golangci-lint/errcheck",
+    "severity": "warning",
+    "file": "source.go",
+    "line": 4,
+    "snippet": "\tignored()",
+    "occurrences": [
+      {
+        "line": 8
+      }
+    ],
+    "message": "Error return value is not checked",
+    "fingerprint": "c5fdcaca724b748bc9262a529fe2822ca91d3330da1c9fc61d09446403884d8f"
+  }
+]
