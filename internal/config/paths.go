@@ -38,6 +38,8 @@ func xdgPath(environment, fallback, home string) (string, bool) {
 }
 
 // RepoState returns the durable state directory for a repository identity.
+// directory must be the single sanitized component from repoid.ID.Directory;
+// it must not contain path separators or traversal components.
 func (p Paths) RepoState(directory string) string {
 	return filepath.Join(p.State, directory)
 }
