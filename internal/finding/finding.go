@@ -4,6 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -55,9 +58,50 @@ func Fingerprint(finding Finding) string {
 }
 
 func normalizeFile(file string) string {
-	return strings.ReplaceAll(file, "\\", "/")
+	return filepath.ToSlash(filepath.Clean(file))
 }
 
 func normalizeSnippet(snippet string) string {
 	return strings.Join(strings.Fields(snippet), " ")
+}
+
+// Validate verifies that a finding can enter the normalized finding boundary.
+func Validate(finding Finding) error {
+	switch {
+	case strings.TrimSpace(finding.Gate) == "":
+		return errors.New("gate is required")
+	case strings.TrimSpace(finding.Language) == "":
+		return errors.New("language is required")
+	case strings.TrimSpace(finding.RuleID) == "":
+		return errors.New("rule ID is required")
+	case !validSeverity(finding.Severity):
+		return fmt.Errorf("invalid severity %q", finding.Severity)
+	case finding.File == "":
+		return errors.New("file is required")
+	case finding.Line <= 0:
+		return errors.New("line must be positive")
+	case finding.EndLine != 0 && finding.EndLine < finding.Line:
+		return errors.New("end line precedes line")
+	case strings.TrimSpace(finding.Snippet) == "":
+		return errors.New("snippet is required")
+	case strings.TrimSpace(finding.Message) == "":
+		return errors.New("message is required")
+	}
+
+	for index, occurrence := range finding.Occurrences {
+		if occurrence.Line <= 0 {
+			return fmt.Errorf("occurrence %d line must be positive", index)
+		}
+		if occurrence.EndLine != 0 && occurrence.EndLine < occurrence.Line {
+			return fmt.Errorf("occurrence %d end line precedes line", index)
+		}
+	}
+	if finding.Fingerprint != "" && finding.Fingerprint != Fingerprint(finding) {
+		return errors.New("fingerprint does not match finding identity")
+	}
+	return nil
+}
+
+func validSeverity(severity Severity) bool {
+	return severity == Error || severity == Warning || severity == Info
 }

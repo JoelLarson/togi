@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -84,12 +85,11 @@ func TestFingerprintUsesLengthDelimitedFields(t *testing.T) {
 	}
 }
 
-func TestFingerprintNormalizesLiteralBackslashSeparators(t *testing.T) {
-	backslash := Finding{Gate: "lint", RuleID: "lint/rule", File: "dir\\nested\\file.go", Snippet: "x"}
-	slash := Finding{Gate: "lint", RuleID: "lint/rule", File: "dir/nested/file.go", Snippet: "x"}
-
-	if got, want := Fingerprint(backslash), Fingerprint(slash); got != want {
-		t.Fatalf("Fingerprint() = %q, want normalized-path fingerprint %q", got, want)
+func TestFingerprintMatchesCanonicalDigest(t *testing.T) {
+	finding := Finding{Gate: "gate", RuleID: "rule", File: "dir/./file.go", Snippet: "func Example()"}
+	const want = "c0c86f1c6b8d8630aefac56738318500b88fd68ee3e2b3536d860f65e7b244d1"
+	if got := Fingerprint(finding); got != want {
+		t.Fatalf("Fingerprint() = %q, want %q", got, want)
 	}
 }
 
@@ -100,7 +100,7 @@ func TestGroupCollapsesLocationsAndPreservesPrimaryFinding(t *testing.T) {
 			Language:    "go",
 			RuleID:      "lint/example",
 			Severity:    Warning,
-			File:        "dir\\file.go",
+			File:        "dir/./file.go",
 			Line:        30,
 			EndLine:     32,
 			Snippet:     "raw    later",
@@ -121,7 +121,7 @@ func TestGroupCollapsesLocationsAndPreservesPrimaryFinding(t *testing.T) {
 		},
 	}
 
-	got := Group(findings)
+	got := mustGroup(t, findings)
 	if len(got) != 1 {
 		t.Fatalf("len(Group()) = %d, want 1", len(got))
 	}
@@ -141,33 +141,73 @@ func TestGroupCollapsesLocationsAndPreservesPrimaryFinding(t *testing.T) {
 	}
 }
 
-func TestGroupComputesMissingFingerprintAndUsesSuppliedFingerprint(t *testing.T) {
-	missing := Finding{Gate: "lint", RuleID: "lint/missing", File: "file.go", Line: 1, Snippet: "missing"}
-	grouped := Group([]Finding{missing})
+func TestGroupComputesCanonicalFingerprint(t *testing.T) {
+	finding := Finding{Gate: "lint", Language: "go", RuleID: "lint/missing", Severity: Warning, File: "file.go", Line: 1, Snippet: "missing", Message: "message"}
+	grouped := mustGroup(t, []Finding{finding})
 	if len(grouped) != 1 {
 		t.Fatalf("len(Group()) = %d, want 1", len(grouped))
 	}
-	if got, want := grouped[0].Fingerprint, Fingerprint(missing); got != want || got == "" {
+	if got, want := grouped[0].Fingerprint, Fingerprint(finding); got != want || got == "" {
 		t.Fatalf("computed fingerprint = %q, want nonempty %q", got, want)
 	}
+}
 
-	const supplied = "supplied-fingerprint"
-	grouped = Group([]Finding{
-		{Gate: "lint", RuleID: "lint/first", File: "file.go", Line: 1, Snippet: "first", Fingerprint: supplied},
-		{Gate: "lint", RuleID: "lint/second", File: "file.go", Line: 2, Snippet: "second", Fingerprint: supplied},
-	})
-	if len(grouped) != 1 {
-		t.Fatalf("len(Group()) with a supplied fingerprint = %d, want 1", len(grouped))
+func TestValidateRejectsInvalidFindings(t *testing.T) {
+	valid := Finding{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Warning, File: "file.go", Line: 1, EndLine: 2, Snippet: "snippet", Message: "message", Occurrences: []Occurrence{{Line: 3, EndLine: 4}}}
+	if err := Validate(valid); err != nil {
+		t.Fatalf("Validate(valid) error = %v", err)
 	}
-	if got := grouped[0].Fingerprint; got != supplied {
-		t.Fatalf("supplied fingerprint = %q, want %q", got, supplied)
+	withCanonicalFingerprint := valid
+	withCanonicalFingerprint.Fingerprint = Fingerprint(valid)
+	if err := Validate(withCanonicalFingerprint); err != nil {
+		t.Fatalf("Validate(finding with canonical fingerprint) error = %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*Finding)
+	}{
+		{"gate", func(f *Finding) { f.Gate = "" }},
+		{"language", func(f *Finding) { f.Language = "" }},
+		{"rule ID", func(f *Finding) { f.RuleID = "" }},
+		{"severity", func(f *Finding) { f.Severity = Severity("notice") }},
+		{"file", func(f *Finding) { f.File = "" }},
+		{"line", func(f *Finding) { f.Line = 0 }},
+		{"end line", func(f *Finding) { f.Line, f.EndLine = 2, 1 }},
+		{"snippet", func(f *Finding) { f.Snippet = "" }},
+		{"message", func(f *Finding) { f.Message = "" }},
+		{"occurrence line", func(f *Finding) { f.Occurrences[0].Line = 0 }},
+		{"occurrence end line", func(f *Finding) { f.Occurrences[0].EndLine = f.Occurrences[0].Line - 1 }},
+		{"stale fingerprint", func(f *Finding) { f.Fingerprint = "stale" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := cloneFinding(valid)
+			test.mutate(&invalid)
+			if err := Validate(invalid); err == nil {
+				t.Fatal("Validate() error = nil, want error")
+			}
+		})
+	}
+}
+
+func TestGroupReturnsValidationError(t *testing.T) {
+	valid := Finding{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Warning, File: "file.go", Line: 1, Snippet: "snippet", Message: "message"}
+	invalid := valid
+	invalid.Fingerprint = "stale"
+
+	grouped, err := Group([]Finding{valid, invalid})
+	if err == nil {
+		t.Fatal("Group() error = nil, want validation error")
+	}
+	if grouped != nil {
+		t.Fatalf("Group() findings = %#v, want nil", grouped)
 	}
 }
 
 func TestGroupUsesEndLineToBreakEqualLineTies(t *testing.T) {
-	grouped := Group([]Finding{
-		{Gate: "lint", RuleID: "lint/rule", File: "file.go", Line: 11, EndLine: 19, Snippet: "same", Message: "longer"},
-		{Gate: "lint", RuleID: "lint/rule", File: "file.go", Line: 11, EndLine: 13, Snippet: "same", Message: "shorter"},
+	grouped := mustGroup(t, []Finding{
+		{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Warning, File: "file.go", Line: 11, EndLine: 19, Snippet: "same", Message: "longer"},
+		{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Warning, File: "file.go", Line: 11, EndLine: 13, Snippet: "same", Message: "shorter"},
 	})
 	if len(grouped) != 1 {
 		t.Fatalf("len(Group()) = %d, want 1", len(grouped))
@@ -182,14 +222,14 @@ func TestGroupUsesEndLineToBreakEqualLineTies(t *testing.T) {
 
 func TestGroupSortsByLocationThenIdentity(t *testing.T) {
 	findings := []Finding{
-		{Gate: "z", RuleID: "z/rule", File: "b.go", Line: 1, Snippet: "z"},
-		{Gate: "a", RuleID: "a/two", File: "a.go", Line: 2, Snippet: "a"},
-		{Gate: "b", RuleID: "b/rule", File: "a.go", Line: 2, Snippet: "b"},
-		{Gate: "a", RuleID: "a/one", File: "a.go", Line: 2, Snippet: "one"},
-		{Gate: "a", RuleID: "a/rule", File: "a.go", Line: 1, Snippet: "a"},
+		{Gate: "z", Language: "go", RuleID: "z/rule", Severity: Warning, File: "b.go", Line: 1, Snippet: "z", Message: "message"},
+		{Gate: "a", Language: "go", RuleID: "a/two", Severity: Warning, File: "a.go", Line: 2, Snippet: "a", Message: "message"},
+		{Gate: "b", Language: "go", RuleID: "b/rule", Severity: Warning, File: "a.go", Line: 2, Snippet: "b", Message: "message"},
+		{Gate: "a", Language: "go", RuleID: "a/one", Severity: Warning, File: "a.go", Line: 2, Snippet: "one", Message: "message"},
+		{Gate: "a", Language: "go", RuleID: "a/rule", Severity: Warning, File: "a.go", Line: 1, Snippet: "a", Message: "message"},
 	}
 
-	got := Group(findings)
+	got := mustGroup(t, findings)
 	if len(got) != len(findings) {
 		t.Fatalf("len(Group()) = %d, want %d", len(got), len(findings))
 	}
@@ -204,11 +244,11 @@ func TestGroupSortsByLocationThenIdentity(t *testing.T) {
 
 func TestGroupSortsEqualLocationAndIdentityByFingerprint(t *testing.T) {
 	findings := []Finding{
-		{Gate: "lint", RuleID: "lint/rule", File: "file.go", Line: 4, Snippet: "first"},
-		{Gate: "lint", RuleID: "lint/rule", File: "file.go", Line: 4, Snippet: "second"},
+		{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Warning, File: "file.go", Line: 4, Snippet: "first", Message: "message"},
+		{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Warning, File: "file.go", Line: 4, Snippet: "second", Message: "message"},
 	}
 
-	grouped := Group(findings)
+	grouped := mustGroup(t, findings)
 	if len(grouped) != 2 {
 		t.Fatalf("len(Group()) = %d, want 2", len(grouped))
 	}
@@ -223,18 +263,29 @@ func TestGroupSortsEqualLocationAndIdentityByFingerprint(t *testing.T) {
 	}
 }
 
+func TestGroupIsDeterministicForEqualLocations(t *testing.T) {
+	first := Finding{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Warning, File: "file.go", Line: 4, Snippet: "same   snippet", Message: "z message"}
+	second := Finding{Gate: "lint", Language: "rust", RuleID: "lint/rule", Severity: Error, File: "file.go", Line: 4, Snippet: "same snippet", Message: "a message"}
+
+	forward := mustGroup(t, []Finding{first, second})
+	reverse := mustGroup(t, []Finding{second, first})
+	if !reflect.DeepEqual(forward, reverse) {
+		t.Fatalf("Group() depends on input order: forward %#v, reverse %#v", forward, reverse)
+	}
+}
+
 func TestGroupDoesNotMutateInputAndIsIdempotent(t *testing.T) {
 	findings := []Finding{
-		{Gate: "lint", RuleID: "lint/rule", File: "a\\file.go", Line: 10, Snippet: "same", Occurrences: []Occurrence{{Line: 20}}},
-		{Gate: "lint", RuleID: "lint/rule", File: "a/file.go", Line: 5, Snippet: "same", Occurrences: []Occurrence{{Line: 10}}},
+		{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Warning, File: "a/file.go", Line: 10, Snippet: "same", Message: "message", Occurrences: []Occurrence{{Line: 20}}},
+		{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Warning, File: "a/file.go", Line: 5, Snippet: "same", Message: "message", Occurrences: []Occurrence{{Line: 10}}},
 	}
 	wantInput := cloneFindings(findings)
 
-	first := Group(findings)
+	first := mustGroup(t, findings)
 	if !reflect.DeepEqual(findings, wantInput) {
 		t.Fatalf("Group() mutated input: got %#v, want %#v", findings, wantInput)
 	}
-	second := Group(first)
+	second := mustGroup(t, first)
 	if !reflect.DeepEqual(second, first) {
 		t.Fatalf("Group(Group(findings)) = %#v, want %#v", second, first)
 	}
@@ -298,13 +349,22 @@ func TestFindingJSONSchemaAndSeverityRoundTrip(t *testing.T) {
 
 func expectedFingerprint(f Finding) string {
 	hash := sha256.New()
-	for _, field := range []string{f.Gate, f.RuleID, strings.ReplaceAll(f.File, "\\", "/"), strings.Join(strings.Fields(f.Snippet), " ")} {
+	for _, field := range []string{f.Gate, f.RuleID, filepath.ToSlash(filepath.Clean(f.File)), strings.Join(strings.Fields(f.Snippet), " ")} {
 		var length [8]byte
 		binary.BigEndian.PutUint64(length[:], uint64(len(field)))
 		_, _ = hash.Write(length[:])
 		_, _ = hash.Write([]byte(field))
 	}
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func mustGroup(t *testing.T, findings []Finding) []Finding {
+	t.Helper()
+	grouped, err := Group(findings)
+	if err != nil {
+		t.Fatalf("Group() error = %v", err)
+	}
+	return grouped
 }
 
 func cloneFinding(f Finding) Finding {

@@ -1,16 +1,20 @@
 package finding
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+)
 
 // Group combines findings with the same fingerprint and orders them for reports.
-func Group(findings []Finding) []Finding {
+func Group(findings []Finding) ([]Finding, error) {
 	groups := make(map[string][]Finding, len(findings))
-	for _, finding := range findings {
+	for index, finding := range findings {
+		if err := Validate(finding); err != nil {
+			return nil, fmt.Errorf("finding %d: %w", index, err)
+		}
 		copied := clone(finding)
 		copied.File = normalizeFile(copied.File)
-		if copied.Fingerprint == "" {
-			copied.Fingerprint = Fingerprint(copied)
-		}
+		copied.Fingerprint = Fingerprint(copied)
 		groups[copied.Fingerprint] = append(groups[copied.Fingerprint], copied)
 	}
 
@@ -21,7 +25,7 @@ func Group(findings []Finding) []Finding {
 	sort.Slice(grouped, func(left, right int) bool {
 		return lessFinding(grouped[left], grouped[right])
 	})
-	return grouped
+	return grouped, nil
 }
 
 func clone(finding Finding) Finding {
@@ -35,6 +39,10 @@ type locatedFinding struct {
 }
 
 func combine(findings []Finding) Finding {
+	sort.Slice(findings, func(left, right int) bool {
+		return lessMetadata(findings[left], findings[right])
+	})
+
 	locations := make([]locatedFinding, 0)
 	seen := make(map[Occurrence]struct{})
 	for findingIndex, finding := range findings {
@@ -56,6 +64,22 @@ func combine(findings []Finding) Finding {
 		combined.Occurrences = append(combined.Occurrences, located.location)
 	}
 	return combined
+}
+
+func lessMetadata(left, right Finding) bool {
+	if left.Language != right.Language {
+		return left.Language < right.Language
+	}
+	if left.Severity != right.Severity {
+		return left.Severity < right.Severity
+	}
+	if left.Snippet != right.Snippet {
+		return left.Snippet < right.Snippet
+	}
+	if left.Message != right.Message {
+		return left.Message < right.Message
+	}
+	return false
 }
 
 func appendLocation(locations []locatedFinding, seen map[Occurrence]struct{}, findingIndex int, location Occurrence) []locatedFinding {
