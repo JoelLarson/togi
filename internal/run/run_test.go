@@ -211,7 +211,25 @@ func TestReportOnlyRunIsStableAndKeepsErroredGateSeparate(t *testing.T) {
 	if !reflect.DeepEqual(baselineTree, firstTree) {
 		t.Fatalf("first run changed target tree:\n%v\n%v", baselineTree, firstTree)
 	}
-	for _, dir := range []string{firstDir, secondDir} {
+	assertPersistedFixtureRuns(t, firstDir, secondDir)
+
+	writeFixtureGate(t, paths.GateOverrides(), "lint", "", true)
+	broken, _, _, _ := runFixtureService(t, root, paths)
+	if broken.Verdict != VerdictErrored {
+		t.Fatalf("verdict = %s", broken.Verdict)
+	}
+	if gateByName(t, broken, "lint").Status != GateErrored {
+		t.Fatal("lint did not error")
+	}
+	complexity := gateByName(t, broken, "complexity")
+	if complexity.Status != GateFindings || len(complexity.Findings) == 0 {
+		t.Fatal("healthy complexity findings lost")
+	}
+}
+
+func assertPersistedFixtureRuns(t *testing.T, directories ...string) {
+	t.Helper()
+	for _, dir := range directories {
 		data, err := os.ReadFile(filepath.Join(dir, "report.json"))
 		if err != nil {
 			t.Fatal(err)
@@ -228,19 +246,6 @@ func TestReportOnlyRunIsStableAndKeepsErroredGateSeparate(t *testing.T) {
 				t.Fatalf("raw %s: %v", name, err)
 			}
 		}
-	}
-
-	writeFixtureGate(t, paths.GateOverrides(), "lint", "", true)
-	broken, _, _, _ := runFixtureService(t, root, paths)
-	if broken.Verdict != VerdictErrored {
-		t.Fatalf("verdict = %s", broken.Verdict)
-	}
-	if gateByName(t, broken, "lint").Status != GateErrored {
-		t.Fatal("lint did not error")
-	}
-	complexity := gateByName(t, broken, "complexity")
-	if complexity.Status != GateFindings || len(complexity.Findings) == 0 {
-		t.Fatal("healthy complexity findings lost")
 	}
 }
 

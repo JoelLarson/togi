@@ -168,7 +168,7 @@ func (s *sourceSession) readLine(reportedFile string, line int) (string, string,
 	if err != nil {
 		return "", "", fmt.Errorf("source file cannot be opened; %s", rawOutputGuidance)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	snippet, err := lineFromReader(file, line)
 	if err != nil {
 		if errors.Is(err, errInvalidUTF8) {
@@ -197,11 +197,11 @@ func openRegularSource(root *os.Root, path string) (*os.File, error) {
 	}
 	after, err := file.Stat()
 	if err != nil {
-		file.Close()
+		_ = file.Close()
 		return nil, err
 	}
 	if !after.Mode().IsRegular() {
-		file.Close()
+		_ = file.Close()
 		return nil, errors.New("source changed to a non-regular file")
 	}
 	return file, nil

@@ -21,6 +21,21 @@ func Render(output io.Writer, report Report, opts RenderOptions) error {
 	if output == nil {
 		return fmt.Errorf("report output is required")
 	}
+	if err := renderFindings(output, report, opts); err != nil {
+		return err
+	}
+	if err := renderGates(output, report.Gates); err != nil {
+		return err
+	}
+	verdict := string(report.Verdict)
+	if opts.Color && !opts.NoColor {
+		verdict = colorVerdict(report.Verdict, verdict)
+	}
+	_, err := fmt.Fprintf(output, "verdict: %s\n", verdict)
+	return err
+}
+
+func renderFindings(output io.Writer, report Report, opts RenderOptions) error {
 	items := append([]finding.Finding(nil), report.Findings...)
 	slices.SortFunc(items, compareFindings)
 	for _, item := range items {
@@ -56,7 +71,11 @@ func Render(output io.Writer, report Report, opts RenderOptions) error {
 	if _, err := fmt.Fprintf(output, "%d findings (%d %s, %d %s, %d info)\n", report.Counts.Occurrences, report.Counts.Errors, plural(report.Counts.Errors, "error"), report.Counts.Warnings, plural(report.Counts.Warnings, "warning"), report.Counts.Info); err != nil {
 		return err
 	}
-	gates := append([]GateReport(nil), report.Gates...)
+	return nil
+}
+
+func renderGates(output io.Writer, reports []GateReport) error {
+	gates := append([]GateReport(nil), reports...)
 	slices.SortFunc(gates, func(left, right GateReport) int {
 		if left.Gate != right.Gate {
 			return strings.Compare(left.Gate, right.Gate)
@@ -89,12 +108,7 @@ func Render(output io.Writer, report Report, opts RenderOptions) error {
 			}
 		}
 	}
-	verdict := string(report.Verdict)
-	if opts.Color && !opts.NoColor {
-		verdict = colorVerdict(report.Verdict, verdict)
-	}
-	_, err := fmt.Fprintf(output, "verdict: %s\n", verdict)
-	return err
+	return nil
 }
 
 func safeText(value string) string {
@@ -131,9 +145,10 @@ func compareFindings(left, right finding.Finding) int {
 
 func colorSeverity(severity finding.Severity, text string) string {
 	code := "36"
-	if severity == finding.Error {
+	switch severity {
+	case finding.Error:
 		code = "31"
-	} else if severity == finding.Warning {
+	case finding.Warning:
 		code = "33"
 	}
 	return "\x1b[" + code + "m" + text + "\x1b[0m"

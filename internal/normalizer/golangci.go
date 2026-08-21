@@ -59,7 +59,7 @@ func normalizeGolangCI(ctx Context, raw []byte) ([]finding.Finding, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer sources.close()
+	defer func() { _ = sources.close() }()
 
 	results := make([]finding.Finding, 0, len(*envelope.Issues))
 	for index, issue := range *envelope.Issues {

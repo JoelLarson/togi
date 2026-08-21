@@ -90,32 +90,39 @@ func acquireStateLock(root *os.Root, now time.Time) (*stateLock, error) {
 	if err := validateOpenedLock(root, name, file); err != nil {
 		return nil, cleanup(err)
 	}
-	if err := file.Chmod(0o600); err != nil {
-		return nil, cleanup(fmt.Errorf("tighten lock permissions: %w", err))
-	}
-	lockInfo, err := file.Stat()
-	if err != nil {
-		return nil, cleanup(fmt.Errorf("inspect lock permissions: %w", err))
-	}
-	if !privateFileMode(lockInfo.Mode()) {
-		return nil, cleanup(fmt.Errorf("lock permissions are %04o, want 0600", lockInfo.Mode().Perm()))
-	}
-	if err := file.Truncate(0); err != nil {
-		return nil, cleanup(fmt.Errorf("truncate lock record: %w", err))
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, cleanup(fmt.Errorf("seek lock record: %w", err))
-	}
-	if err := json.NewEncoder(file).Encode(record); err != nil {
-		return nil, cleanup(fmt.Errorf("encode lock record: %w", err))
-	}
-	if err := file.Sync(); err != nil {
-		return nil, cleanup(fmt.Errorf("sync lock record: %w", err))
-	}
-	if err := validateOpenedLock(root, name, file); err != nil {
+	if err := secureAndWriteLock(root, name, file, record); err != nil {
 		return nil, cleanup(err)
 	}
 	return lock, nil
+}
+
+func secureAndWriteLock(root *os.Root, name string, file *os.File, record lockRecord) error {
+	if err := file.Chmod(0o600); err != nil {
+		return fmt.Errorf("tighten lock permissions: %w", err)
+	}
+	lockInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect lock permissions: %w", err)
+	}
+	if !privateFileMode(lockInfo.Mode()) {
+		return fmt.Errorf("lock permissions are %04o, want 0600", lockInfo.Mode().Perm())
+	}
+	if err := file.Truncate(0); err != nil {
+		return fmt.Errorf("truncate lock record: %w", err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek lock record: %w", err)
+	}
+	if err := json.NewEncoder(file).Encode(record); err != nil {
+		return fmt.Errorf("encode lock record: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync lock record: %w", err)
+	}
+	if err := validateOpenedLock(root, name, file); err != nil {
+		return err
+	}
+	return nil
 }
 
 func processLockIdentity(root *os.Root, name string) (string, os.FileInfo, error) {

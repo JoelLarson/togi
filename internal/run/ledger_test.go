@@ -374,7 +374,7 @@ func TestAdvisoryLockRemainsAnchoredAfterRepoStateReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer repoRoot.Close()
+	defer func() { _ = repoRoot.Close() }()
 	movedState := filepath.Join(root, "moved-state")
 	if err := os.Rename(repoState, movedState); err != nil {
 		t.Fatal(err)
@@ -427,7 +427,7 @@ func TestEnsureRunsDirectoryRemainsAnchoredAfterRepoStateReplacement(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer repoRoot.Close()
+	defer func() { _ = repoRoot.Close() }()
 
 	movedState := filepath.Join(root, "moved-state")
 	if err := os.Rename(repoState, movedState); err != nil {
@@ -681,6 +681,28 @@ func TestLedgerPrunesBeforeCreatingRun(t *testing.T) {
 	if err := os.Mkdir(runsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	existing := createPrunableRuns(t, runsDir)
+	unexpected := filepath.Join(runsDir, "operator-notes")
+	if err := os.Mkdir(unexpected, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(repoState, "must-not-remove")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkedRun := createRunSymlink(t, runsDir, target)
+
+	ledger := Ledger{RepoState: repoState, Keep: 0, Now: func() time.Time { return fixedTime }, Random: bytes.NewReader([]byte{0xa3, 0xf1})}
+	run, err := ledger.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.Close() })
+	assertPrunedRuns(t, runsDir, existing, unexpected, linkedRun, target)
+}
+
+func createPrunableRuns(t *testing.T, runsDir string) []string {
+	t.Helper()
 	var existing []string
 	for index := range 25 {
 		id := fmt.Sprintf("20260821T14%02d00.000000000Z-%04x", index, index)
@@ -695,14 +717,11 @@ func TestLedgerPrunesBeforeCreatingRun(t *testing.T) {
 			}
 		}
 	}
-	unexpected := filepath.Join(runsDir, "operator-notes")
-	if err := os.Mkdir(unexpected, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	target := filepath.Join(repoState, "must-not-remove")
-	if err := os.Mkdir(target, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	return existing
+}
+
+func createRunSymlink(t *testing.T, runsDir, target string) string {
+	t.Helper()
 	linkedRun := ""
 	if runtime.GOOS != "windows" {
 		linkedRun = filepath.Join(runsDir, "20260821T130000.000000000Z-dead")
@@ -711,19 +730,11 @@ func TestLedgerPrunesBeforeCreatingRun(t *testing.T) {
 			linkedRun = ""
 		}
 	}
+	return linkedRun
+}
 
-	ledger := Ledger{
-		RepoState: repoState,
-		Keep:      0,
-		Now:       func() time.Time { return fixedTime },
-		Random:    bytes.NewReader([]byte{0xa3, 0xf1}),
-	}
-	run, err := ledger.Start()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = run.Close() })
-
+func assertPrunedRuns(t *testing.T, runsDir string, existing []string, unexpected, linkedRun, target string) {
+	t.Helper()
 	for _, id := range existing[:6] {
 		if _, err := os.Stat(filepath.Join(runsDir, id)); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("old run %s remains: %v", id, err)
@@ -761,7 +772,7 @@ func TestPruneRemainsAnchoredAfterRunsDirectoryReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runsRoot.Close()
+	defer func() { _ = runsRoot.Close() }()
 	originalPath := filepath.Join(root, "original-runs")
 	if err := os.Rename(runsPath, originalPath); err != nil {
 		t.Fatal(err)
@@ -1178,7 +1189,7 @@ func TestLatestReadRemainsAnchoredAfterRunsDirectoryReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runsRoot.Close()
+	defer func() { _ = runsRoot.Close() }()
 	originalPath := filepath.Join(root, "original-runs")
 	if err := os.Rename(runsPath, originalPath); err != nil {
 		t.Fatal(err)
@@ -1348,7 +1359,7 @@ func TestPublishNoReplaceAllowsExactlyOneConcurrentWinner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	first := []byte("first complete report\n")
 	second := []byte("second complete report\n")
 	if err := root.WriteFile("first.tmp", first, 0o600); err != nil {
@@ -1487,7 +1498,7 @@ func TestWriteReportRejectsTamperedCompleteReports(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer run.Close()
+			defer func() { _ = run.Close() }()
 			report := completeReportFixture(filepath.Base(run.Dir))
 			test.tamper(&report)
 			if err := run.WriteReport(report); err == nil {

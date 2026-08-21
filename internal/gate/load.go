@@ -204,7 +204,7 @@ func decodeStrictFile(fsys fs.FS, filename string, destination any) error {
 	if err != nil {
 		return fmt.Errorf("%s: open: %w", filename, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	decoder := toml.NewDecoder(file).DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
@@ -283,27 +283,64 @@ func (wire manifestWire) toManifest(requestedName string) (Manifest, error) {
 }
 
 func (wire bindingWire) toBinding(directoryLanguage string) (Binding, error) {
+	if err := wire.validateIdentityAndCommand(directoryLanguage); err != nil {
+		return Binding{}, err
+	}
+	successExitCodes, findingExitCodes, err := wire.exitCodes()
+	if err != nil {
+		return Binding{}, err
+	}
+	if err := wire.validateNormalizer(); err != nil {
+		return Binding{}, err
+	}
+	severityMap, err := wire.normalizedSeverities()
+	if err != nil {
+		return Binding{}, err
+	}
+	version, err := wire.normalizedVersion()
+	if err != nil {
+		return Binding{}, err
+	}
+	for ruleID, page := range wire.Aliases {
+		if strings.TrimSpace(ruleID) == "" || strings.TrimSpace(page) == "" {
+			return Binding{}, fmt.Errorf("alias rule ID and principle page are required")
+		}
+	}
+
+	return Binding{
+		Language: wire.Language, Tool: wire.Tool, Command: append([]string(nil), wire.Command...),
+		SuccessExitCodes: append([]int(nil), successExitCodes...), FindingExitCodes: append([]int(nil), findingExitCodes...),
+		Normalizer: wire.Normalizer, RuleID: wire.RuleID, Message: wire.Message, Settings: wire.Settings,
+		SeverityMap: severityMap, Version: version, Aliases: wire.Aliases,
+	}, nil
+}
+
+func (wire bindingWire) validateIdentityAndCommand(directoryLanguage string) error {
 	if strings.TrimSpace(wire.Language) == "" {
-		return Binding{}, fmt.Errorf("binding language is required")
+		return fmt.Errorf("binding language is required")
 	}
 	if wire.Language != directoryLanguage {
-		return Binding{}, fmt.Errorf("binding language %q does not match directory %q", wire.Language, directoryLanguage)
+		return fmt.Errorf("binding language %q does not match directory %q", wire.Language, directoryLanguage)
 	}
 	if strings.TrimSpace(wire.Tool) == "" {
-		return Binding{}, fmt.Errorf("binding tool is required")
+		return fmt.Errorf("binding tool is required")
 	}
 	if len(wire.Command) == 0 {
-		return Binding{}, fmt.Errorf("binding command is required")
+		return fmt.Errorf("binding command is required")
 	}
 	for index, argument := range wire.Command {
 		if argument == "" {
-			return Binding{}, fmt.Errorf("binding command argument %d is empty", index)
+			return fmt.Errorf("binding command argument %d is empty", index)
 		}
 	}
+	return nil
+}
+
+func (wire bindingWire) exitCodes() ([]int, []int, error) {
 	successExitCodes := []int{0}
 	if wire.SuccessExitCodes != nil {
 		if len(*wire.SuccessExitCodes) == 0 {
-			return Binding{}, fmt.Errorf("success exit codes cannot be explicitly empty")
+			return nil, nil, fmt.Errorf("success exit codes cannot be explicitly empty")
 		}
 		successExitCodes = *wire.SuccessExitCodes
 	}
@@ -313,50 +350,60 @@ func (wire bindingWire) toBinding(directoryLanguage string) (Binding, error) {
 	}
 	seenExits, err := validateExitCodes("success", successExitCodes)
 	if err != nil {
-		return Binding{}, err
+		return nil, nil, err
 	}
 	if _, err := validateExitCodes("finding", findingExitCodes); err != nil {
-		return Binding{}, err
+		return nil, nil, err
 	}
 	for _, exitCode := range findingExitCodes {
 		if _, exists := seenExits[exitCode]; exists {
-			return Binding{}, fmt.Errorf("exit code %d cannot be both success and finding", exitCode)
+			return nil, nil, fmt.Errorf("exit code %d cannot be both success and finding", exitCode)
 		}
 	}
+	return successExitCodes, findingExitCodes, nil
+}
+
+func (wire bindingWire) validateNormalizer() error {
 	if strings.TrimSpace(wire.Normalizer) == "" {
-		return Binding{}, fmt.Errorf("binding normalizer is required")
+		return fmt.Errorf("binding normalizer is required")
 	}
 	if strings.HasPrefix(wire.Normalizer, "regex:") {
 		pattern := strings.TrimPrefix(wire.Normalizer, "regex:")
 		if pattern == "" {
-			return Binding{}, fmt.Errorf("regex normalizer pattern is required")
+			return fmt.Errorf("regex normalizer pattern is required")
 		}
 		if _, err := regexp.Compile(pattern); err != nil {
-			return Binding{}, fmt.Errorf("invalid regex normalizer: %w", err)
+			return fmt.Errorf("invalid regex normalizer: %w", err)
 		}
 		if strings.TrimSpace(wire.RuleID) == "" {
-			return Binding{}, fmt.Errorf("regex normalizer rule ID is required")
+			return fmt.Errorf("regex normalizer rule ID is required")
 		}
 		if strings.TrimSpace(wire.Message) == "" {
-			return Binding{}, fmt.Errorf("regex normalizer message is required")
+			return fmt.Errorf("regex normalizer message is required")
 		}
 	}
+	return nil
+}
 
+func (wire bindingWire) normalizedSeverities() (map[string]finding.Severity, error) {
 	if len(wire.SeverityMap) == 0 {
-		return Binding{}, fmt.Errorf("severity map is required")
+		return nil, fmt.Errorf("severity map is required")
 	}
 	severityMap := make(map[string]finding.Severity, len(wire.SeverityMap))
 	for source, value := range wire.SeverityMap {
 		if strings.TrimSpace(source) == "" {
-			return Binding{}, fmt.Errorf("severity map source is required")
+			return nil, fmt.Errorf("severity map source is required")
 		}
 		severity, err := canonicalSeverity(value)
 		if err != nil {
-			return Binding{}, fmt.Errorf("severity map entry %q: %w", source, err)
+			return nil, fmt.Errorf("severity map entry %q: %w", source, err)
 		}
 		severityMap[source] = severity
 	}
+	return severityMap, nil
+}
 
+func (wire bindingWire) normalizedVersion() (Version, error) {
 	version := Version{}
 	if wire.Version != nil {
 		version = Version{
@@ -365,29 +412,10 @@ func (wire bindingWire) toBinding(directoryLanguage string) (Binding, error) {
 			Constraint: wire.Version.Constraint,
 		}
 		if err := validateVersion(version); err != nil {
-			return Binding{}, err
+			return Version{}, err
 		}
 	}
-	for ruleID, page := range wire.Aliases {
-		if strings.TrimSpace(ruleID) == "" || strings.TrimSpace(page) == "" {
-			return Binding{}, fmt.Errorf("alias rule ID and principle page are required")
-		}
-	}
-
-	return Binding{
-		Language:         wire.Language,
-		Tool:             wire.Tool,
-		Command:          append([]string(nil), wire.Command...),
-		SuccessExitCodes: append([]int(nil), successExitCodes...),
-		FindingExitCodes: append([]int(nil), findingExitCodes...),
-		Normalizer:       wire.Normalizer,
-		RuleID:           wire.RuleID,
-		Message:          wire.Message,
-		Settings:         wire.Settings,
-		SeverityMap:      severityMap,
-		Version:          version,
-		Aliases:          wire.Aliases,
-	}, nil
+	return version, nil
 }
 
 func canonicalSeverity(value string) (finding.Severity, error) {

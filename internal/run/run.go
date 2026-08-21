@@ -53,34 +53,7 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 	if ctx == nil {
 		return Report{}, errors.New("run context is required")
 	}
-	root := opts.Root
-	if root == "" {
-		root = "."
-	}
-	resolve := service.ResolveRepo
-	if resolve == nil {
-		resolve = repoid.Resolve
-	}
-	repository, err := resolve(ctx, root)
-	if err != nil {
-		return Report{}, fmt.Errorf("resolve repository identity: %w", err)
-	}
-	if err := validateRepositoryID(repository); err != nil {
-		return Report{}, fmt.Errorf("validate repository identity: %w", err)
-	}
-	repoState := service.Paths.RepoState(repository.Directory)
-	if err := validateExternalRepoState(repository.Root, repoState); err != nil {
-		return Report{}, err
-	}
-	loader := service.Loader
-	if loader.OverrideDir == "" {
-		loader.OverrideDir = service.Paths.GateOverrides()
-	}
-	loaded, err := loader.LoadAll()
-	if err != nil {
-		return Report{}, fmt.Errorf("load gates: %w", err)
-	}
-	requests, err := selectRequests(loaded, opts.GateNames, repository.Root)
+	repository, repoState, requests, err := service.prepareRun(ctx, opts)
 	if err != nil {
 		return Report{}, err
 	}
@@ -104,43 +77,14 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 	for index := range requests {
 		requests[index].RawStore = active
 	}
-	if opts.Verbose {
-		destination := service.VerboseOut
-		if destination == nil {
-			destination = service.Stdout
-		}
-		for _, request := range requests {
-			if destination != nil {
-				if _, writeErr := fmt.Fprintf(destination, "running %s: %q\n", request.Gate.Manifest.Name, request.Binding.Command); writeErr != nil {
-					return Report{}, fmt.Errorf("write verbose output: %w", writeErr)
-				}
-			}
-		}
+	if err := service.writeVerbose(opts.Verbose, requests); err != nil {
+		return Report{}, err
 	}
 	gateReports := Collect(ctx, service.Executor, requests, min(runtime.NumCPU(), defaultMaximumWorkers))
-	findings := make([]finding.Finding, 0)
-	for _, gateReport := range gateReports {
-		findings = append(findings, gateReport.Findings...)
-	}
-	grouped, err := finding.Group(findings)
+	report, err = buildReport(active.runID, repository.Key, startedAt, now().UTC(), gateReports)
 	if err != nil {
-		return Report{}, fmt.Errorf("group collected findings: %w", err)
+		return Report{}, err
 	}
-	slices.SortFunc(gateReports, compareGateReports)
-	report = Report{
-		SchemaVersion: 1,
-		RunID:         active.runID,
-		RepoID:        repository.Key,
-		StartedAt:     startedAt,
-		FinishedAt:    now().UTC(),
-		Gates:         gateReports,
-		Findings:      grouped,
-	}
-	if report.FinishedAt.Before(report.StartedAt) {
-		report.FinishedAt = report.StartedAt
-	}
-	report.Counts = countFindings(grouped)
-	report.Verdict = verdictFor(gateReports, grouped)
 	if err := active.WriteReport(report); err != nil {
 		return report, fmt.Errorf("write report: %w", err)
 	}
@@ -157,6 +101,83 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 		return report, fmt.Errorf("render report: %w", err)
 	}
 	return report, &ExitError{Code: ExitCode(report.Verdict), Err: verdictError(report.Verdict)}
+}
+
+func (service Service) writeVerbose(enabled bool, requests []Request) error {
+	if !enabled {
+		return nil
+	}
+	destination := service.VerboseOut
+	if destination == nil {
+		destination = service.Stdout
+	}
+	for _, request := range requests {
+		if destination != nil {
+			if _, err := fmt.Fprintf(destination, "running %s: %q\n", request.Gate.Manifest.Name, request.Binding.Command); err != nil {
+				return fmt.Errorf("write verbose output: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+func buildReport(runID, repoID string, startedAt, finishedAt time.Time, gateReports []GateReport) (Report, error) {
+	findings := make([]finding.Finding, 0)
+	for _, gateReport := range gateReports {
+		findings = append(findings, gateReport.Findings...)
+	}
+	grouped, err := finding.Group(findings)
+	if err != nil {
+		return Report{}, fmt.Errorf("group collected findings: %w", err)
+	}
+	slices.SortFunc(gateReports, compareGateReports)
+	report := Report{
+		SchemaVersion: 1,
+		RunID:         runID,
+		RepoID:        repoID,
+		StartedAt:     startedAt,
+		FinishedAt:    finishedAt,
+		Gates:         gateReports,
+		Findings:      grouped,
+	}
+	if report.FinishedAt.Before(report.StartedAt) {
+		report.FinishedAt = report.StartedAt
+	}
+	report.Counts = countFindings(grouped)
+	report.Verdict = verdictFor(gateReports, grouped)
+	return report, nil
+}
+
+func (service Service) prepareRun(ctx context.Context, opts Options) (repoid.ID, string, []Request, error) {
+	root := opts.Root
+	if root == "" {
+		root = "."
+	}
+	resolve := service.ResolveRepo
+	if resolve == nil {
+		resolve = repoid.Resolve
+	}
+	repository, err := resolve(ctx, root)
+	if err != nil {
+		return repoid.ID{}, "", nil, fmt.Errorf("resolve repository identity: %w", err)
+	}
+	if err := validateRepositoryID(repository); err != nil {
+		return repoid.ID{}, "", nil, fmt.Errorf("validate repository identity: %w", err)
+	}
+	repoState := service.Paths.RepoState(repository.Directory)
+	if err := validateExternalRepoState(repository.Root, repoState); err != nil {
+		return repoid.ID{}, "", nil, err
+	}
+	loader := service.Loader
+	if loader.OverrideDir == "" {
+		loader.OverrideDir = service.Paths.GateOverrides()
+	}
+	loaded, err := loader.LoadAll()
+	if err != nil {
+		return repoid.ID{}, "", nil, fmt.Errorf("load gates: %w", err)
+	}
+	requests, err := selectRequests(loaded, opts.GateNames, repository.Root)
+	return repository, repoState, requests, err
 }
 
 // Status renders the newest complete report without loading or executing gates.
@@ -315,12 +336,16 @@ func safeRepositoryDirectory(directory string) bool {
 		return false
 	}
 	for _, character := range directory {
-		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.' {
-			continue
+		if !safeRepositoryCharacter(character) {
+			return false
 		}
-		return false
 	}
 	return true
+}
+
+func safeRepositoryCharacter(character rune) bool {
+	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+		character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.'
 }
 
 func (service Service) checkPlatform() error {

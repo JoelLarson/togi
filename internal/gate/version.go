@@ -153,27 +153,31 @@ func compareSemanticVersions(left, right semanticVersion) int {
 		return -1
 	}
 	for index := 0; index < len(left.prerelease) && index < len(right.prerelease); index++ {
-		leftIdentifier := left.prerelease[index]
-		rightIdentifier := right.prerelease[index]
-		switch {
-		case leftIdentifier.numeric && rightIdentifier.numeric:
-			if comparison := compareNumericIdentifiers(leftIdentifier.value, rightIdentifier.value); comparison != 0 {
-				return comparison
-			}
-		case leftIdentifier.numeric:
-			return -1
-		case rightIdentifier.numeric:
-			return 1
-		case leftIdentifier.value < rightIdentifier.value:
-			return -1
-		case leftIdentifier.value > rightIdentifier.value:
-			return 1
+		if comparison := comparePrereleaseIdentifier(left.prerelease[index], right.prerelease[index]); comparison != 0 {
+			return comparison
 		}
 	}
 	switch {
 	case len(left.prerelease) < len(right.prerelease):
 		return -1
 	case len(left.prerelease) > len(right.prerelease):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func comparePrereleaseIdentifier(left, right prereleaseIdentifier) int {
+	switch {
+	case left.numeric && right.numeric:
+		return compareNumericIdentifiers(left.value, right.value)
+	case left.numeric:
+		return -1
+	case right.numeric:
+		return 1
+	case left.value < right.value:
+		return -1
+	case left.value > right.value:
 		return 1
 	default:
 		return 0

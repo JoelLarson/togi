@@ -568,10 +568,10 @@ func TestSourceSessionRejectsNonRegularFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer session.close()
+	defer func() { _ = session.close() }()
 	file, err := openRegularSource(session.root, "directory")
 	if err == nil {
-		file.Close()
+		_ = file.Close()
 		t.Fatal("non-regular source opened successfully")
 	}
 }
@@ -602,21 +602,21 @@ func TestSourceSessionStaysAnchoredAndCloses(t *testing.T) {
 		t.Fatalf("first read = (%q, %q)", firstFile, firstSnippet)
 	}
 	if err := os.Rename(rootPath, filepath.Join(parent, "moved-repo")); err != nil {
-		session.close()
+		_ = session.close()
 		t.Skipf("cannot rename an open repository root: %v", err)
 	}
 	if err := os.Symlink(outsidePath, rootPath); err != nil {
-		session.close()
+		_ = session.close()
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
 	secondFile, secondSnippet, err := session.readLine("second.go", 1)
 	if err != nil {
-		session.close()
+		_ = session.close()
 		t.Fatal(err)
 	}
 	if secondFile != "second.go" || secondSnippet != "original second" {
-		session.close()
+		_ = session.close()
 		t.Fatalf("second read = (%q, %q), want retained repository", secondFile, secondSnippet)
 	}
 	if err := session.close(); err != nil {

@@ -465,6 +465,17 @@ func TestDefaultGateDetails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertDefaultLint(t, lint)
+
+	complexity, err := (Loader{}).Load("complexity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDefaultComplexity(t, complexity)
+}
+
+func assertDefaultLint(t *testing.T, lint Gate) {
+	t.Helper()
 	if lint.Manifest.CostClass != Fast || lint.Manifest.FixPolicy != AutofixThenLLM || lint.Manifest.Scope != Diff {
 		t.Fatalf("lint manifest = %#v", lint.Manifest)
 	}
@@ -485,10 +496,10 @@ func TestDefaultGateDetails(t *testing.T) {
 		t.Fatalf("lint version observation = (%q, %v, %v)", observed, matches, err)
 	}
 
-	complexity, err := (Loader{}).Load("complexity")
-	if err != nil {
-		t.Fatal(err)
-	}
+}
+
+func assertDefaultComplexity(t *testing.T, complexity Gate) {
+	t.Helper()
 	if complexity.Manifest.FixPolicy != LLMFix || complexity.Bindings["go"].RuleID != "gocyclo/complexity" {
 		t.Fatalf("complexity = %#v", complexity)
 	}

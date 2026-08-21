@@ -67,6 +67,24 @@ func normalizeSnippet(snippet string) string {
 
 // Validate verifies that a finding can enter the normalized finding boundary.
 func Validate(finding Finding) error {
+	if err := validateIdentity(finding); err != nil {
+		return err
+	}
+	if err := validateLocation(finding.Line, finding.EndLine); err != nil {
+		return err
+	}
+	for index, occurrence := range finding.Occurrences {
+		if err := validateLocation(occurrence.Line, occurrence.EndLine); err != nil {
+			return fmt.Errorf("occurrence %d %w", index, err)
+		}
+	}
+	if finding.Fingerprint != "" && finding.Fingerprint != Fingerprint(finding) {
+		return errors.New("fingerprint does not match finding identity")
+	}
+	return nil
+}
+
+func validateIdentity(finding Finding) error {
 	switch {
 	case strings.TrimSpace(finding.Gate) == "":
 		return errors.New("gate is required")
@@ -80,26 +98,20 @@ func Validate(finding Finding) error {
 		return fmt.Errorf("invalid severity %q", finding.Severity)
 	case finding.File == "":
 		return errors.New("file is required")
-	case finding.Line <= 0:
-		return errors.New("line must be positive")
-	case finding.EndLine != 0 && finding.EndLine < finding.Line:
-		return errors.New("end line precedes line")
 	case strings.TrimSpace(finding.Snippet) == "":
 		return errors.New("snippet is required")
 	case strings.TrimSpace(finding.Message) == "":
 		return errors.New("message is required")
 	}
+	return nil
+}
 
-	for index, occurrence := range finding.Occurrences {
-		if occurrence.Line <= 0 {
-			return fmt.Errorf("occurrence %d line must be positive", index)
-		}
-		if occurrence.EndLine != 0 && occurrence.EndLine < occurrence.Line {
-			return fmt.Errorf("occurrence %d end line precedes line", index)
-		}
+func validateLocation(line, endLine int) error {
+	if line <= 0 {
+		return errors.New("line must be positive")
 	}
-	if finding.Fingerprint != "" && finding.Fingerprint != Fingerprint(finding) {
-		return errors.New("fingerprint does not match finding identity")
+	if endLine != 0 && endLine < line {
+		return errors.New("end line precedes line")
 	}
 	return nil
 }

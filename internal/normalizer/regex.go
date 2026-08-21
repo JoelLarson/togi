@@ -30,7 +30,7 @@ func normalizeRegex(pattern string, ctx Context, raw []byte) ([]finding.Finding,
 	if err != nil {
 		return nil, err
 	}
-	defer sources.close()
+	defer func() { _ = sources.close() }()
 
 	results := make([]finding.Finding, 0, len(records))
 	for _, record := range records {
@@ -148,10 +148,10 @@ func preflightRegex(pattern string, ctx Context) (*regexp.Regexp, *template.Temp
 }
 
 func validateTemplateCaptureReferences(message *template.Template, captures map[string]struct{}) error {
-	if len(message.Templates()) != 1 || message.Tree == nil || message.Tree.Root == nil {
+	if len(message.Templates()) != 1 || message.Tree == nil || message.Root == nil {
 		return errors.New("regex message template supports only static text and direct capture references")
 	}
-	return validateTemplateList(message.Tree.Root, captures)
+	return validateTemplateList(message.Root, captures)
 }
 
 func validateTemplateList(list *parse.ListNode, captures map[string]struct{}) error {

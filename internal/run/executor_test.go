@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -112,11 +111,7 @@ func helperBinary(t *testing.T) string {
 			helperErr = err
 			return
 		}
-		name := "helper"
-		if runtime.GOOS == "windows" {
-			name += ".exe"
-		}
-		helperPath = filepath.Join(dir, name)
+		helperPath = filepath.Join(dir, "helper")
 		command := exec.Command("go", "build", "-o", helperPath, source)
 		if output, err := command.CombinedOutput(); err != nil {
 			helperErr = fmt.Errorf("build helper: %w: %s", err, output)

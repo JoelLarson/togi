@@ -107,34 +107,14 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 			resultErr = errors.Join(resultErr, runsRoot.Close(), repoRoot.Close())
 		}
 	}()
-	now := time.Now
-	if ledger.Now != nil {
-		now = ledger.Now
-	}
-	startedAt := now().UTC()
-	if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
-		return nil, err
-	}
-	lock, err := acquireStateLock(repoRoot, startedAt)
+	startedAt, lock, err := ledger.lockAndPrune(repoRoot, runsRoot, repoDirectory, runsDirectory)
 	if err != nil {
 		return nil, err
 	}
-	keep := ledger.Keep
-	if keep <= 0 {
-		keep = defaultRunRetention
-	}
-	if err := pruneRuns(runsRoot, keep-1); err != nil {
-		return nil, errors.Join(err, lock.release())
-	}
-	random := ledger.Random
-	if random == nil {
-		random = rand.Reader
-	}
-	suffix := make([]byte, 2)
-	if _, err := io.ReadFull(random, suffix); err != nil {
+	runID, err := ledger.newRunID(startedAt)
+	if err != nil {
 		return nil, errors.Join(fmt.Errorf("generate run ID: %w", err), lock.release())
 	}
-	runID := startedAt.Format(runTimestampLayout) + "-" + hex.EncodeToString(suffix)
 	if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
 		return nil, errors.Join(err, lock.release())
 	}
@@ -167,6 +147,41 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 	}
 	run.marker = run
 	return run, nil
+}
+
+func (ledger Ledger) lockAndPrune(repoRoot, runsRoot *os.Root, boundaries ...directoryBoundary) (time.Time, *stateLock, error) {
+	now := time.Now
+	if ledger.Now != nil {
+		now = ledger.Now
+	}
+	startedAt := now().UTC()
+	if err := validateDirectories(boundaries...); err != nil {
+		return time.Time{}, nil, err
+	}
+	lock, err := acquireStateLock(repoRoot, startedAt)
+	if err != nil {
+		return time.Time{}, nil, err
+	}
+	keep := ledger.Keep
+	if keep <= 0 {
+		keep = defaultRunRetention
+	}
+	if err := pruneRuns(runsRoot, keep-1); err != nil {
+		return time.Time{}, nil, errors.Join(err, lock.release())
+	}
+	return startedAt, lock, nil
+}
+
+func (ledger Ledger) newRunID(startedAt time.Time) (string, error) {
+	random := ledger.Random
+	if random == nil {
+		random = rand.Reader
+	}
+	suffix := make([]byte, 2)
+	if _, err := io.ReadFull(random, suffix); err != nil {
+		return "", err
+	}
+	return startedAt.Format(runTimestampLayout) + "-" + hex.EncodeToString(suffix), nil
 }
 
 func ensureDirectory(path string) (directoryBoundary, error) {
@@ -218,7 +233,7 @@ func existingChildDirectoryInfoAt(
 	if err != nil {
 		return directoryBoundary{}, err
 	}
-	defer directory.Close()
+	defer func() { _ = directory.Close() }()
 	opened, err := directory.Stat()
 	if err != nil {
 		return directoryBoundary{}, err
@@ -257,7 +272,7 @@ func existingDirectoryInfo(path string, info os.FileInfo, err error) (directoryB
 	if err != nil {
 		return directoryBoundary{}, err
 	}
-	defer directory.Close()
+	defer func() { _ = directory.Close() }()
 	opened, err := directory.Stat()
 	if err != nil {
 		return directoryBoundary{}, err
@@ -413,7 +428,7 @@ func (ledger Ledger) Latest() (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	defer repoRoot.Close()
+	defer func() { _ = repoRoot.Close() }()
 	runsDir := filepath.Join(ledger.RepoState, "runs")
 	runsDirectory, err := existingChildDirectoryAt(repoRoot, "runs", runsDir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -428,7 +443,7 @@ func (ledger Ledger) Latest() (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	defer runsRoot.Close()
+	defer func() { _ = runsRoot.Close() }()
 	return latestFromRunsRoot(runsRoot)
 }
 
@@ -484,7 +499,7 @@ func readCompleteReport(runRoot *os.Root, runID string) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	after, err := file.Stat()
 	if err != nil {
 		return Report{}, err
@@ -509,6 +524,23 @@ func readCompleteReport(runRoot *os.Root, runID string) (Report, error) {
 }
 
 func validateReport(report Report, runID string) error {
+	if err := validateReportHeader(report, runID); err != nil {
+		return err
+	}
+	flattened := make([]finding.Finding, 0)
+	for index, gate := range report.Gates {
+		if err := validateGateReport(gate, index); err != nil {
+			return err
+		}
+		flattened = append(flattened, gate.Findings...)
+		if index > 0 && compareGateReports(report.Gates[index-1], gate) >= 0 {
+			return errors.New("report gates are duplicated or out of order")
+		}
+	}
+	return validateReportSummary(report, flattened)
+}
+
+func validateReportHeader(report Report, runID string) error {
 	if report.SchemaVersion != 1 {
 		return fmt.Errorf("unsupported report schema version %d", report.SchemaVersion)
 	}
@@ -533,53 +565,10 @@ func validateReport(report Report, runID string) error {
 	if report.Findings == nil {
 		return errors.New("report findings array is required")
 	}
-	flattened := make([]finding.Finding, 0)
-	for index, gate := range report.Gates {
-		if strings.TrimSpace(gate.Gate) == "" {
-			return fmt.Errorf("gate %d name is required", index)
-		}
-		if strings.TrimSpace(gate.Language) == "" {
-			return fmt.Errorf("gate %d language is required", index)
-		}
-		if gate.Status != GatePassed && gate.Status != GateFindings && gate.Status != GateErrored {
-			return fmt.Errorf("gate %d has invalid status %q", index, gate.Status)
-		}
-		if gate.DurationMS < 0 {
-			return fmt.Errorf("gate %d has negative duration", index)
-		}
-		switch gate.Status {
-		case GatePassed:
-			if len(gate.Findings) != 0 || gate.Error != "" {
-				return fmt.Errorf("gate %d passed with findings or an error", index)
-			}
-		case GateFindings:
-			if len(gate.Findings) == 0 || gate.Error != "" {
-				return fmt.Errorf("gate %d findings status is inconsistent", index)
-			}
-		case GateErrored:
-			if len(gate.Findings) != 0 || strings.TrimSpace(gate.Error) == "" {
-				return fmt.Errorf("gate %d errored status is inconsistent", index)
-			}
-		}
-		for findingIndex, item := range gate.Findings {
-			if err := finding.Validate(item); err != nil {
-				return fmt.Errorf("gate %d finding %d: %w", index, findingIndex, err)
-			}
-			if item.Gate != gate.Gate || item.Language != gate.Language {
-				return fmt.Errorf("gate %d finding %d ownership is inconsistent", index, findingIndex)
-			}
-		}
-		if len(gate.Findings) > 0 {
-			grouped, err := finding.Group(gate.Findings)
-			if err != nil || !equalFindings(grouped, gate.Findings) {
-				return fmt.Errorf("gate %d findings are not deterministically grouped", index)
-			}
-		}
-		flattened = append(flattened, gate.Findings...)
-		if index > 0 && compareGateReports(report.Gates[index-1], gate) >= 0 {
-			return errors.New("report gates are duplicated or out of order")
-		}
-	}
+	return nil
+}
+
+func validateReportSummary(report Report, flattened []finding.Finding) error {
 	for index, item := range report.Findings {
 		if err := finding.Validate(item); err != nil {
 			return fmt.Errorf("finding %d: %w", index, err)
@@ -596,6 +585,53 @@ func validateReport(report Report, runID string) error {
 		return fmt.Errorf("report verdict %q is inconsistent with %q", report.Verdict, verdict)
 	}
 	return nil
+}
+
+func validateGateReport(gate GateReport, index int) error {
+	if strings.TrimSpace(gate.Gate) == "" || strings.TrimSpace(gate.Language) == "" {
+		return fmt.Errorf("gate %d name and language are required", index)
+	}
+	if gate.DurationMS < 0 {
+		return fmt.Errorf("gate %d has negative duration", index)
+	}
+	if err := validateGateStatus(gate, index); err != nil {
+		return err
+	}
+	for findingIndex, item := range gate.Findings {
+		if err := finding.Validate(item); err != nil {
+			return fmt.Errorf("gate %d finding %d: %w", index, findingIndex, err)
+		}
+		if item.Gate != gate.Gate || item.Language != gate.Language {
+			return fmt.Errorf("gate %d finding %d ownership is inconsistent", index, findingIndex)
+		}
+	}
+	if len(gate.Findings) > 0 {
+		grouped, err := finding.Group(gate.Findings)
+		if err != nil || !equalFindings(grouped, gate.Findings) {
+			return fmt.Errorf("gate %d findings are not deterministically grouped", index)
+		}
+	}
+	return nil
+}
+
+func validateGateStatus(gate GateReport, index int) error {
+	switch gate.Status {
+	case GatePassed:
+		if len(gate.Findings) == 0 && gate.Error == "" {
+			return nil
+		}
+	case GateFindings:
+		if len(gate.Findings) > 0 && gate.Error == "" {
+			return nil
+		}
+	case GateErrored:
+		if len(gate.Findings) == 0 && strings.TrimSpace(gate.Error) != "" {
+			return nil
+		}
+	default:
+		return fmt.Errorf("gate %d has invalid status %q", index, gate.Status)
+	}
+	return fmt.Errorf("gate %d %s status is inconsistent", index, gate.Status)
 }
 
 func equalFindings(left, right []finding.Finding) bool {
@@ -693,17 +729,10 @@ func (run *RunLedger) WriteReport(report Report) error {
 	if run.closed || run.closing {
 		return ErrClosed
 	}
-	runID := run.runID
-	if report.SchemaVersion != 1 {
-		return fmt.Errorf("unsupported report schema version %d", report.SchemaVersion)
-	}
-	if report.RunID == "" {
-		report.RunID = runID
-	} else if report.RunID != runID {
-		return fmt.Errorf("report run ID %q does not match ledger run ID %q", report.RunID, runID)
-	}
-	if err := validateReport(report, runID); err != nil {
-		return fmt.Errorf("validate report: %w", err)
+	var err error
+	report, err = prepareReport(report, run.runID)
+	if err != nil {
+		return err
 	}
 	const reportName = "report.json"
 	if _, err := run.runRoot.Lstat(reportName); err == nil {
@@ -722,6 +751,38 @@ func (run *RunLedger) WriteReport(report Report) error {
 			_ = run.runRoot.Remove(temporaryName)
 		}
 	}()
+	if err := writeReportTemporary(temporary, report); err != nil {
+		return err
+	}
+	if err := publishNoReplace(run.runRoot, temporaryName, reportName); err != nil {
+		return fmt.Errorf("publish report: %w", err)
+	}
+	if err := run.runRoot.Remove(temporaryName); err != nil {
+		return fmt.Errorf("remove published report temporary file: %w", err)
+	}
+	removeTemporary = false
+	if err := syncRootDirectory(run.runRoot); err != nil {
+		return fmt.Errorf("sync run directory: %w", err)
+	}
+	return nil
+}
+
+func prepareReport(report Report, runID string) (Report, error) {
+	if report.SchemaVersion != 1 {
+		return report, fmt.Errorf("unsupported report schema version %d", report.SchemaVersion)
+	}
+	if report.RunID == "" {
+		report.RunID = runID
+	} else if report.RunID != runID {
+		return report, fmt.Errorf("report run ID %q does not match ledger run ID %q", report.RunID, runID)
+	}
+	if err := validateReport(report, runID); err != nil {
+		return report, fmt.Errorf("validate report: %w", err)
+	}
+	return report, nil
+}
+
+func writeReportTemporary(temporary *os.File, report Report) error {
 	if err := temporary.Chmod(0o600); err != nil {
 		_ = temporary.Close()
 		return fmt.Errorf("set report permissions: %w", err)
@@ -739,16 +800,6 @@ func (run *RunLedger) WriteReport(report Report) error {
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close report: %w", err)
 	}
-	if err := publishNoReplace(run.runRoot, temporaryName, reportName); err != nil {
-		return fmt.Errorf("publish report: %w", err)
-	}
-	if err := run.runRoot.Remove(temporaryName); err != nil {
-		return fmt.Errorf("remove published report temporary file: %w", err)
-	}
-	removeTemporary = false
-	if err := syncRootDirectory(run.runRoot); err != nil {
-		return fmt.Errorf("sync run directory: %w", err)
-	}
 	return nil
 }
 
@@ -762,14 +813,8 @@ func (run *RunLedger) WriteRaw(gate, language, stream string, raw []byte) error 
 	if run.closed || run.closing {
 		return ErrClosed
 	}
-	if !safeRawComponent(gate) {
-		return fmt.Errorf("invalid raw output gate %q", gate)
-	}
-	if !safeRawComponent(language) {
-		return fmt.Errorf("invalid raw output language %q", language)
-	}
-	if stream != "stdout" && stream != "stderr" {
-		return fmt.Errorf("invalid raw output stream %q", stream)
+	if err := validateRawName(gate, language, stream); err != nil {
+		return err
 	}
 	temporary, temporaryName, err := createRootTemp(run.rawRoot, "raw")
 	if err != nil {
@@ -781,15 +826,41 @@ func (run *RunLedger) WriteRaw(gate, language, stream string, raw []byte) error 
 			_ = run.rawRoot.Remove(temporaryName)
 		}
 	}()
+	if err := writeRawTemporary(temporary, raw); err != nil {
+		return err
+	}
+	name := gate + "." + language + "." + stream
+	if err := run.rawRoot.Rename(temporaryName, name); err != nil {
+		return fmt.Errorf("publish raw output: %w", err)
+	}
+	removeTemporary = false
+	if err := syncRootDirectory(run.rawRoot); err != nil {
+		return fmt.Errorf("sync raw output directory: %w", err)
+	}
+	return nil
+}
+
+func validateRawName(gateName, language, stream string) error {
+	if !safeRawComponent(gateName) {
+		return fmt.Errorf("invalid raw output gate %q", gateName)
+	}
+	if !safeRawComponent(language) {
+		return fmt.Errorf("invalid raw output language %q", language)
+	}
+	if stream != "stdout" && stream != "stderr" {
+		return fmt.Errorf("invalid raw output stream %q", stream)
+	}
+	return nil
+}
+
+func writeRawTemporary(temporary *os.File, raw []byte) error {
 	if err := temporary.Chmod(0o600); err != nil {
 		_ = temporary.Close()
 		return fmt.Errorf("set raw output permissions: %w", err)
 	}
 	output := raw
 	if len(output) > rawOutputLimit {
-		output = make([]byte, 0, rawOutputLimit)
-		output = append(output, raw[:rawOutputLimit-len(rawTruncationMarker)]...)
-		output = append(output, rawTruncationMarker...)
+		output = append(append(make([]byte, 0, rawOutputLimit), raw[:rawOutputLimit-len(rawTruncationMarker)]...), rawTruncationMarker...)
 	}
 	if _, err := temporary.Write(output); err != nil {
 		_ = temporary.Close()
@@ -801,14 +872,6 @@ func (run *RunLedger) WriteRaw(gate, language, stream string, raw []byte) error 
 	}
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close raw output: %w", err)
-	}
-	name := gate + "." + language + "." + stream
-	if err := run.rawRoot.Rename(temporaryName, name); err != nil {
-		return fmt.Errorf("publish raw output: %w", err)
-	}
-	removeTemporary = false
-	if err := syncRootDirectory(run.rawRoot); err != nil {
-		return fmt.Errorf("sync raw output directory: %w", err)
 	}
 	return nil
 }

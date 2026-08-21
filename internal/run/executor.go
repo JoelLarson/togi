@@ -88,40 +88,25 @@ func (e Executor) Execute(parent context.Context, req Request) (report GateRepor
 		runner = runCommand
 	}
 	result := runner(ctx, req.Root, command)
+	return e.finishExecution(ctx, req, report, result)
+}
+
+func (e Executor) finishExecution(ctx context.Context, req Request, report GateReport, result commandResult) GateReport {
 	stdout, stderr := result.stdout, result.stderr
 	persistErr := persistRaw(req, stdout.Bytes(), stderr.Bytes())
 	if persistErr != nil {
 		return errored(report, errors.New("persist raw output: storage failure"))
 	}
-	if ctx.Err() != nil {
-		return errored(report, contextExecutionError(ctx.Err()))
+	if err := validateCommandResult(ctx, req.Binding, result); err != nil {
+		return errored(report, err)
 	}
-	if result.cleanupErr != nil {
-		return errored(report, fmt.Errorf("clean up gate process tree: %w", result.cleanupErr))
-	}
-	if stdout.Truncated() || stderr.Truncated() {
-		return errored(report, errors.New("gate output exceeded the 1 MiB capture limit"))
-	}
-
-	exitCode, exited := commandExitCode(result.runErr)
-	if !exited {
-		return errored(report, fmt.Errorf("run gate command: %w", result.runErr))
-	}
-	successExit := slices.Contains(req.Binding.SuccessExitCodes, exitCode)
-	findingExit := slices.Contains(req.Binding.FindingExitCodes, exitCode)
-	if !successExit && !findingExit {
-		return errored(report, fmt.Errorf("gate command exited with code %d", exitCode))
-	}
-	if findingExit && stderr.Len() != 0 {
-		return errored(report, errors.New("finding exit wrote to stderr"))
-	}
-
 	normalized, err := e.Registry.Normalize(req.Binding.Normalizer, normalizer.Context{
 		Gate: req.Gate.Manifest.Name, Root: req.Root, Binding: req.Binding,
 	}, stdout.Bytes())
 	if err != nil {
 		return errored(report, errors.New("normalize gate output: invalid tool output; inspect persisted raw output"))
 	}
+	_, findingExit := commandExitClassification(req.Binding, result.runErr)
 	if findingExit && len(normalized) == 0 {
 		return errored(report, errors.New("finding exit produced no valid findings"))
 	}
@@ -140,6 +125,37 @@ func (e Executor) Execute(parent context.Context, req Request) (report GateRepor
 		report.Status = GateFindings
 	}
 	return report
+}
+
+func validateCommandResult(ctx context.Context, binding gate.Binding, result commandResult) error {
+	stdout, stderr := result.stdout, result.stderr
+	if ctx.Err() != nil {
+		return contextExecutionError(ctx.Err())
+	}
+	if result.cleanupErr != nil {
+		return fmt.Errorf("clean up gate process tree: %w", result.cleanupErr)
+	}
+	if stdout.Truncated() || stderr.Truncated() {
+		return errors.New("gate output exceeded the 1 MiB capture limit")
+	}
+	exitCode, exited := commandExitCode(result.runErr)
+	if !exited {
+		return fmt.Errorf("run gate command: %w", result.runErr)
+	}
+	successExit := slices.Contains(binding.SuccessExitCodes, exitCode)
+	findingExit := slices.Contains(binding.FindingExitCodes, exitCode)
+	if !successExit && !findingExit {
+		return fmt.Errorf("gate command exited with code %d", exitCode)
+	}
+	if findingExit && stderr.Len() != 0 {
+		return errors.New("finding exit wrote to stderr")
+	}
+	return nil
+}
+
+func commandExitClassification(binding gate.Binding, runErr error) (bool, bool) {
+	exitCode, _ := commandExitCode(runErr)
+	return slices.Contains(binding.SuccessExitCodes, exitCode), slices.Contains(binding.FindingExitCodes, exitCode)
 }
 
 func observeVersion(ctx context.Context, req Request, report *GateReport) error {

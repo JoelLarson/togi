@@ -13,7 +13,7 @@ func syncRootDirectory(root *os.Root) error {
 	if err != nil {
 		return err
 	}
-	defer directory.Close()
+	defer func() { _ = directory.Close() }()
 	return directory.Sync()
 }
 
