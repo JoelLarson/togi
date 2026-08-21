@@ -83,6 +83,8 @@ command    = ["gocyclo", "-over", "{{.threshold}}", "."]
 success_exit_codes = [0]
 finding_exit_codes = [1]
 normalizer = "regex:^(?P<value>\\d+) \\S+ (?P<symbol>\\S+) (?P<file>[^:]+):(?P<line>\\d+):\\d+$"
+rule_id = "gocyclo/complexity"
+message = "cyclomatic complexity {{.value}} in {{.symbol}}"
 
 [settings]
 threshold = 15                        # per-project overridable; substituted into command
