@@ -1,0 +1,205 @@
+# togi
+
+togi (研ぎ — the staged craft of Japanese sword polishing) is a CLI that takes
+a feature implementation — usually AI-produced — and runs it through a
+gauntlet of deterministic quality gates, then loops an agent-driven fix cycle
+until the diff is merge-ready or a rail stops it. This context covers the
+gauntlet (v1); the wider pipeline (spec → gather → build → verify) will join
+it later.
+
+## Language
+
+### The gauntlet
+
+**Gauntlet**:
+The full quality phase for one feature diff: run gates → triage → fix →
+re-check, looping until merge-ready or stopped.
+_Avoid_: pipeline (reserved for the future spec→build stages), review
+
+**Gate**:
+A self-contained quality-check module: manifest + per-language bindings +
+normalizer reference + wiki aliases, defined as data in config.
+_Avoid_: check, rule, linter
+
+**Binding**:
+A gate's per-language implementation: which tool, how to run it, its pinned
+version, which normalizer parses it, and its rule_id aliases.
+
+**Normalizer**:
+A named, compiled-in parser that converts one tool's raw output into
+findings; `exec` is the escape-hatch normalizer that delegates to an
+external command emitting findings JSON.
+
+**Cost class**:
+A gate's declared runtime tier — `instant` / `fast` / `slow` / `glacial` —
+driving which loop tier it runs in.
+
+**Fix policy**:
+How a gate's findings get resolved: `autofix-only` / `autofix-then-llm` /
+`llm-fix` / `report-only`.
+
+**Integrity gate**:
+A deterministic anti-gaming check: suppression counter, test integrity,
+naming integrity, suite-green-after-every-batch.
+
+**Seal**:
+The one-time final run of glacial gates (e.g. mutation testing) before
+declaring merge-ready.
+
+### Findings
+
+**Finding**:
+One normalized check result:
+`{file, line, end_line?, rule_id, severity, message, snippet, gate, language, fingerprint}`.
+_Avoid_: issue, violation, error
+
+**Fingerprint**:
+A finding's line-independent identity: hash of (gate, rule_id, file,
+whitespace-normalized snippet); the key for stalemate accounting, ratchet
+baselines, and waivers.
+
+**Touched-entity scope**:
+The diff-scope rule: a finding is in scope when its range intersects, or
+contains, any line changed vs. the merge-base — touch a function, own its
+structural health.
+
+**Errored**:
+A gate status distinct from findings: its tool crashed, is missing, emitted
+unparseable output, or mismatched its pinned version; blocks merge-ready
+but never halts other gates.
+_Avoid_: failed (that's a gate with findings)
+
+**Waiver**:
+An operator's persisted approval of one specific fingerprint, with reason
+and timestamp; the only way past an integrity violation.
+_Avoid_: suppression (that's the thing integrity gates count in code)
+
+### Wiki
+
+**Principle page**:
+A language-agnostic wiki entry: one engineering practice, why it matters,
+named refactoring techniques, one canonical example, constraints.
+
+**Alias**:
+The many-to-one mapping from a tool's rule_ids to a principle page,
+declared in the gate's language binding.
+
+**Addendum**:
+A per-language note attached to a principle page, created only after a fix
+has actually failed for language-specific reasons — never speculatively.
+
+### The fix loop
+
+**Triage**:
+The deterministic post-barrier step: containment subordination, grouping by
+(file, principle page), ordering by gauntlet position — producing the
+action plan.
+
+**Action plan**:
+`plan.json` in the run state dir: the ordered batch list with embedded
+findings, page refs, and pending/done/stuck statuses; the resumable
+artifact the flywheel consumes.
+
+**Flywheel**:
+The single serial fix worker consuming the action plan batch-by-batch;
+never more than one writer in the worktree.
+
+**Batch**:
+One fix unit (grouped by file or rule), executed in one fresh agent
+context, committed only when validation passes.
+
+**Brief**:
+The deterministic concatenation handed to the fix agent: findings (with
+their snippets), principle pages, addenda, file:line pointers, constraints
+— no embedded code beyond finding snippets; the agent reads the worktree
+itself.
+
+**Adapter**:
+The vendor-neutral interface wrapping headless agent CLIs (claude / codex /
+kimi): brief in on stdin, results read back as the worktree diff.
+
+**Landing**:
+Squash-applying the togi branch's finished result onto the feature branch
+as one commit; refused if the feature branch moved during the run.
+
+### Verdicts, rails, and state
+
+**Merge-ready**:
+The passing verdict: all enabled gates pass, none errored, integrity clean,
+behavioral suite green, seal passed.
+
+**Unverified**:
+The verdict cap when no green behavioral suite exists; fixes may still run,
+merge-ready may not be declared.
+
+**Stalemate**:
+The finding set failed to strictly shrink across an iteration — covering
+both stalls and whack-a-mole churn; togi stops with a `blocked` report
+naming persistent fingerprints.
+
+**Rail**:
+A hard budget limit: max iterations, wall-clock, agent spend/tokens.
+
+**Ratchet**:
+"Never worse than last time" — optional repo-wide metric high-water marks
+stored in external state, keyed by fingerprint.
+
+**Repo-id**:
+A target repo's stable identity for external config/state: first root
+commit SHA, falling back to normalized remote-URL hash, then absolute-path
+hash.
+
+**Run ledger**:
+Everything a run persists in its state dir: report.json, plan.json, briefs,
+timings, spend.
+
+## Relationships
+
+- A **gauntlet** is an ordered list of **gate** names; a repo's per-project
+  config may override the list, order, and thresholds.
+- A **gate** owns one **binding** per supported language; each **binding**
+  declares its **aliases**; many rule_ids map onto one **principle page**.
+- A **binding** produces **findings** through exactly one **normalizer**.
+- **Triage** turns the collected **findings** into an **action plan** of
+  **batches**; the **flywheel** executes them serially via the **adapter**.
+- A **batch** commits only when instant/fast gates, **integrity gates**, and
+  the behavioral suite all pass; otherwise it is reset and retried once.
+- A **waiver** neutralizes exactly one **fingerprint**; the **ratchet** and
+  **stalemate** accounting are both keyed by **fingerprint**.
+- **Merge-ready** requires the **seal**; **unverified** overrides
+  merge-ready when no green suite exists.
+
+## Example dialogue
+
+> **Dev:** "clippy crashed on the fix branch — does that show up as a
+> **finding**?"
+> **Domain expert:** "No — that gate goes **errored**, which is a different
+> channel. The **flywheel** keeps working the other gates' findings, but you
+> can't reach **merge-ready** while anything is errored."
+>
+> **Dev:** "And if the agent just deletes the failing test?"
+> **Domain expert:** "The test-integrity **integrity gate** trips and the run
+> blocks. If the deletion was legitimate, you issue a **waiver** for that
+> finding's **fingerprint** and re-run — there's no mid-run prompt."
+>
+> **Dev:** "The count of findings didn't go down this iteration but they're
+> all different ones."
+> **Domain expert:** "That's still a **stalemate** — the rail is that the
+> finding *set* strictly shrinks, precisely so churn can't masquerade as
+> progress."
+
+## Flagged ambiguities
+
+- "pipeline" was used for both the gauntlet and the future
+  spec→gather→build→verify arc — resolved: **gauntlet** is the v1 quality
+  phase; *pipeline* is reserved for the full future arc.
+- "failed gate" was ambiguous between "tool broke" and "found problems" —
+  resolved: **errored** (infrastructure) vs. a gate *with findings*
+  (signal); they are different channels with different consequences.
+- "suppression" was ambiguous between code-level lint suppressions and
+  operator approvals — resolved: suppressions are what integrity gates
+  count; **waiver** is the operator mechanism.
+- "scope" was doing triple duty (gate diff/whole-repo scope, diff-scoping of
+  judgment, config scope) — resolved: gate manifests declare *scope*
+  (diff-scoped or whole-repo); **touched-entity scope** names the in-scope
+  rule for diff-scoped judgment.
