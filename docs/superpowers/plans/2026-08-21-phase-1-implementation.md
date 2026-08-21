@@ -661,7 +661,7 @@ func TestGoldenNormalizers(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, raw, want := goldenFixture(t, tc.name)
-			got, err := Registry().Normalize(tc.normalizer, ctx, raw)
+			got, err := NewRegistry().Normalize(tc.normalizer, ctx, raw)
 			if err != nil { t.Fatal(err) }
 			grouped, err := finding.Group(got)
 			if err != nil { t.Fatal(err) }
@@ -673,7 +673,10 @@ func TestGoldenNormalizers(t *testing.T) {
 
 Add failing tests for malformed JSON, nonempty unparseable regex output,
 missing required named captures, path traversal outside the repo root, missing
-source files, and empty output yielding zero findings.
+source files, and empty output yielding zero findings. Cover invalid UTF-8,
+blank regex records, binding preflight on empty output, raw-output-safe errors,
+absolute paths inside and outside the canonical root, retained rooted source
+sessions, regular-file enforcement, and the 64 KiB source-line limit.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -692,21 +695,31 @@ type Context struct {
 
 type Func func(Context, []byte) ([]finding.Finding, error)
 
-type Registry map[string]Func
+type Registry struct {
+	funcs map[string]Func
+}
 
 func NewRegistry() Registry
 func (r Registry) Normalize(name string, ctx Context, raw []byte) ([]finding.Finding, error)
 ```
 
-`NewRegistry` registers `golangci-json`; `Normalize` recognizes `regex:` and
-compiles the suffix. The JSON parser decodes the documented envelope and the
-subset of issue fields togi consumes, allowing unrelated fields for forward
-compatibility, then explicitly validates `FromLinter`, `Text`, and
-`Pos.Filename/Line`. The regex parser requires `file` and `line`; `value` and
-`symbol` populate binding message templates. Both resolve slash-normalized
-relative paths beneath `Context.Root`, read exactly the reported source line
-for `Snippet`, apply severity maps, and return ungrouped findings with
-fingerprints set.
+`NewRegistry` registers `golangci-json` behind an opaque, immutable registry;
+`Normalize` recognizes `regex:` and compiles the suffix. The JSON parser
+decodes the documented envelope and the subset of issue fields togi consumes,
+allowing unrelated fields for forward compatibility, then explicitly
+validates `FromLinter`, `Text`, and `Pos.Filename/Line`. The regex parser
+requires unique `file` and `line` captures and preflights its template,
+tool-qualified rule ID, and canonical default severity even for empty output;
+`value` and `symbol` populate binding message templates.
+
+Both parsers validate UTF-8 and open one rooted source session per nonempty
+normalization batch. Relative paths resolve beneath `Context.Root`; absolute
+paths are converted to root-relative paths only when `filepath.Rel` keeps them
+beneath the canonical root. Rooted opens reject escapes, source files must be
+regular, and snippets are limited to 64 KiB excluding CR/LF. Errors never
+repeat raw output, capture values, or raw lines and instead point operators to
+the persisted raw artifact. Both parsers read exactly the reported source line,
+apply severity maps, and return ungrouped findings with fingerprints set.
 
 - [ ] **Step 4: Verify GREEN and commit**
 

@@ -106,13 +106,21 @@ findings.
 
 ## Normalization and Enrichment
 
-The normalizer registry maps stable names to compiled Go implementations.
+The opaque normalizer registry maps stable names to compiled Go
+implementations without exposing its mutable function map.
 `golangci-json` decodes the recorded v2 JSON shape, qualifies rule IDs with
 `golangci-lint/`, maps binding severities, reads source snippets from the
 target root, and rejects malformed output. The regex normalizer compiles the
 named-capture pattern declared by the binding and requires captures needed to
 construct a finding. gocyclo findings use `gocyclo/complexity` and include the
 reported complexity in the message.
+
+Each normalization batch opens one rooted source session. Relative tool paths
+are resolved beneath that root; absolute paths are accepted only when they can
+be converted to a path beneath the canonical root. Source access rejects
+non-regular files and caps a snippet line at 64 KiB. Normalizer errors describe
+the error class and direct operators to persisted raw output without repeating
+raw tool lines or capture values.
 
 An enricher interface receives normalized findings and repository context.
 The phase 1 implementation returns the input unchanged. The runner still calls
