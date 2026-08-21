@@ -113,12 +113,16 @@ are also the relief valve for touched-entity scope (ADR-0008).
 One run per repo, enforced by an OS advisory lock held on an open, persistent
 `lock` file in that repo's state dir. Linux, Darwin, the BSDs, and illumos use
 `flock`; AIX and Solaris use `fcntl` record locks; Windows uses `LockFileEx`
-and denies delete sharing while the handle is open. The JSON PID/start/token
-record is informational; ownership is the open-file lock, which the OS releases
-when a process exits. The lock file is never unlinked, avoiding split ownership
-across old and newly-created inodes. Plan 9, JavaScript/Wasm, and WASI return a
-clear unsupported-platform error before creating ledger state because Go's
-standard library provides no reliable advisory lock there. This is the natural
+and denies delete sharing while the handle is open. Before any backend opens
+the lock file, a process-local registry atomically claims its canonical path
+and repository-directory identity. This prevents a same-process loser from
+opening and closing another descriptor, which can release process-associated
+`fcntl` locks. The JSON PID/start/token record is informational; ownership is
+the local claim plus open-file lock, which the OS releases when a process exits.
+The lock file is never unlinked, avoiding split ownership across old and
+newly-created inodes. Plan 9, JavaScript/Wasm, and WASI return a clear
+unsupported-platform error before creating ledger state because Go's standard
+library provides no reliable advisory lock there. This is the natural
 consequence of one writer in the worktree (ADR-0007).
 
 ## Run contract

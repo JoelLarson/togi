@@ -227,6 +227,76 @@ func TestLedgerRejectsConcurrentStart(t *testing.T) {
 	}
 }
 
+func TestProcessLockClaimRequiresMatchingOwner(t *testing.T) {
+	repoState := t.TempDir()
+	identity, err := os.Stat(repoState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(repoState, "lock")
+	owner, err := claimProcessLock(key, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { releaseProcessLock(owner) })
+
+	if _, err := claimProcessLock(key, identity); !errors.Is(err, ErrLocked) {
+		t.Fatalf("second claim error = %v, want ErrLocked", err)
+	}
+	if _, err := claimProcessLock(key+".renamed", identity); !errors.Is(err, ErrLocked) {
+		t.Fatalf("same identity under another path = %v, want ErrLocked", err)
+	}
+	releaseProcessLock(&processLockClaim{key: key, identity: identity})
+	if _, err := claimProcessLock(key, identity); !errors.Is(err, ErrLocked) {
+		t.Fatalf("claim after foreign release = %v, want ErrLocked", err)
+	}
+
+	releaseProcessLock(owner)
+	next, err := claimProcessLock(key, identity)
+	if err != nil {
+		t.Fatalf("claim after owner release: %v", err)
+	}
+	releaseProcessLock(next)
+}
+
+func TestProcessLockClaimConcurrentContentionHasOneOwner(t *testing.T) {
+	repoState := t.TempDir()
+	identity, err := os.Stat(repoState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(repoState, "lock")
+	const attempts = 20
+	start := make(chan struct{})
+	results := make(chan *processLockClaim, attempts)
+	var group sync.WaitGroup
+	for range attempts {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			claim, _ := claimProcessLock(key, identity)
+			results <- claim
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(results)
+
+	var owner *processLockClaim
+	winners := 0
+	for claim := range results {
+		if claim != nil {
+			winners++
+			owner = claim
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("claim winners = %d, want 1", winners)
+	}
+	releaseProcessLock(owner)
+}
+
 func TestLedgerAcquiresUnlockedPersistentLockRegardlessOfRecord(t *testing.T) {
 	repoState := t.TempDir()
 	lockPath := filepath.Join(repoState, "lock")
@@ -951,7 +1021,8 @@ func TestRunLedgerRejectsUninitializedValue(t *testing.T) {
 }
 
 func TestRunLedgerRejectsCopiedValue(t *testing.T) {
-	run, err := (Ledger{RepoState: t.TempDir()}).Start()
+	repoState := t.TempDir()
+	run, err := (Ledger{RepoState: repoState}).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -975,6 +1046,31 @@ func TestRunLedgerRejectsCopiedValue(t *testing.T) {
 	}
 	if err := copied.Close(); !errors.Is(err, ErrUninitialized) {
 		t.Errorf("Close on copied value = %v, want ErrUninitialized", err)
+	}
+	if next, err := (Ledger{RepoState: repoState}).Start(); !errors.Is(err, ErrLocked) {
+		if next != nil {
+			_ = next.Close()
+		}
+		t.Fatalf("Start after copied Close = %v, want ErrLocked", err)
+	}
+}
+
+func TestZeroRunLedgerCannotReleaseProcessClaim(t *testing.T) {
+	repoState := t.TempDir()
+	run, err := (Ledger{RepoState: repoState}).Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.Close() })
+	var zero RunLedger
+	if err := zero.Close(); !errors.Is(err, ErrUninitialized) {
+		t.Fatalf("zero Close = %v, want ErrUninitialized", err)
+	}
+	if next, err := (Ledger{RepoState: repoState}).Start(); !errors.Is(err, ErrLocked) {
+		if next != nil {
+			_ = next.Close()
+		}
+		t.Fatalf("Start after zero Close = %v, want ErrLocked", err)
 	}
 }
 

@@ -166,7 +166,12 @@ Completed reports publish by linking a synced same-directory temporary file to
 `report.json`. The hard-link operation is atomic and refuses an existing name,
 so concurrent publishers cannot clobber one another and readers cannot observe
 partial JSON. Linux, Darwin, the BSDs, and illumos use `flock`; AIX and Solaris
-use `FcntlFlock`. These platforms verify `0700` directory modes and sync
+use `FcntlFlock`. Before opening the lock file, all supported backends acquire a
+unique process-local claim keyed by the canonical lock path and retained
+repository identity. Only the matching owner releases it, after successful OS
+unlock and handle close. This is required for process-associated `F_SETLK`
+semantics, where closing another descriptor for the same file can release the
+process's lock. These platforms verify `0700` directory modes and sync
 directories after publication. Windows uses `LockFileEx`/`UnlockFileEx` and
 opens the lock without delete sharing, so the lock pathname cannot be replaced
 while owned. Windows privacy inherits the state directory's ACLs, and directory

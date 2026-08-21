@@ -899,12 +899,16 @@ func (r *RunLedger) Close() error
 Open a persistent regular `lock` file and hold a nonblocking OS advisory lock
 for the run lifetime: `flock` on Linux, Darwin, the BSDs, and illumos;
 `FcntlFlock` on AIX and Solaris; and `LockFileEx` on Windows. Deny Windows
-delete sharing while the lock is open. Return `ErrUnsupportedPlatform` before
-state creation on Plan 9, JavaScript/Wasm, and WASI. Store informational
-PID/start/token JSON only while locked; never unlink the lock on close. Retain
-`os.Root` handles for repository state, runs, the current run, and raw output.
-Prune before creating the new run. Publish synced report JSON through an atomic
-no-replace hard link from a same-directory temporary file.
+delete sharing while the lock is open. Before any backend opens the file,
+atomically acquire a unique process-local claim by canonical path and retained
+repository identity; release only the matching claim after OS unlock and close
+succeed. This prevents same-process descriptor closes from disturbing
+process-associated `F_SETLK` locks. Return `ErrUnsupportedPlatform` before state
+creation on Plan 9, JavaScript/Wasm, and WASI. Store informational PID/start/token
+JSON only while locked; never unlink the lock on close. Retain `os.Root` handles
+for repository state, runs, the current run, and raw output. Prune before
+creating the new run. Publish synced report JSON through an atomic no-replace
+hard link from a same-directory temporary file.
 
 - [ ] **Step 4: Verify GREEN and commit**
 

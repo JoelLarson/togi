@@ -156,11 +156,14 @@ An exclusive per-repository OS advisory lock is acquired on an open, persistent
 `lock` file before pruning or creating a run directory. Linux, Darwin, the BSDs,
 and illumos use `flock`; AIX and Solaris use `fcntl`; Windows uses `LockFileEx`
 and denies delete sharing while the handle is open. Process exit releases
-ownership automatically. The PID/start/token JSON is informational, and close
-never unlinks the lock file, so ownership cannot split across two inodes. Plan
-9, JavaScript/Wasm, and WASI return `ErrUnsupportedPlatform` before creating
-state because the Go standard library cannot provide reliable advisory locking
-there.
+OS ownership automatically. Before opening the lock file, a unique
+process-local claim keyed by canonical path and repository identity prevents
+same-process contenders from disturbing process-associated `fcntl` locks. Only
+the matching owner releases that claim after unlock and close succeed. The
+PID/start/token JSON is informational, and close never unlinks the lock file,
+so ownership cannot split across two inodes. Plan 9, JavaScript/Wasm, and WASI
+return `ErrUnsupportedPlatform` before creating state because the Go standard
+library cannot provide reliable advisory locking there.
 
 Run IDs use nanosecond-resolution UTC timestamps plus a cryptographically
 random suffix, for example `20260821T151230.123456789Z-a3f1`. At run start, old

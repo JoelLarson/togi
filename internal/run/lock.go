@@ -8,11 +8,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
 	"time"
 )
 
 var (
-	// ErrLocked means another process owns the repository run ledger.
+	// ErrLocked means another run owns the repository run ledger.
 	ErrLocked = errors.New("run ledger is locked")
 	// ErrInvalidLock means the persistent lock path is not a regular file.
 	ErrInvalidLock = errors.New("invalid run ledger lock")
@@ -28,32 +32,54 @@ type lockRecord struct {
 
 type stateLock struct {
 	file     *os.File
+	claim    *processLockClaim
 	unlocked bool
 	closed   bool
 }
 
+// A same-process open/close can release process-associated fcntl locks, so the
+// local claim must be won before any backend opens the persistent lock file.
+type processLockClaim struct {
+	key      string
+	identity os.FileInfo
+}
+
+var processLockClaims = struct {
+	sync.Mutex
+	owners map[string]*processLockClaim
+}{owners: make(map[string]*processLockClaim)}
+
 func acquireStateLock(root *os.Root, now time.Time) (*stateLock, error) {
 	const name = "lock"
-	record, err := newLockRecord(now, rand.Reader)
+	key, identity, err := processLockIdentity(root, name)
 	if err != nil {
 		return nil, err
 	}
-	before, err := root.Lstat(name)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	claim, err := claimProcessLock(key, identity)
+	if err != nil {
 		return nil, err
 	}
+	lock := &stateLock{claim: claim, unlocked: true}
+	cleanup := func(primary error) error {
+		return errors.Join(primary, lock.release())
+	}
+	record, err := newLockRecord(now, rand.Reader)
+	if err != nil {
+		return nil, cleanup(err)
+	}
+	before, err := root.Lstat(name)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, cleanup(err)
+	}
 	if err == nil && (!before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0) {
-		return nil, fmt.Errorf("%w: %s is not a regular file", ErrInvalidLock, name)
+		return nil, cleanup(fmt.Errorf("%w: %s is not a regular file", ErrInvalidLock, name))
 	}
 
 	file, err := openLockFile(root, name)
 	if err != nil {
-		return nil, err
+		return nil, cleanup(err)
 	}
-	lock := &stateLock{file: file, unlocked: true}
-	cleanup := func(primary error) error {
-		return errors.Join(primary, lock.release())
-	}
+	lock.file = file
 	if err := validateOpenedLock(root, name, file); err != nil {
 		return nil, cleanup(err)
 	}
@@ -92,6 +118,52 @@ func acquireStateLock(root *os.Root, now time.Time) (*stateLock, error) {
 	return lock, nil
 }
 
+func processLockIdentity(root *os.Root, name string) (string, os.FileInfo, error) {
+	identity, err := root.Lstat(".")
+	if err != nil {
+		return "", nil, err
+	}
+	path, err := filepath.Abs(root.Name())
+	if err != nil {
+		return "", nil, err
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil {
+		path = resolved
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", nil, err
+	}
+	key := filepath.Clean(filepath.Join(path, name))
+	if runtime.GOOS == "windows" {
+		key = strings.ToLower(key)
+	}
+	return key, identity, nil
+}
+
+func claimProcessLock(key string, identity os.FileInfo) (*processLockClaim, error) {
+	processLockClaims.Lock()
+	defer processLockClaims.Unlock()
+	for _, owner := range processLockClaims.owners {
+		if owner.key == key || os.SameFile(owner.identity, identity) {
+			return nil, ErrLocked
+		}
+	}
+	claim := &processLockClaim{key: key, identity: identity}
+	processLockClaims.owners[key] = claim
+	return claim, nil
+}
+
+func releaseProcessLock(claim *processLockClaim) {
+	if claim == nil {
+		return
+	}
+	processLockClaims.Lock()
+	defer processLockClaims.Unlock()
+	if processLockClaims.owners[claim.key] == claim {
+		delete(processLockClaims.owners, claim.key)
+	}
+}
+
 func validateOpenedLock(root *os.Root, name string, file *os.File) error {
 	opened, err := file.Stat()
 	if err != nil {
@@ -121,20 +193,22 @@ func newLockRecord(now time.Time, random io.Reader) (lockRecord, error) {
 }
 
 func (lock *stateLock) release() error {
-	if lock == nil || lock.file == nil {
+	if lock == nil {
 		return nil
 	}
-	if !lock.unlocked {
+	if lock.file != nil && !lock.unlocked {
 		if err := unlockAdvisoryLock(lock.file); err != nil {
 			return fmt.Errorf("unlock run ledger: %w", err)
 		}
 		lock.unlocked = true
 	}
-	if !lock.closed {
+	if lock.file != nil && !lock.closed {
 		if err := lock.file.Close(); err != nil {
 			return fmt.Errorf("close run ledger lock: %w", err)
 		}
 		lock.closed = true
 	}
+	releaseProcessLock(lock.claim)
+	lock.claim = nil
 	return nil
 }
