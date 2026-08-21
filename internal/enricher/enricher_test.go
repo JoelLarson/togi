@@ -16,13 +16,19 @@ func TestNoopEnrichPreservesFindings(t *testing.T) {
 		Severity: finding.Error,
 		File:     "internal/example.go",
 		Line:     12,
+		EndLine:  14,
 		Snippet:  "value, err := call()",
-		Message:  "unchecked error",
+		Occurrences: []finding.Occurrence{{
+			Line:    28,
+			EndLine: 30,
+		}},
+		Message: "unchecked error",
 	}}
 	in[0].Fingerprint = finding.Fingerprint(in[0])
 	if err := finding.Validate(in[0]); err != nil {
 		t.Fatalf("test finding is invalid: %v", err)
 	}
+	wantInput := cloneFindings(in)
 
 	got, err := (Noop{}).Enrich(context.Background(), Context{Root: "/repo", Language: "go"}, in)
 	if err != nil {
@@ -31,9 +37,24 @@ func TestNoopEnrichPreservesFindings(t *testing.T) {
 	if !reflect.DeepEqual(got, in) {
 		t.Fatalf("Noop.Enrich() = %#v, want %#v", got, in)
 	}
+	if !reflect.DeepEqual(in, wantInput) {
+		t.Fatalf("Noop.Enrich() mutated input: got %#v, want %#v", in, wantInput)
+	}
 	if len(got) > 0 && &got[0] != &in[0] {
 		t.Fatal("Noop.Enrich() allocated a replacement slice")
 	}
+}
+
+func cloneFindings(in []finding.Finding) []finding.Finding {
+	if in == nil {
+		return nil
+	}
+	out := make([]finding.Finding, len(in))
+	for index, item := range in {
+		out[index] = item
+		out[index].Occurrences = append([]finding.Occurrence(nil), item.Occurrences...)
+	}
+	return out
 }
 
 func TestNoopEnrichPreservesNilAndEmptyInputs(t *testing.T) {
