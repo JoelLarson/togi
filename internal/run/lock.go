@@ -20,8 +20,8 @@ var (
 	ErrLocked = errors.New("run ledger is locked")
 	// ErrInvalidLock means the persistent lock path is not a regular file.
 	ErrInvalidLock = errors.New("invalid run ledger lock")
-	// ErrUnsupportedPlatform means this platform has no reliable stdlib advisory lock.
-	ErrUnsupportedPlatform = errors.New("run ledger locking is unsupported on this platform")
+	// ErrUnsupportedPlatform means this platform is outside phase-one runtime support.
+	ErrUnsupportedPlatform = errors.New("phase-one runtime is unsupported on this platform")
 )
 
 type lockRecord struct {

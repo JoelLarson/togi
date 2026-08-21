@@ -1,3 +1,5 @@
+//go:build linux
+
 package run
 
 import (
@@ -412,6 +414,29 @@ func TestExecutePersistsBeforeClassificationAndStopsOnPersistenceFailure(t *test
 	}
 	if strings.Contains(report.Error, secret) || strings.Contains(report.Error, "diagnostic") {
 		t.Fatalf("error leaked raw output: %q", report.Error)
+	}
+}
+
+func TestExecuteCleanupFailureOverridesValidFindingExit(t *testing.T) {
+	root := t.TempDir()
+	writeSource(t, root, "source.go", "package source\nfunc complex() {}\n")
+	store := &memoryRawStore{}
+	binding := gate.Binding{
+		Language: "go", Tool: "fixture", Command: emitCommand(t, "17 pkg complex source.go:2:1\n", "", 1), SuccessExitCodes: []int{0}, FindingExitCodes: []int{1},
+		Normalizer: `regex:^(?P<value>\d+) \S+ (?P<symbol>\S+) (?P<file>[^:]+):(?P<line>\d+):\d+$`, RuleID: "gocyclo/complexity", Message: "complexity {{.value}} in {{.symbol}}", SeverityMap: map[string]finding.Severity{"default": finding.Warning},
+	}
+	executor := Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}
+	executor.runCommand = func(ctx context.Context, root string, command []string) commandResult {
+		result := runCommand(ctx, root, command)
+		result.cleanupErr = errors.New("injected process-tree cleanup failure")
+		return result
+	}
+	report := executor.Execute(context.Background(), Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "complexity", Timeout: time.Second}}, Binding: binding, Root: root, RawStore: store})
+	if report.Status != GateErrored || len(report.Findings) != 0 || !strings.Contains(report.Error, "clean up") {
+		t.Fatalf("report = %#v", report)
+	}
+	if got := string(store.raw("stdout")); got != "17 pkg complex source.go:2:1\n" {
+		t.Fatalf("persisted stdout = %q", got)
 	}
 }
 

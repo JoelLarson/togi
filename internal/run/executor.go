@@ -36,6 +36,17 @@ type Executor struct {
 	Registry normalizer.Registry
 	Enricher enricher.Enricher
 	Now      func() time.Time
+
+	runCommand commandRunner
+}
+
+type commandRunner func(context.Context, string, []string) commandResult
+
+type commandResult struct {
+	stdout     *boundedBuffer
+	stderr     *boundedBuffer
+	runErr     error
+	cleanupErr error
 }
 
 // Execute runs a gate and always returns a report, including infrastructure errors.
@@ -72,7 +83,12 @@ func (e Executor) Execute(parent context.Context, req Request) (report GateRepor
 			return errored(report, versionErr)
 		}
 	}
-	stdout, stderr, runErr := runCommand(ctx, req.Root, command)
+	runner := e.runCommand
+	if runner == nil {
+		runner = runCommand
+	}
+	result := runner(ctx, req.Root, command)
+	stdout, stderr := result.stdout, result.stderr
 	persistErr := persistRaw(req, stdout.Bytes(), stderr.Bytes())
 	if persistErr != nil {
 		return errored(report, errors.New("persist raw output: storage failure"))
@@ -80,13 +96,16 @@ func (e Executor) Execute(parent context.Context, req Request) (report GateRepor
 	if ctx.Err() != nil {
 		return errored(report, contextExecutionError(ctx.Err()))
 	}
+	if result.cleanupErr != nil {
+		return errored(report, fmt.Errorf("clean up gate process tree: %w", result.cleanupErr))
+	}
 	if stdout.Truncated() || stderr.Truncated() {
 		return errored(report, errors.New("gate output exceeded the 1 MiB capture limit"))
 	}
 
-	exitCode, exited := commandExitCode(runErr)
+	exitCode, exited := commandExitCode(result.runErr)
 	if !exited {
-		return errored(report, fmt.Errorf("run gate command: %w", runErr))
+		return errored(report, fmt.Errorf("run gate command: %w", result.runErr))
 	}
 	successExit := slices.Contains(req.Binding.SuccessExitCodes, exitCode)
 	findingExit := slices.Contains(req.Binding.FindingExitCodes, exitCode)
@@ -129,15 +148,19 @@ func observeVersion(ctx context.Context, req Request, report *GateReport) error 
 		report.Warnings = append(report.Warnings, "version command is invalid")
 		return nil
 	}
-	stdout, stderr, runErr := runCommand(ctx, req.Root, command)
+	result := runCommand(ctx, req.Root, command)
+	stdout, stderr := result.stdout, result.stderr
 	if ctx.Err() != nil {
 		return contextExecutionError(ctx.Err())
+	}
+	if result.cleanupErr != nil {
+		return fmt.Errorf("clean up version process tree: %w", result.cleanupErr)
 	}
 	if stdout.Truncated() || stderr.Truncated() {
 		report.Warnings = append(report.Warnings, "version command output exceeded the capture limit")
 		return nil
 	}
-	exitCode, exited := commandExitCode(runErr)
+	exitCode, exited := commandExitCode(result.runErr)
 	if !exited || exitCode != 0 {
 		report.Warnings = append(report.Warnings, "version command failed")
 		return nil
@@ -227,9 +250,10 @@ func validateCommand(command []string) error {
 	return nil
 }
 
-func runCommand(ctx context.Context, root string, command []string) (*boundedBuffer, *boundedBuffer, error) {
+func runCommand(ctx context.Context, root string, command []string) commandResult {
 	stdout := newBoundedBuffer(rawOutputLimit, rawTruncationMarker)
 	stderr := newBoundedBuffer(rawOutputLimit, rawTruncationMarker)
+	result := commandResult{stdout: stdout, stderr: stderr}
 	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
 	cmd.Dir = root
 	cmd.WaitDelay = 100 * time.Millisecond
@@ -237,21 +261,27 @@ func runCommand(ctx context.Context, root string, command []string) (*boundedBuf
 	cmd.Stderr = stderr
 	tree, err := prepareProcessTree(cmd)
 	if err != nil {
-		return stdout, stderr, fmt.Errorf("prepare process tree: %w", err)
+		result.runErr = fmt.Errorf("prepare process tree: %w", err)
+		return result
 	}
 	cmd.Cancel = func() error {
 		return tree.terminate(cmd.Process)
 	}
 	if err := cmd.Start(); err != nil {
-		return stdout, stderr, errors.Join(err, tree.close(nil))
+		result.runErr = err
+		result.cleanupErr = tree.close(nil)
+		return result
 	}
 	if err := tree.afterStart(cmd.Process); err != nil {
 		terminateErr := tree.terminate(cmd.Process)
 		waitErr := cmd.Wait()
-		return stdout, stderr, errors.Join(err, terminateErr, waitErr, tree.close(cmd.Process))
+		result.runErr = errors.Join(err, terminateErr, waitErr)
+		result.cleanupErr = tree.close(cmd.Process)
+		return result
 	}
-	waitErr := cmd.Wait()
-	return stdout, stderr, errors.Join(waitErr, tree.close(cmd.Process))
+	result.runErr = cmd.Wait()
+	result.cleanupErr = tree.close(cmd.Process)
+	return result
 }
 
 func persistRaw(req Request, stdout, stderr []byte) error {

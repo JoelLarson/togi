@@ -1,16 +1,20 @@
-//go:build !darwin && !dragonfly && !freebsd && !linux && !netbsd && !openbsd && !windows
+//go:build !linux
 
 package run
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 )
 
 type processTree struct{}
 
-func prepareProcessTree(_ *exec.Cmd) (*processTree, error) { return &processTree{}, nil }
+func prepareProcessTree(_ *exec.Cmd) (*processTree, error) {
+	return nil, fmt.Errorf("%w: gate execution on %s", ErrUnsupportedPlatform, runtime.GOOS)
+}
 
 func (*processTree) afterStart(process *os.Process) error {
 	if process == nil {
