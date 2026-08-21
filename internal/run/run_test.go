@@ -127,6 +127,61 @@ func TestServiceRejectsUnsafeInjectedRepositoryIdentityBeforeStateUse(t *testing
 	}
 }
 
+func TestServiceRejectsRepositoryStateInsideTargetWithoutSideEffects(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state func(*testing.T, string) string
+	}{
+		{name: "state root is repository", state: func(_ *testing.T, root string) string { return root }},
+		{name: "state root is descendant", state: func(_ *testing.T, root string) string { return filepath.Join(root, ".state") }},
+		{name: "symlinked state root enters repository", state: func(t *testing.T, root string) string {
+			link := filepath.Join(t.TempDir(), "state-link")
+			if err := os.Symlink(root, link); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			return link
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, _ := fixtureRepository(t)
+			beforeTree := targetTree(t, root)
+			beforeInfo, err := os.Stat(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			paths := config.Paths{Config: filepath.Join(t.TempDir(), "config"), State: tc.state(t, root)}
+			service := Service{Paths: paths, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: io.Discard}
+			if _, err := service.Run(context.Background(), Options{Root: root}); err == nil || !strings.Contains(err.Error(), "target repository") {
+				t.Fatalf("Run error = %v", err)
+			}
+			if _, err := service.Status(context.Background(), root, true); err == nil || !strings.Contains(err.Error(), "target repository") {
+				t.Fatalf("Status error = %v", err)
+			}
+			afterInfo, err := os.Stat(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if beforeInfo.Mode().Perm() != afterInfo.Mode().Perm() {
+				t.Fatalf("root mode changed from %04o to %04o", beforeInfo.Mode().Perm(), afterInfo.Mode().Perm())
+			}
+			if afterTree := targetTree(t, root); !reflect.DeepEqual(beforeTree, afterTree) {
+				t.Fatalf("target tree changed:\n%v\n%v", beforeTree, afterTree)
+			}
+		})
+	}
+}
+
+func TestExternalRepositoryStateAllowsNonexistentSuffixWithoutCreatingIt(t *testing.T) {
+	repository := t.TempDir()
+	state := filepath.Join(t.TempDir(), "missing", "nested", "repo-id")
+	if err := validateExternalRepoState(repository, state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(filepath.Dir(state))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("validation created state path: %v", err)
+	}
+}
+
 func TestReportOnlyRunIsStableAndKeepsErroredGateSeparate(t *testing.T) {
 	root, paths := fixtureRepository(t)
 	baselineTree := targetTree(t, root)
@@ -219,7 +274,15 @@ func TestServiceGateFilteringAndStatusDoesNotExecute(t *testing.T) {
 	}
 
 	statusOut := new(bytes.Buffer)
-	statusService := Service{Paths: paths, Stdout: statusOut}
+	statusID, err := repoid.Resolve(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusService := Service{
+		Paths:       config.Paths{State: paths.State},
+		Stdout:      statusOut,
+		ResolveRepo: func(context.Context, string) (repoid.ID, error) { return statusID, nil },
+	}
 	if _, err := statusService.Status(context.Background(), root, true); err != nil {
 		t.Fatalf("Status: %v", err)
 	}

@@ -1399,23 +1399,46 @@ func TestWriteReportRejectsInvalidReportsWithoutArtifacts(t *testing.T) {
 		name   string
 		report func(runID string) Report
 	}{
-		{name: "schema", report: func(string) Report { return Report{SchemaVersion: 2} }},
-		{name: "run ID", report: func(string) Report { return Report{SchemaVersion: 1, RunID: "wrong"} }},
-		{name: "verdict", report: func(string) Report { return Report{SchemaVersion: 1, Verdict: "unknown"} }},
-		{name: "timestamps", report: func(string) Report {
-			return Report{SchemaVersion: 1, StartedAt: fixedTime, FinishedAt: fixedTime.Add(-time.Second)}
+		{name: "schema", report: func(runID string) Report {
+			report := completeReportFixture(runID)
+			report.SchemaVersion = 2
+			return report
 		}},
-		{name: "counts", report: func(string) Report {
-			return Report{SchemaVersion: 1, Counts: Counts{Errors: -1}}
+		{name: "run ID", report: func(runID string) Report {
+			report := completeReportFixture(runID)
+			report.RunID = "wrong"
+			return report
 		}},
-		{name: "gate status", report: func(string) Report {
-			return Report{SchemaVersion: 1, Gates: []GateReport{{Status: "unknown"}}}
+		{name: "verdict", report: func(runID string) Report {
+			report := completeReportFixture(runID)
+			report.Verdict = "unknown"
+			return report
 		}},
-		{name: "gate duration", report: func(string) Report {
-			return Report{SchemaVersion: 1, Gates: []GateReport{{DurationMS: -1}}}
+		{name: "timestamps", report: func(runID string) Report {
+			report := completeReportFixture(runID)
+			report.StartedAt = fixedTime
+			report.FinishedAt = fixedTime.Add(-time.Second)
+			return report
 		}},
-		{name: "finding", report: func(string) Report {
-			return Report{SchemaVersion: 1, Findings: []finding.Finding{{Gate: "lint"}}}
+		{name: "counts", report: func(runID string) Report {
+			report := completeReportFixture(runID)
+			report.Counts.Errors = -1
+			return report
+		}},
+		{name: "gate status", report: func(runID string) Report {
+			report := completeReportFixture(runID)
+			report.Gates[0].Status = "unknown"
+			return report
+		}},
+		{name: "gate duration", report: func(runID string) Report {
+			report := completeReportFixture(runID)
+			report.Gates[0].DurationMS = -1
+			return report
+		}},
+		{name: "finding", report: func(runID string) Report {
+			report := completeReportFixture(runID)
+			report.Findings = []finding.Finding{{Gate: "lint"}}
+			return report
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

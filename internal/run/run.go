@@ -47,7 +47,7 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 	if err := service.checkPlatform(); err != nil {
 		return Report{}, err
 	}
-	if err := service.validate(true); err != nil {
+	if err := service.validateRun(); err != nil {
 		return Report{}, err
 	}
 	if ctx == nil {
@@ -68,6 +68,10 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 	if err := validateRepositoryID(repository); err != nil {
 		return Report{}, fmt.Errorf("validate repository identity: %w", err)
 	}
+	repoState := service.Paths.RepoState(repository.Directory)
+	if err := validateExternalRepoState(repository.Root, repoState); err != nil {
+		return Report{}, err
+	}
 	loader := service.Loader
 	if loader.OverrideDir == "" {
 		loader.OverrideDir = service.Paths.GateOverrides()
@@ -86,7 +90,7 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 		now = time.Now
 	}
 	startedAt := now().UTC()
-	ledger := Ledger{RepoState: service.Paths.RepoState(repository.Directory), Now: func() time.Time { return startedAt }, Random: service.Random}
+	ledger := Ledger{RepoState: repoState, Now: func() time.Time { return startedAt }, Random: service.Random}
 	active, err := ledger.Start()
 	if err != nil {
 		return Report{}, fmt.Errorf("start run ledger: %w", err)
@@ -160,7 +164,7 @@ func (service Service) Status(ctx context.Context, root string, noColor bool) (R
 	if err := service.checkPlatform(); err != nil {
 		return Report{}, err
 	}
-	if err := service.validate(false); err != nil {
+	if err := service.validateStatus(); err != nil {
 		return Report{}, err
 	}
 	if ctx == nil {
@@ -180,7 +184,11 @@ func (service Service) Status(ctx context.Context, root string, noColor bool) (R
 	if err := validateRepositoryID(repository); err != nil {
 		return Report{}, fmt.Errorf("validate repository identity: %w", err)
 	}
-	report, err := (Ledger{RepoState: service.Paths.RepoState(repository.Directory)}).Latest()
+	repoState := service.Paths.RepoState(repository.Directory)
+	if err := validateExternalRepoState(repository.Root, repoState); err != nil {
+		return Report{}, err
+	}
+	report, err := (Ledger{RepoState: repoState}).Latest()
 	if err != nil {
 		return Report{}, fmt.Errorf("read latest report: %w", err)
 	}
@@ -194,7 +202,7 @@ func (service Service) Status(ctx context.Context, root string, noColor bool) (R
 	return report, nil
 }
 
-func (service Service) validate(requireExecutor bool) error {
+func (service Service) validateRun() error {
 	if service.Paths.Config == "" || !filepath.IsAbs(service.Paths.Config) {
 		return errors.New("configuration root must be absolute")
 	}
@@ -204,13 +212,21 @@ func (service Service) validate(requireExecutor bool) error {
 	if service.Loader.OverrideDir != "" && !filepath.IsAbs(service.Loader.OverrideDir) {
 		return errors.New("gate override root must be absolute")
 	}
-	if requireExecutor {
-		if !service.Executor.Registry.Ready() {
-			return errors.New("executor normalizer registry is not initialized")
-		}
-		if isNilInterface(service.Executor.Enricher) {
-			return errors.New("executor enricher is required")
-		}
+	if !service.Executor.Registry.Ready() {
+		return errors.New("executor normalizer registry is not initialized")
+	}
+	if isNilInterface(service.Executor.Enricher) {
+		return errors.New("executor enricher is required")
+	}
+	if isNilInterface(service.Stdout) {
+		return errors.New("report output is required")
+	}
+	return nil
+}
+
+func (service Service) validateStatus() error {
+	if service.Paths.State == "" || !filepath.IsAbs(service.Paths.State) {
+		return errors.New("state root must be absolute")
 	}
 	if isNilInterface(service.Stdout) {
 		return errors.New("report output is required")
@@ -240,6 +256,58 @@ func validateRepositoryID(repository repoid.ID) error {
 		return errors.New("repository root must be a directory")
 	}
 	return nil
+}
+
+func validateExternalRepoState(repositoryRoot, repoState string) error {
+	prospective, err := resolveProspectiveDirectory(repoState)
+	if err != nil {
+		return fmt.Errorf("validate repository state destination: %w", err)
+	}
+	relative, err := filepath.Rel(repositoryRoot, prospective)
+	if err != nil {
+		return fmt.Errorf("compare repository state destination: %w", err)
+	}
+	if relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)) {
+		return errors.New("repository state destination must be outside the target repository")
+	}
+	return nil
+}
+
+func resolveProspectiveDirectory(destination string) (string, error) {
+	destination = filepath.Clean(destination)
+	current := destination
+	for {
+		_, err := os.Lstat(current)
+		if err == nil {
+			resolved, err := filepath.EvalSymlinks(current)
+			if err != nil {
+				return "", err
+			}
+			resolvedInfo, err := os.Stat(resolved)
+			if err != nil {
+				return "", err
+			}
+			if !resolvedInfo.IsDir() {
+				return "", fmt.Errorf("existing state ancestor %q is not a directory", current)
+			}
+			remainder, err := filepath.Rel(current, destination)
+			if err != nil {
+				return "", err
+			}
+			if remainder == "." {
+				return filepath.Clean(resolved), nil
+			}
+			return filepath.Join(resolved, remainder), nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", errors.New("repository state destination has no existing directory ancestor")
+		}
+		current = parent
+	}
 }
 
 func safeRepositoryDirectory(directory string) bool {
