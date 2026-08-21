@@ -165,10 +165,15 @@ redirect pruning, raw output, report publication, or status reads.
 Completed reports publish by linking a synced same-directory temporary file to
 `report.json`. The hard-link operation is atomic and refuses an existing name,
 so concurrent publishers cannot clobber one another and readers cannot observe
-partial JSON. Unix verifies `0700` directory modes and syncs directories after
-publication. Windows uses `LockFileEx`/`UnlockFileEx`; privacy inherits the
-state directory's ACLs, and directory syncing is best-effort because Go's
-standard library does not expose portable Windows directory fsync semantics.
+partial JSON. Linux, Darwin, the BSDs, and illumos use `flock`; AIX and Solaris
+use `FcntlFlock`. These platforms verify `0700` directory modes and sync
+directories after publication. Windows uses `LockFileEx`/`UnlockFileEx` and
+opens the lock without delete sharing, so the lock pathname cannot be replaced
+while owned. Windows privacy inherits the state directory's ACLs, and directory
+syncing is best-effort because Go's standard library does not expose portable
+Windows directory fsync semantics. `Ledger.Start` returns
+`ErrUnsupportedPlatform` before creating state on Plan 9, JavaScript/Wasm, and
+WASI, where the standard library has no reliable advisory file lock.
 
 **Raw tool output is always persisted**, size-capped around 1 MB per gate with
 a truncation marker. ADR-0005's insulation governs what reaches the LLM, not

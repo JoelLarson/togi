@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build darwin || dragonfly || freebsd || illumos || linux || netbsd || openbsd
 
 package run
 
@@ -20,19 +20,4 @@ func unlockAdvisoryLock(file *os.File) error {
 	return syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 }
 
-func syncRootDirectory(root *os.Root) error {
-	directory, err := root.Open(".")
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
-}
-
-func privateDirectoryMode(mode os.FileMode) bool {
-	return mode.Perm() == 0o700
-}
-
-func privateFileMode(mode os.FileMode) bool {
-	return mode.Perm() == 0o600
-}
+func ensureLockPlatform() error { return nil }

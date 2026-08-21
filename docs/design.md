@@ -111,11 +111,15 @@ are also the relief valve for touched-entity scope (ADR-0008).
 ## Concurrency
 
 One run per repo, enforced by an OS advisory lock held on an open, persistent
-`lock` file in that repo's state dir (`flock` on Unix and `LockFileEx` on
-Windows). The JSON PID/start/token record is informational; ownership is the
-open-file lock, which the OS releases when a process exits. The lock file is
-never unlinked, avoiding split ownership across old and newly-created inodes.
-This is the natural consequence of one writer in the worktree (ADR-0007).
+`lock` file in that repo's state dir. Linux, Darwin, the BSDs, and illumos use
+`flock`; AIX and Solaris use `fcntl` record locks; Windows uses `LockFileEx`
+and denies delete sharing while the handle is open. The JSON PID/start/token
+record is informational; ownership is the open-file lock, which the OS releases
+when a process exits. The lock file is never unlinked, avoiding split ownership
+across old and newly-created inodes. Plan 9, JavaScript/Wasm, and WASI return a
+clear unsupported-platform error before creating ledger state because Go's
+standard library provides no reliable advisory lock there. This is the natural
+consequence of one writer in the worktree (ADR-0007).
 
 ## Run contract
 

@@ -16,6 +16,8 @@ var (
 	ErrLocked = errors.New("run ledger is locked")
 	// ErrInvalidLock means the persistent lock path is not a regular file.
 	ErrInvalidLock = errors.New("invalid run ledger lock")
+	// ErrUnsupportedPlatform means this platform has no reliable stdlib advisory lock.
+	ErrUnsupportedPlatform = errors.New("run ledger locking is unsupported on this platform")
 )
 
 type lockRecord struct {
@@ -44,7 +46,7 @@ func acquireStateLock(root *os.Root, now time.Time) (*stateLock, error) {
 		return nil, fmt.Errorf("%w: %s is not a regular file", ErrInvalidLock, name)
 	}
 
-	file, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE, 0o600)
+	file, err := openLockFile(root, name)
 	if err != nil {
 		return nil, err
 	}

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -82,6 +83,9 @@ func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
 }
 
 func TestLedgerStartRejectsSymlinkedRepoState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows replacement safety is covered by sharing-violation tests")
+	}
 	root := t.TempDir()
 	externalState := filepath.Join(root, "external-state")
 	runsDir := filepath.Join(externalState, "runs")
@@ -120,6 +124,9 @@ func TestLedgerStartRejectsSymlinkedRepoState(t *testing.T) {
 }
 
 func TestLedgerStartRejectsSymlinkedRunsDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows replacement safety is covered by sharing-violation tests")
+	}
 	root := t.TempDir()
 	repoState := filepath.Join(root, "repo-state")
 	if err := os.Mkdir(repoState, 0o700); err != nil {
@@ -285,6 +292,9 @@ func TestLedgerTightensPersistentLockPermissions(t *testing.T) {
 }
 
 func TestAdvisoryLockRemainsAnchoredAfterRepoStateReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows denies replacement while the root handle is open")
+	}
 	root := t.TempDir()
 	repoState := filepath.Join(root, "repo-state")
 	if err := os.Mkdir(repoState, 0o700); err != nil {
@@ -331,6 +341,9 @@ func TestAdvisoryLockRemainsAnchoredAfterRepoStateReplacement(t *testing.T) {
 }
 
 func TestEnsureRunsDirectoryRemainsAnchoredAfterRepoStateReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows denies replacement while the root handle is open")
+	}
 	root := t.TempDir()
 	repoState := filepath.Join(root, "repo-state")
 	if err := os.Mkdir(repoState, 0o700); err != nil {
@@ -465,6 +478,9 @@ func TestLedgerRejectsUnsafeLockEntries(t *testing.T) {
 }
 
 func TestClosePreservesReplacementLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows denies lock unlink while its handle is open")
+	}
 	repoState := t.TempDir()
 	run, err := (Ledger{RepoState: repoState}).Start()
 	if err != nil {
@@ -617,10 +633,13 @@ func TestLedgerPrunesBeforeCreatingRun(t *testing.T) {
 	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	linkedRun := filepath.Join(runsDir, "20260821T130000.000000000Z-dead")
-	if err := os.Symlink(target, linkedRun); err != nil {
-		t.Logf("symlink pruning coverage unavailable: %v", err)
-		linkedRun = ""
+	linkedRun := ""
+	if runtime.GOOS != "windows" {
+		linkedRun = filepath.Join(runsDir, "20260821T130000.000000000Z-dead")
+		if err := os.Symlink(target, linkedRun); err != nil {
+			t.Logf("symlink pruning coverage unavailable: %v", err)
+			linkedRun = ""
+		}
 	}
 
 	ledger := Ledger{
@@ -659,6 +678,9 @@ func TestLedgerPrunesBeforeCreatingRun(t *testing.T) {
 }
 
 func TestPruneRemainsAnchoredAfterRunsDirectoryReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows denies replacement while the root handle is open")
+	}
 	root := t.TempDir()
 	runsPath := filepath.Join(root, "runs")
 	originalOldRun := filepath.Join(runsPath, "20260821T110000.000000000Z-0000")
@@ -773,6 +795,9 @@ func TestWriteRawPreservesBytes(t *testing.T) {
 }
 
 func TestRunLedgerWritesRemainAnchoredAfterRepoStateReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows denies replacement while ledger handles are open")
+	}
 	root := t.TempDir()
 	repoState := filepath.Join(root, "repo-state")
 	run, err := (Ledger{RepoState: repoState}).Start()
@@ -1000,15 +1025,17 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 	if err := os.WriteFile(outsidePath, outsideReport, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outsidePath, filepath.Join(symlinkReportDir, "report.json")); err != nil {
-		t.Logf("report symlink coverage unavailable: %v", err)
-	}
-	outsideRun := filepath.Join(repoState, "outside-run")
-	if err := os.Mkdir(outsideRun, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(outsideRun, filepath.Join(runsDir, "20260821T120500.000000000Z-0005")); err != nil {
-		t.Logf("run symlink coverage unavailable: %v", err)
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(outsidePath, filepath.Join(symlinkReportDir, "report.json")); err != nil {
+			t.Logf("report symlink coverage unavailable: %v", err)
+		}
+		outsideRun := filepath.Join(repoState, "outside-run")
+		if err := os.Mkdir(outsideRun, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outsideRun, filepath.Join(runsDir, "20260821T120500.000000000Z-0005")); err != nil {
+			t.Logf("run symlink coverage unavailable: %v", err)
+		}
 	}
 
 	got, err := (Ledger{RepoState: repoState}).Latest()
@@ -1041,6 +1068,9 @@ func TestLatestSortsSameSecondRunsByNanoseconds(t *testing.T) {
 }
 
 func TestLatestReadRemainsAnchoredAfterRunsDirectoryReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows denies replacement while the root handle is open")
+	}
 	root := t.TempDir()
 	runsPath := filepath.Join(root, "runs")
 	if err := os.Mkdir(runsPath, 0o700); err != nil {
@@ -1079,6 +1109,9 @@ func TestLatestReadRemainsAnchoredAfterRunsDirectoryReplacement(t *testing.T) {
 }
 
 func TestLatestRejectsSymlinkedRepoState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows replacement safety is covered by sharing-violation tests")
+	}
 	root := t.TempDir()
 	externalState := filepath.Join(root, "external-state")
 	runsDir := filepath.Join(externalState, "runs")
@@ -1110,6 +1143,9 @@ func TestLatestRejectsSymlinkedRepoState(t *testing.T) {
 }
 
 func TestLatestRejectsSymlinkedRunsDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows replacement safety is covered by sharing-violation tests")
+	}
 	root := t.TempDir()
 	repoState := filepath.Join(root, "repo-state")
 	if err := os.Mkdir(repoState, 0o700); err != nil {

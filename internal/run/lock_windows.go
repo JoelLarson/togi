@@ -5,9 +5,43 @@ package run
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 )
+
+func openLockFile(root *os.Root, name string) (*os.File, error) {
+	anchored, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := anchored.Close(); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(root.Name(), name)
+	pathUTF16, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := syscall.CreateFile(
+		pathUTF16,
+		syscall.GENERIC_READ|syscall.GENERIC_WRITE,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE,
+		nil,
+		syscall.OPEN_EXISTING,
+		syscall.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = syscall.CloseHandle(handle)
+		return nil, errors.New("wrap Windows lock file handle")
+	}
+	return file, nil
+}
 
 const (
 	lockfileFailImmediately = 0x00000001
@@ -54,6 +88,8 @@ func unlockAdvisoryLock(file *os.File) error {
 	}
 	return callErr
 }
+
+func ensureLockPlatform() error { return nil }
 
 func syncRootDirectory(*os.Root) error {
 	return nil

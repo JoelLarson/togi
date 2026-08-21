@@ -56,10 +56,12 @@ v0.6.0.
 - `internal/run/report.go`: report, gate result, verdict, and count types.
 - `internal/run/ledger.go`: run IDs, directories, atomic report write, latest,
   and pruning.
-- `internal/run/lock.go`, `lock_unix.go`, `lock_windows.go`: persistent advisory
-  lock and platform-specific file locking.
-- `internal/run/ledger_test.go`: ledger, advisory lock, anchoring, publication,
-  and pruning tests.
+- `internal/run/lock.go`, `lock_{unix,fcntl,posix,windows,unsupported}.go`:
+  persistent advisory lock, platform-specific file locking, and explicit
+  unsupported targets.
+- `internal/run/ledger_test.go`, `ledger_windows_test.go`,
+  `lock_unsupported_test.go`: ledger, advisory lock, anchoring, publication,
+  platform behavior, and pruning tests.
 - `internal/run/executor.go`: subprocess execution, timeout, output cap, and
   version observation.
 - `internal/run/collector.go`: bounded fan-out and deterministic barrier.
@@ -895,11 +897,14 @@ func (r *RunLedger) Close() error
 ```
 
 Open a persistent regular `lock` file and hold a nonblocking OS advisory lock
-for the run lifetime: `flock` on Unix and `LockFileEx` on Windows. Store
-informational PID/start/token JSON only while locked; never unlink the lock on
-close. Retain `os.Root` handles for repository state, runs, the current run,
-and raw output. Prune before creating the new run. Publish synced report JSON
-through an atomic no-replace hard link from a same-directory temporary file.
+for the run lifetime: `flock` on Linux, Darwin, the BSDs, and illumos;
+`FcntlFlock` on AIX and Solaris; and `LockFileEx` on Windows. Deny Windows
+delete sharing while the lock is open. Return `ErrUnsupportedPlatform` before
+state creation on Plan 9, JavaScript/Wasm, and WASI. Store informational
+PID/start/token JSON only while locked; never unlink the lock on close. Retain
+`os.Root` handles for repository state, runs, the current run, and raw output.
+Prune before creating the new run. Publish synced report JSON through an atomic
+no-replace hard link from a same-directory temporary file.
 
 - [ ] **Step 4: Verify GREEN and commit**
 

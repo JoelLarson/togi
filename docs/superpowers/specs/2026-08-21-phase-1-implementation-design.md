@@ -153,10 +153,14 @@ type or artifact.
 ## Run Ledger
 
 An exclusive per-repository OS advisory lock is acquired on an open, persistent
-`lock` file before pruning or creating a run directory. Unix uses `flock` and
-Windows uses `LockFileEx`; process exit releases ownership automatically. The
-PID/start/token JSON is informational, and close never unlinks the lock file,
-so ownership cannot split across two inodes.
+`lock` file before pruning or creating a run directory. Linux, Darwin, the BSDs,
+and illumos use `flock`; AIX and Solaris use `fcntl`; Windows uses `LockFileEx`
+and denies delete sharing while the handle is open. Process exit releases
+ownership automatically. The PID/start/token JSON is informational, and close
+never unlinks the lock file, so ownership cannot split across two inodes. Plan
+9, JavaScript/Wasm, and WASI return `ErrUnsupportedPlatform` before creating
+state because the Go standard library cannot provide reliable advisory locking
+there.
 
 Run IDs use nanosecond-resolution UTC timestamps plus a cryptographically
 random suffix, for example `20260821T151230.123456789Z-a3f1`. At run start, old

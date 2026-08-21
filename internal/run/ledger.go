@@ -79,6 +79,9 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 	if ledger.RepoState == "" {
 		return nil, errors.New("repository state path is required")
 	}
+	if err := ensureLockPlatform(); err != nil {
+		return nil, err
+	}
 	repoDirectory, err := ensureDirectory(ledger.RepoState)
 	if err != nil {
 		return nil, fmt.Errorf("prepare repository state: %w", err)
