@@ -256,12 +256,12 @@ func gitEnvironment() []string {
 	var env []string
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(name, "GIT_") {
+		if strings.HasPrefix(strings.ToUpper(name), "GIT_") {
 			continue
 		}
 		env = append(env, entry)
 	}
-	return append(env, "GIT_NO_REPLACE_OBJECTS=1", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+	return append(env, "GIT_NO_REPLACE_OBJECTS=1")
 }
 
 func hash(value string) string {

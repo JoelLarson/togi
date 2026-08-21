@@ -164,6 +164,34 @@ func TestResolveIgnoresGitConfigInjection(t *testing.T) {
 	}
 }
 
+func TestResolveUsesOrdinaryGlobalURLRewrite(t *testing.T) {
+	repo := newEmptyRepo(t, "global-url-rewrite")
+	gitRun(t, repo, "remote", "add", "origin", "gh:JoelLarson/togi.git")
+	home := t.TempDir()
+	writeFile(t, filepath.Join(home, ".gitconfig"), "[url \"https://github.com/\"]\n\tinsteadOf = gh:\n")
+	t.Setenv("HOME", home)
+
+	got, err := Resolve(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := sha256Hex("github.com/JoelLarson/togi"); got.Key != want {
+		t.Fatalf("Key = %q, want rewritten origin key %q", got.Key, want)
+	}
+}
+
+func TestGitEnvironmentFiltersMixedCaseGitVariables(t *testing.T) {
+	t.Setenv("git_dir", "/tmp/other-repository")
+	t.Setenv("Git_Config_Count", "1")
+
+	for _, entry := range gitEnvironment() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(name, "GIT_DIR") || strings.EqualFold(name, "GIT_CONFIG_COUNT") {
+			t.Fatalf("Git environment includes %q", entry)
+		}
+	}
+}
+
 func TestResolveIgnoresGitShallowOverride(t *testing.T) {
 	repo := newCommittedRepo(t)
 	want := gitTestOutput(t, repo, "rev-list", "--max-parents=0", "HEAD")
