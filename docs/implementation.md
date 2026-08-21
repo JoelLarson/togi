@@ -44,10 +44,12 @@ where `end_line` is first consumed, and the Rust counterpart in phase 5.
 
 ## Shipped defaults
 
-Gate definitions embed into the binary via `go:embed` from `defaults/gates/`
-in this repo. togi reads them from the embed and **never writes them into the
-config dir**; a same-named directory under `$XDG_CONFIG_HOME/togi/gates/`
-overrides one wholesale. `togi gate eject <name>` copies one out for editing.
+Gate definitions embed into the binary via `go:embed` from
+`internal/gate/defaults/gates/`. Keeping the files below the owning package is
+required by `go:embed`, which cannot traverse to a parent directory. togi reads
+them from the embed and **never writes them into the config dir**; a same-named
+directory under `$XDG_CONFIG_HOME/togi/gates/` overrides one wholesale. `togi
+gate eject <name>` copies one out for editing.
 
 Upgrades therefore propagate automatically to everything you haven't
 customized, you own only what you explicitly ejected, and a fresh install
@@ -63,7 +65,7 @@ as settled and the field names as revisable.
 A gate is a directory: `gate.toml` plus one subdirectory per language.
 
 ```toml
-# defaults/gates/complexity/gate.toml
+# internal/gate/defaults/gates/complexity/gate.toml
 name        = "complexity"
 description = "Function-level complexity limits"
 cost_class  = "fast"                  # instant | fast | slow | glacial
@@ -74,7 +76,7 @@ timeout     = "60s"                   # optional; cost_class implies a default
 ```
 
 ```toml
-# defaults/gates/complexity/go/binding.toml
+# internal/gate/defaults/gates/complexity/go/binding.toml
 language   = "go"
 tool       = "gocyclo"
 command    = ["gocyclo", "-over", "{{.threshold}}", "./..."]

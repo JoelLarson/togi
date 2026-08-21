@@ -41,14 +41,15 @@ A sequence that keeps every step independently testable:
 4. **`internal/finding`** — the schema struct, fingerprint, occurrence
    grouping, JSON encoding (ADR-0005). Get this right; everything keys on it.
 5. **`internal/gate`** — manifest and binding parsing, `go:embed` of
-   `defaults/gates/`, config-dir override.
+   `internal/gate/defaults/gates/`, config-dir override.
 6. **`internal/normalizer`** — `golangci-json` and `regex`, golden-file tested.
 7. **`internal/enricher`** — the no-op seam only. Real implementation is
    phase 2.
 8. **`internal/run`** — parallel execution with timeouts, the errored channel,
    the collector, run ledger, lockfile, pruning.
 9. **Report rendering** — compiler-style output and typed exit codes.
-10. **`defaults/gates/`** — golangci-lint and gocyclo definitions.
+10. **`internal/gate/defaults/gates/`** — golangci-lint and gocyclo
+    definitions.
 11. **Dogfood** — run togi on togi; fix what it finds.
 
 ## Non-negotiables
