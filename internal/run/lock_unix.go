@@ -32,3 +32,7 @@ func syncDirectory(path string) error {
 	defer directory.Close()
 	return directory.Sync()
 }
+
+func privateDirectoryMode(mode os.FileMode) bool {
+	return mode.Perm() == 0o700
+}

@@ -80,6 +80,113 @@ func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
 	}
 }
 
+func TestLedgerStartRejectsSymlinkedRepoState(t *testing.T) {
+	root := t.TempDir()
+	externalState := filepath.Join(root, "external-state")
+	runsDir := filepath.Join(externalState, "runs")
+	oldRun := filepath.Join(runsDir, "20260821T120000Z-0000")
+	if err := os.MkdirAll(oldRun, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(oldRun, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repoState := filepath.Join(root, "repo-state")
+	if err := os.Symlink(externalState, repoState); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	run, err := (Ledger{
+		RepoState: repoState,
+		Keep:      1,
+		Now:       func() time.Time { return fixedTime },
+		Random:    bytes.NewReader([]byte{0xa3, 0xf1}),
+	}).Start()
+	if run != nil {
+		_ = run.Close()
+	}
+	if err == nil {
+		t.Fatal("Start succeeded through a symlinked repository state directory")
+	}
+	contents, readErr := os.ReadFile(sentinel)
+	if readErr != nil {
+		t.Fatalf("external sentinel was touched: %v", readErr)
+	}
+	if string(contents) != "keep" {
+		t.Fatalf("external sentinel = %q, want keep", contents)
+	}
+}
+
+func TestLedgerStartRejectsSymlinkedRunsDirectory(t *testing.T) {
+	root := t.TempDir()
+	repoState := filepath.Join(root, "repo-state")
+	if err := os.Mkdir(repoState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	externalRuns := filepath.Join(root, "external-runs")
+	oldRun := filepath.Join(externalRuns, "20260821T120000Z-0000")
+	if err := os.MkdirAll(oldRun, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(oldRun, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalRuns, filepath.Join(repoState, "runs")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	run, err := (Ledger{
+		RepoState: repoState,
+		Keep:      1,
+		Now:       func() time.Time { return fixedTime },
+		Random:    bytes.NewReader([]byte{0xa3, 0xf1}),
+	}).Start()
+	if run != nil {
+		_ = run.Close()
+	}
+	if err == nil {
+		t.Fatal("Start succeeded through a symlinked runs directory")
+	}
+	contents, readErr := os.ReadFile(sentinel)
+	if readErr != nil {
+		t.Fatalf("external sentinel was touched: %v", readErr)
+	}
+	if string(contents) != "keep" {
+		t.Fatalf("external sentinel = %q, want keep", contents)
+	}
+}
+
+func TestLedgerStartTightensExistingDirectoryPermissions(t *testing.T) {
+	repoState := filepath.Join(t.TempDir(), "repo-state")
+	runsDir := filepath.Join(repoState, "runs")
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(repoState, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(runsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := (Ledger{RepoState: repoState}).Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.Close() })
+	for _, path := range []string{repoState, runsDir, run.Dir, filepath.Join(run.Dir, "raw")} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Errorf("mode for %s = %04o, want 0700", path, got)
+		}
+	}
+}
+
 func TestLedgerRejectsConcurrentStart(t *testing.T) {
 	repoState := t.TempDir()
 	first, err := (Ledger{RepoState: repoState}).Start()
@@ -350,6 +457,46 @@ func TestLedgerPrunesBeforeCreatingRun(t *testing.T) {
 	}
 }
 
+func TestPruneRejectsReplacedRunsDirectory(t *testing.T) {
+	root := t.TempDir()
+	runsPath := filepath.Join(root, "runs")
+	if err := os.Mkdir(runsPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(runsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath := filepath.Join(root, "original-runs")
+	if err := os.Rename(runsPath, originalPath); err != nil {
+		t.Fatal(err)
+	}
+	externalRuns := filepath.Join(root, "external-runs")
+	externalOldRun := filepath.Join(externalRuns, "20260821T120000Z-0000")
+	if err := os.MkdirAll(externalOldRun, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(externalOldRun, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalRuns, runsPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	err = pruneRuns(directoryBoundary{path: runsPath, identity: info}, 0)
+	if err == nil {
+		t.Fatal("pruneRuns succeeded after the runs directory was replaced")
+	}
+	contents, err := os.ReadFile(sentinel)
+	if err != nil {
+		t.Fatalf("external sentinel was touched: %v", err)
+	}
+	if string(contents) != "keep" {
+		t.Fatalf("external sentinel = %q, want keep", contents)
+	}
+}
+
 func TestLedgerReportsRunIDCollisionAndReleasesLock(t *testing.T) {
 	repoState := t.TempDir()
 	runsDir := filepath.Join(repoState, "runs")
@@ -563,6 +710,97 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, wanted) {
 		t.Fatalf("Latest() = %#v, want %#v", got, wanted)
+	}
+}
+
+func TestLatestRejectsSymlinkedRepoState(t *testing.T) {
+	root := t.TempDir()
+	externalState := filepath.Join(root, "external-state")
+	runsDir := filepath.Join(externalState, "runs")
+	if err := os.MkdirAll(runsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	report := Report{SchemaVersion: 1, RunID: "20260821T120000Z-0000"}
+	writeReportFixture(t, runsDir, report)
+	reportPath := filepath.Join(runsDir, report.RunID, "report.json")
+	before, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoState := filepath.Join(root, "repo-state")
+	if err := os.Symlink(externalState, repoState); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if _, err := (Ledger{RepoState: repoState}).Latest(); err == nil {
+		t.Fatal("Latest succeeded through a symlinked repository state directory")
+	}
+	after, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("external report was touched: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("external report changed")
+	}
+}
+
+func TestLatestRejectsSymlinkedRunsDirectory(t *testing.T) {
+	root := t.TempDir()
+	repoState := filepath.Join(root, "repo-state")
+	if err := os.Mkdir(repoState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	externalRuns := filepath.Join(root, "external-runs")
+	if err := os.Mkdir(externalRuns, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	report := Report{SchemaVersion: 1, RunID: "20260821T120000Z-0000"}
+	writeReportFixture(t, externalRuns, report)
+	reportPath := filepath.Join(externalRuns, report.RunID, "report.json")
+	before, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalRuns, filepath.Join(repoState, "runs")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if _, err := (Ledger{RepoState: repoState}).Latest(); err == nil {
+		t.Fatal("Latest succeeded through a symlinked runs directory")
+	}
+	after, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("external report was touched: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatal("external report changed")
+	}
+}
+
+func TestLatestTightensExistingDirectoryPermissions(t *testing.T) {
+	repoState := filepath.Join(t.TempDir(), "repo-state")
+	runsDir := filepath.Join(repoState, "runs")
+	if err := os.MkdirAll(runsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(repoState, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(runsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (Ledger{RepoState: repoState}).Latest(); !errors.Is(err, ErrNoCompleteRuns) {
+		t.Fatalf("Latest error = %v, want ErrNoCompleteRuns", err)
+	}
+	for _, path := range []string{repoState, runsDir} {
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o700 {
+			t.Errorf("mode for %s = %04o, want 0700", path, got)
+		}
 	}
 }
 

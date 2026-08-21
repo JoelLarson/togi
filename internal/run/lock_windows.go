@@ -4,6 +4,7 @@ package run
 
 import (
 	"errors"
+	"os"
 	"syscall"
 )
 
@@ -26,4 +27,10 @@ func processIsAlive(pid int) (bool, error) {
 
 func syncDirectory(string) error {
 	return nil
+}
+
+func privateDirectoryMode(os.FileMode) bool {
+	// Windows' stdlib Chmod can only change the read-only attribute. A nil
+	// Chmod error is the strongest portable verification available here.
+	return true
 }

@@ -57,23 +57,33 @@ type RunLedger struct {
 	closed bool
 }
 
+type directoryBoundary struct {
+	path     string
+	identity os.FileInfo
+}
+
 // Start acquires the repository lock and creates a new run directory.
 func (ledger Ledger) Start() (*RunLedger, error) {
 	if ledger.RepoState == "" {
 		return nil, errors.New("repository state path is required")
 	}
-	if err := os.MkdirAll(ledger.RepoState, 0o700); err != nil {
-		return nil, fmt.Errorf("create repository state: %w", err)
+	repoDirectory, err := ensureDirectory(ledger.RepoState)
+	if err != nil {
+		return nil, fmt.Errorf("prepare repository state: %w", err)
 	}
 	runsDir := filepath.Join(ledger.RepoState, "runs")
-	if err := os.MkdirAll(runsDir, 0o700); err != nil {
-		return nil, fmt.Errorf("create runs directory: %w", err)
+	runsDirectory, err := ensureDirectory(runsDir)
+	if err != nil {
+		return nil, fmt.Errorf("prepare runs directory: %w", err)
 	}
 	now := time.Now
 	if ledger.Now != nil {
 		now = ledger.Now
 	}
 	startedAt := now().UTC()
+	if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
+		return nil, err
+	}
 	lock, err := acquireStateLock(filepath.Join(ledger.RepoState, "lock"), startedAt)
 	if err != nil {
 		return nil, err
@@ -82,7 +92,7 @@ func (ledger Ledger) Start() (*RunLedger, error) {
 	if keep <= 0 {
 		keep = defaultRunRetention
 	}
-	if err := pruneRuns(runsDir, keep-1); err != nil {
+	if err := pruneRuns(runsDirectory, keep-1); err != nil {
 		_ = lock.release()
 		return nil, err
 	}
@@ -96,6 +106,10 @@ func (ledger Ledger) Start() (*RunLedger, error) {
 		return nil, fmt.Errorf("generate run ID: %w", err)
 	}
 	runID := startedAt.Format("20060102T150405Z") + "-" + hex.EncodeToString(suffix)
+	if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
+		_ = lock.release()
+		return nil, err
+	}
 	runDir := filepath.Join(runsDir, runID)
 	if err := os.Mkdir(runDir, 0o700); err != nil {
 		_ = lock.release()
@@ -104,12 +118,99 @@ func (ledger Ledger) Start() (*RunLedger, error) {
 		}
 		return nil, fmt.Errorf("create run directory: %w", err)
 	}
+	runDirectory, err := existingDirectory(runDir)
+	if err != nil {
+		_ = lock.release()
+		return nil, fmt.Errorf("restrict run directory: %w", err)
+	}
 	if err := os.Mkdir(filepath.Join(runDir, "raw"), 0o700); err != nil {
-		_ = os.Remove(runDir)
+		if runDirectory.validate() == nil {
+			_ = os.Remove(runDir)
+		}
 		_ = lock.release()
 		return nil, fmt.Errorf("create raw directory: %w", err)
 	}
+	if _, err := existingDirectory(filepath.Join(runDir, "raw")); err != nil {
+		_ = lock.release()
+		return nil, fmt.Errorf("restrict raw directory: %w", err)
+	}
 	return &RunLedger{Dir: runDir, lock: lock}, nil
+}
+
+func ensureDirectory(path string) (directoryBoundary, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			return directoryBoundary{}, err
+		}
+		info, err = os.Lstat(path)
+	}
+	return existingDirectoryInfo(path, info, err)
+}
+
+func existingDirectory(path string) (directoryBoundary, error) {
+	info, err := os.Lstat(path)
+	return existingDirectoryInfo(path, info, err)
+}
+
+func existingDirectoryInfo(path string, info os.FileInfo, err error) (directoryBoundary, error) {
+	if err != nil {
+		return directoryBoundary{}, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return directoryBoundary{}, fmt.Errorf("%s is not a real directory", path)
+	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return directoryBoundary{}, err
+	}
+	defer directory.Close()
+	opened, err := directory.Stat()
+	if err != nil {
+		return directoryBoundary{}, err
+	}
+	if !opened.IsDir() || !os.SameFile(info, opened) {
+		return directoryBoundary{}, fmt.Errorf("%s changed while opening", path)
+	}
+	if err := directory.Chmod(0o700); err != nil {
+		return directoryBoundary{}, fmt.Errorf("restrict %s: %w", path, err)
+	}
+	restricted, err := directory.Stat()
+	if err != nil {
+		return directoryBoundary{}, fmt.Errorf("verify permissions for %s: %w", path, err)
+	}
+	if !privateDirectoryMode(restricted.Mode()) {
+		return directoryBoundary{}, fmt.Errorf("permissions for %s are %04o, want 0700", path, restricted.Mode().Perm())
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return directoryBoundary{}, err
+	}
+	if !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(restricted, current) {
+		return directoryBoundary{}, fmt.Errorf("%s changed while restricting permissions", path)
+	}
+	return directoryBoundary{path: path, identity: restricted}, nil
+}
+
+func (directory directoryBoundary) validate() error {
+	current, err := os.Lstat(directory.path)
+	if err != nil {
+		return err
+	}
+	if !current.IsDir() || current.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(directory.identity, current) || !privateDirectoryMode(current.Mode()) {
+		return fmt.Errorf("directory boundary %s changed", directory.path)
+	}
+	return nil
+}
+
+func validateDirectories(directories ...directoryBoundary) error {
+	for _, directory := range directories {
+		if err := directory.validate(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Latest returns the newest complete, parseable report in the ledger.
@@ -117,7 +218,22 @@ func (ledger Ledger) Latest() (Report, error) {
 	if ledger.RepoState == "" {
 		return Report{}, errors.New("repository state path is required")
 	}
+	repoDirectory, err := existingDirectory(ledger.RepoState)
+	if errors.Is(err, os.ErrNotExist) {
+		return Report{}, ErrNoCompleteRuns
+	} else if err != nil {
+		return Report{}, fmt.Errorf("validate repository state: %w", err)
+	}
 	runsDir := filepath.Join(ledger.RepoState, "runs")
+	runsDirectory, err := existingDirectory(runsDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return Report{}, ErrNoCompleteRuns
+	} else if err != nil {
+		return Report{}, fmt.Errorf("validate runs directory: %w", err)
+	}
+	if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
+		return Report{}, err
+	}
 	entries, err := os.ReadDir(runsDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return Report{}, ErrNoCompleteRuns
@@ -133,6 +249,9 @@ func (ledger Ledger) Latest() (Report, error) {
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(runIDs)))
 	for _, runID := range runIDs {
+		if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
+			return Report{}, err
+		}
 		report, err := readCompleteReport(filepath.Join(runsDir, runID), runID)
 		if errors.Is(err, errIncompleteRun) {
 			continue
@@ -232,8 +351,11 @@ func validateReport(report Report, runID string) error {
 	return nil
 }
 
-func pruneRuns(runsDir string, retain int) error {
-	entries, err := os.ReadDir(runsDir)
+func pruneRuns(runsDirectory directoryBoundary, retain int) error {
+	if err := runsDirectory.validate(); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(runsDirectory.path)
 	if err != nil {
 		return fmt.Errorf("read runs directory: %w", err)
 	}
@@ -249,7 +371,10 @@ func pruneRuns(runsDir string, retain int) error {
 	}
 	sort.Strings(valid)
 	for _, name := range valid[:len(valid)-retain] {
-		path := filepath.Join(runsDir, name)
+		if err := runsDirectory.validate(); err != nil {
+			return err
+		}
+		path := filepath.Join(runsDirectory.path, name)
 		info, err := os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
