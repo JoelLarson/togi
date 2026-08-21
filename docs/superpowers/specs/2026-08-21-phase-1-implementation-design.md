@@ -53,8 +53,10 @@ gates.
 Cobra errors and internal failures are rendered without a stack trace and map
 to exit code 70. Findings map to exit code 1 and any errored enabled gate maps
 to exit code 4. Gate errors take precedence over findings because the report
-is incomplete. The output model retains exit code 0 for a report containing no
-findings and no errored gates.
+is incomplete. A report containing no findings and no errored gates is
+`unverified` and maps to exit code 5: phase 1 has no behavioral-suite,
+integrity, or seal evidence and therefore cannot claim merge-ready. Exit code 0
+first becomes reachable in phase 5 as required by `docs/roadmap.md`.
 
 ## Repository Identity and Paths
 
