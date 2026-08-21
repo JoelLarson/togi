@@ -69,8 +69,11 @@ first becomes reachable in phase 5 as required by `docs/roadmap.md`.
 `git rev-list --max-parents=0 HEAD`. One root commit is used directly; multiple
 roots are sorted and hashed. When roots are unavailable, a normalized remote
 URL is hashed; when no usable remote exists, the absolute, symlink-resolved
-repository path is hashed. The human-facing directory name combines the root
-basename with a short form of the resulting identity.
+repository path is hashed. The external state directory uses the full resulting
+identity as its single path component. It contains no checkout basename, so
+linked worktrees and renamed checkouts share state, and it is not truncated, so
+path identity retains the repo-id's collision resistance. Human-readable labels
+may be added later as display metadata without changing state paths.
 
 `config` honors `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and `XDG_CACHE_HOME`, with
 the documented home-directory fallbacks. It computes paths only. Directory

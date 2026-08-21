@@ -218,7 +218,9 @@ func TestResolveHashesCanonicalPathWithoutCommitOrRemote(t *testing.T) {
 
 Also test multiple roots by constructing unrelated histories and merging with
 `--allow-unrelated-histories`; the expected key is the SHA-256 of sorted root
-SHAs joined by a newline. Test directory naming as `<basename>-<12 hex>`.
+SHAs joined by a newline. Create a real linked worktree and verify that the main
+checkout and linked worktree resolve to the same key and external state
+directory. Test that directory naming uses the full hexadecimal key.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -244,9 +246,11 @@ Resolve the root with `git -C <start> rev-parse --show-toplevel`; run
 `rev-list --max-parents=0 HEAD`; sort and hash multiple roots. Normalize SSH and
 HTTPS remotes by lowercasing only the host, removing credentials, trailing
 slash, and `.git`, while preserving the case-sensitive repository path; then
-hash. Finally hash the evaluated absolute root path. Construct `Directory` with
-a sanitized basename plus `Key[:12]`. Wrap Git errors with the command purpose,
-never raw shell interpolation.
+hash. Finally hash the evaluated absolute root path. Set `Directory` to the full
+`Key`, with no checkout basename or truncation, so worktrees and renamed
+checkouts share durable state without short-key collisions. Human-readable
+labeling is display metadata, not path identity. Wrap Git errors with the
+command purpose, never raw shell interpolation.
 
 - [ ] **Step 4: Verify GREEN and regression coverage**
 

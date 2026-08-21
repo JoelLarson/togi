@@ -16,7 +16,8 @@ import (
 	"strings"
 )
 
-// ID identifies a target repository and its external state directory.
+// ID identifies a target repository and its external state directory. Directory
+// is the full Key so identity is stable across worktrees and checkout renames.
 type ID struct {
 	Key       string
 	Directory string
@@ -60,7 +61,7 @@ func Resolve(ctx context.Context, start string) (ID, error) {
 
 	return ID{
 		Key:       key,
-		Directory: sanitize(filepath.Base(root)) + "-" + key[:12],
+		Directory: key,
 		Root:      root,
 	}, nil
 }
@@ -267,32 +268,4 @@ func gitEnvironment() []string {
 func hash(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
-}
-
-func sanitize(name string) string {
-	const maxBasename = 255 - 1 - 12
-
-	var builder strings.Builder
-	lastDash := false
-	for _, r := range name {
-		valid := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.'
-		if valid {
-			builder.WriteRune(r)
-			lastDash = false
-			continue
-		}
-		if !lastDash {
-			builder.WriteByte('-')
-			lastDash = true
-		}
-	}
-
-	result := strings.Trim(builder.String(), "-")
-	if result == "" {
-		return "repo"
-	}
-	if len(result) > maxBasename {
-		return result[:maxBasename]
-	}
-	return result
 }

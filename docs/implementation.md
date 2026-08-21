@@ -169,6 +169,12 @@ $XDG_STATE_HOME/togi/<repo-id>/
 
 Runs prune to the most recent 20 at run start, configurable.
 
+`<repo-id>` is the full stable hexadecimal repository key. The durable path
+does not include the checkout basename and does not truncate the key, so linked
+worktrees and renamed checkouts share ledger and lock state without introducing
+short-key collisions. A human-readable label can be stored as display metadata
+later; it is not part of path identity.
+
 `lock` is a persistent regular file. togi holds an OS advisory lock on its open
 file handle for the run lifetime and overwrites its informational
 PID/start/token JSON only while locked. Process exit releases ownership; close

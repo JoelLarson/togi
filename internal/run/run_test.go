@@ -127,6 +127,29 @@ func TestServiceRejectsUnsafeInjectedRepositoryIdentityBeforeStateUse(t *testing
 	}
 }
 
+func TestValidateRepositoryIDRequiresFullHexKeyDirectory(t *testing.T) {
+	root := t.TempDir()
+	sha1 := strings.Repeat("a", 40)
+	sha256 := strings.Repeat("b", 64)
+
+	for _, id := range []repoid.ID{
+		{Key: sha1, Directory: sha1[:12], Root: root},
+		{Key: sha1, Directory: "repository-" + sha1, Root: root},
+		{Key: "not-hex", Directory: "not-hex", Root: root},
+		{Key: strings.ToUpper(sha1), Directory: strings.ToUpper(sha1), Root: root},
+	} {
+		if err := validateRepositoryID(id); err == nil {
+			t.Fatalf("validateRepositoryID(%#v) succeeded", id)
+		}
+	}
+
+	for _, key := range []string{sha1, sha256} {
+		if err := validateRepositoryID(repoid.ID{Key: key, Directory: key, Root: root}); err != nil {
+			t.Fatalf("validateRepositoryID(%d-character key): %v", len(key), err)
+		}
+	}
+}
+
 func TestServiceRejectsRepositoryStateInsideTargetWithoutSideEffects(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

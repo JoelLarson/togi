@@ -28,6 +28,10 @@ contract. `togi version` does not enter the runtime and remains available.
 Three layers, deep-merged per key: **shipped defaults → global `config.toml`
 → `projects/<repo-id>/config.toml`**.
 
+`<repo-id>` is the full stable hexadecimal key from ADR-0011. It is not
+prefixed with a checkout basename or shortened, so linked worktrees and renamed
+checkouts resolve the same external path without short-key collisions.
+
 Per-project may override: the gauntlet (gate list and order), per-gate
 thresholds and settings, fix policies, model and adapter per role, rails,
 suite/build commands, ratchet on/off.

@@ -12,9 +12,13 @@ project I've configured should inherit that configuration.
 
 Fallbacks, in order: normalized remote-URL hash (shallow clones with no root
 commit available), then absolute-path hash (a repo with no commits yet). State
-directories are named `<basename>-<shortid>` so they're greppable by a human.
-An explicit override lives in the global `repos.toml` — not per-project
-config, which is itself keyed by repo-id.
+directories are named with the full repo-id. Using the key alone preserves the
+identity across linked worktrees and directory renames, and avoids collisions
+introduced by truncating it. Human-readable labels belong in display metadata,
+not path identity. An explicit override lives in the global `repos.toml` — not
+per-project config, which is itself keyed by repo-id. This correction precedes
+the first release, so the earlier basename-and-short-id prototype has no
+supported state to migrate.
 
 ## Considered options
 

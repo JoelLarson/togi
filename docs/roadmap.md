@@ -28,7 +28,9 @@ waivers all key on.
 - **CLI skeleton** — `togi run`, `togi status`; subcommand-shaped from the
   start so pipeline stages can join later without restructuring (ADR-0001).
 - **repo-id resolution** — root-commit SHA, falling back to normalized
-  remote-URL hash, then absolute-path hash (ADR-0011).
+  remote-URL hash, then absolute-path hash; its full key names the external
+  state directory so worktrees share state without short-key collisions
+  (ADR-0011).
 - **XDG paths** — config/state/cache with standard fallbacks (ADR-0003).
 - **Findings schema** — the Go struct, its JSON encoding, and fingerprint
   computation (ADR-0005).

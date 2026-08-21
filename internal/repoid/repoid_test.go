@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/joellarson/togi/internal/config"
 )
 
 func TestResolveUsesRootCommit(t *testing.T) {
@@ -29,6 +31,7 @@ func TestResolveUsesRootCommit(t *testing.T) {
 	if got.Key != want {
 		t.Fatalf("Key = %q, want %q", got.Key, want)
 	}
+	assertKeyDirectory(t, got)
 	if got.Root != repo {
 		t.Fatalf("Root = %q, want %q", got.Root, repo)
 	}
@@ -46,6 +49,7 @@ func TestResolveHashesNormalizedRemoteWithoutRoot(t *testing.T) {
 	if got.Key != want {
 		t.Fatalf("Key = %q, want %q", got.Key, want)
 	}
+	assertKeyDirectory(t, got)
 }
 
 func TestResolveHashesCanonicalPathWithoutCommitOrRemote(t *testing.T) {
@@ -70,6 +74,7 @@ func TestResolveHashesCanonicalPathWithoutCommitOrRemote(t *testing.T) {
 	if want := sha256Hex(real); got.Key != want {
 		t.Fatalf("Key = %q, want %q", got.Key, want)
 	}
+	assertKeyDirectory(t, got)
 }
 
 func TestResolveHashesOriginRemoteForShallowClone(t *testing.T) {
@@ -96,6 +101,7 @@ func TestResolveHashesOriginRemoteForShallowClone(t *testing.T) {
 	if got.Key == shallowRoot {
 		t.Fatalf("Key = shallow boundary %q", got.Key)
 	}
+	assertKeyDirectory(t, got)
 }
 
 func TestResolvePropagatesCorruptObjectError(t *testing.T) {
@@ -225,6 +231,7 @@ func TestResolveIgnoresGitTraceDiagnostics(t *testing.T) {
 	if got.Key != want {
 		t.Fatalf("Key = %q, want %q", got.Key, want)
 	}
+	assertKeyDirectory(t, got)
 }
 
 func TestGitOutputSeparatesStdoutAndStderr(t *testing.T) {
@@ -262,16 +269,47 @@ func TestResolveHashesMultipleRootCommits(t *testing.T) {
 	}
 }
 
-func TestResolveDirectoryUsesSanitizedBasenameAndShortKey(t *testing.T) {
+func TestResolveSharesStateDirectoryAcrossLinkedWorktrees(t *testing.T) {
+	repo := newCommittedRepoNamed(t, "main checkout")
+	worktree := filepath.Join(t.TempDir(), "linked-worktree")
+	gitRun(t, repo, "worktree", "add", "--detach", worktree, "HEAD")
+
+	mainID, err := Resolve(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreeID, err := Resolve(context.Background(), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if worktreeID.Key != mainID.Key {
+		t.Fatalf("worktree Key = %q, want main Key %q", worktreeID.Key, mainID.Key)
+	}
+	if worktreeID.Directory != mainID.Directory {
+		t.Fatalf("worktree Directory = %q, want main Directory %q", worktreeID.Directory, mainID.Directory)
+	}
+	paths := config.Paths{State: t.TempDir()}
+	if got, want := paths.RepoState(worktreeID.Directory), paths.RepoState(mainID.Directory); got != want {
+		t.Fatalf("worktree state path = %q, want main state path %q", got, want)
+	}
+}
+
+func TestResolveDirectoryUsesFullStableKey(t *testing.T) {
 	repo := newCommittedRepoNamed(t, "togi repo!")
 
 	got, err := Resolve(context.Background(), repo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "togi-repo-" + got.Key[:12]
-	if got.Directory != want {
-		t.Fatalf("Directory = %q, want %q", got.Directory, want)
+	if got.Directory != got.Key {
+		t.Fatalf("Directory = %q, want full Key %q", got.Directory, got.Key)
+	}
+	if _, err := hex.DecodeString(got.Directory); err != nil {
+		t.Fatalf("Directory = %q, want a hexadecimal component: %v", got.Directory, err)
+	}
+	if filepath.Base(got.Directory) != got.Directory {
+		t.Fatalf("Directory = %q, want one safe path component", got.Directory)
 	}
 }
 
@@ -313,13 +351,6 @@ func TestGitFixturesIgnoreInheritedCommitSigning(t *testing.T) {
 	t.Setenv("GIT_CONFIG_VALUE_0", "true")
 
 	_ = newCommittedRepo(t)
-}
-
-func TestSanitizeBoundsDirectoryBasename(t *testing.T) {
-	name := sanitize(strings.Repeat("a", 300))
-	if got, max := len(name)+1+12, 255; got > max {
-		t.Fatalf("directory component length = %d, want at most %d", got, max)
-	}
 }
 
 func newCommittedRepo(t *testing.T) string {
@@ -404,4 +435,14 @@ func fixtureGitEnv() []string {
 func sha256Hex(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
+}
+
+func assertKeyDirectory(t *testing.T, id ID) {
+	t.Helper()
+	if id.Directory != id.Key {
+		t.Fatalf("Directory = %q, want full Key %q", id.Directory, id.Key)
+	}
+	if _, err := hex.DecodeString(id.Directory); err != nil {
+		t.Fatalf("Directory = %q, want a hexadecimal component: %v", id.Directory, err)
+	}
 }

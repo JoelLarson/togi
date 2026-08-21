@@ -161,7 +161,8 @@ stored in external state, keyed by fingerprint.
 **Repo-id**:
 A target repo's stable identity for external config/state: first root
 commit SHA, falling back to normalized remote-URL hash, then absolute-path
-hash.
+hash. Its full hexadecimal value is the external directory name; checkout
+names and shortened forms are not path identity.
 
 **Run ledger**:
 Everything a run persists in its state dir: report.json, plan.json, briefs,

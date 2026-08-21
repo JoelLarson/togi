@@ -256,11 +256,11 @@ func (service Service) validateStatus() error {
 }
 
 func validateRepositoryID(repository repoid.ID) error {
-	if strings.TrimSpace(repository.Key) == "" {
-		return errors.New("repository key is required")
+	if !validRepositoryKey(repository.Key) {
+		return errors.New("repository key must be a full lowercase hexadecimal Git or SHA-256 identity")
 	}
-	if !safeRepositoryDirectory(repository.Directory) {
-		return errors.New("repository state directory must be one safe component")
+	if repository.Directory != repository.Key {
+		return errors.New("repository state directory must equal the full repository key")
 	}
 	if !filepath.IsAbs(repository.Root) {
 		return errors.New("repository root must be absolute")
@@ -331,21 +331,20 @@ func resolveProspectiveDirectory(destination string) (string, error) {
 	}
 }
 
-func safeRepositoryDirectory(directory string) bool {
-	if directory == "" || directory == "." || directory == ".." || len(directory) > 255 || filepath.Base(directory) != directory || strings.TrimSpace(directory) != directory {
+func validRepositoryKey(key string) bool {
+	if len(key) != 40 && len(key) != 64 {
 		return false
 	}
-	for _, character := range directory {
-		if !safeRepositoryCharacter(character) {
-			return false
+	for _, character := range key {
+		if character >= '0' && character <= '9' {
+			continue
 		}
+		if character >= 'a' && character <= 'f' {
+			continue
+		}
+		return false
 	}
 	return true
-}
-
-func safeRepositoryCharacter(character rune) bool {
-	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
-		character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.'
 }
 
 func (service Service) checkPlatform() error {
