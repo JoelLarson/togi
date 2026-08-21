@@ -1,8 +1,9 @@
 # togi — design notes
 
-Operational decisions that are settled but reversible, so they don't warrant
+Gauntlet semantics that are settled but reversible, so they don't warrant
 ADRs. Vocabulary is defined in [CONTEXT.md](../CONTEXT.md); load-bearing
-decisions are in [docs/adr/](./adr/).
+decisions are in [docs/adr/](./adr/); Go-level build choices are in
+[implementation.md](./implementation.md).
 
 ## Formats and defaults
 
@@ -40,6 +41,15 @@ If no suite exists, or the suite is red at baseline, togi reports that
 *before* any fixing starts, and the run's verdict caps at **unverified** — the
 fix loop may still run, but merge-ready is unreachable by definition.
 
+## Severity and what blocks
+
+Canonical severities are `error` | `warning` | `info`; each language binding
+maps its tool's vocabulary onto them (ADR-0005). Each gate manifest declares
+which levels block merge-ready. Default: **`error` and `warning` block; `info`
+is advisory** — reported, never entering the fix loop and never blocking. This
+is what makes "advisory gate" expressible without inventing a fix policy for
+it, and it's the dial to reach for first when a gate proves noisy.
+
 ## Gate execution errors
 
 A tool that crashes, is missing, emits unparseable output, or mismatches its
@@ -74,10 +84,13 @@ Hard rails: max iterations, wall-clock, agent spend/tokens — set globally and
 overridable per project and per run.
 
 Stalemate: the **finding set must strictly shrink** each iteration, compared
-by fingerprint. Comparing sets rather than counts catches whack-a-mole churn
-(count steady, findings rotating) as well as outright stalls. On stalemate,
-togi stops with a `blocked` report naming the persistent fingerprints — a
-stuck finding usually means a missing wiki page or a wrong threshold.
+by `(fingerprint, occurrence count)`. Comparing sets rather than counts catches
+whack-a-mole churn (count steady, findings rotating) as well as outright
+stalls; including the occurrence count is what stops a partial fix — two of
+three identical hits resolved — from reading as no progress at all, now that
+identical findings group into one fingerprint (ADR-0005). On stalemate, togi
+stops with a `blocked` report naming the persistent fingerprints — a stuck
+finding usually means a missing wiki page or a wrong threshold.
 
 ## Operator approvals: waivers
 

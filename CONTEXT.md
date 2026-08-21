@@ -50,13 +50,27 @@ declaring merge-ready.
 
 **Finding**:
 One normalized check result:
-`{file, line, end_line?, rule_id, severity, message, snippet, gate, language, fingerprint}`.
+`{gate, language, rule_id, severity, file, line, end_line?, snippet, occurrences?, message, fingerprint}`.
 _Avoid_: issue, violation, error
+
+**Occurrence**:
+One site of a finding that fires identically more than once in a file; the
+first is described by the finding's own `line`, the rest by `occurrences`.
+Identical hits are one finding, not many.
 
 **Fingerprint**:
 A finding's line-independent identity: hash of (gate, rule_id, file,
 whitespace-normalized snippet); the key for stalemate accounting, ratchet
 baselines, and waivers.
+
+**Snippet**:
+The finding's primary source line — for a structural finding, the enclosing
+declaration's signature — normalized before hashing and shown raw.
+
+**Severity**:
+A finding's canonical weight — `error` / `warning` / `info` — mapped from
+the tool's own vocabulary by its binding; the gate manifest declares which
+levels block merge-ready.
 
 **Touched-entity scope**:
 The diff-scope rule: a finding is in scope when its range intersects, or
@@ -133,9 +147,9 @@ The verdict cap when no green behavioral suite exists; fixes may still run,
 merge-ready may not be declared.
 
 **Stalemate**:
-The finding set failed to strictly shrink across an iteration — covering
-both stalls and whack-a-mole churn; togi stops with a `blocked` report
-naming persistent fingerprints.
+The finding set, compared by fingerprint and occurrence count, failed to
+strictly shrink across an iteration — covering both stalls and whack-a-mole
+churn; togi stops with a `blocked` report naming persistent fingerprints.
 
 **Rail**:
 A hard budget limit: max iterations, wall-clock, agent spend/tokens.

@@ -37,7 +37,8 @@ waivers all key on.
   fan out concurrently, collect at a barrier (ADR-0007).
 - **Normalizers** — `golangci-json` and a `regex` normalizer covering
   gocyclo's text output.
-- **Range enricher** — see the note below; this is new scope.
+- **Enricher seam** — a no-op stage between normalizing and collecting; the
+  real implementation lands in phase 2. See the note below.
 - **Gate error channel** — errored gates recorded distinctly from findings.
 - **Run ledger** — `state/<repo-id>/runs/<run-id>/` holding report.json;
   human summary to stdout; typed exit codes; lockfile for one-run-per-repo.
@@ -64,6 +65,13 @@ identical fingerprint set; a deliberately-broken gate binary produces
 > collecting, and it needs a Rust counterpart in phase 5. Verify both output
 > formats when installing the tools; if a `-json` mode with ranges exists,
 > the enricher gets easier but doesn't go away.
+>
+> **Split across phases 1 and 2.** Phase 1 builds only the seam — a no-op
+> stage in the right place — and phase 2 implements the Go enricher, where
+> touched-entity scope becomes its first real consumer. Nothing in phase 1
+> reads `end_line`, and fingerprints don't include it (ADR-0005), so
+> deferring the implementation re-keys nothing and slims a phase that is
+> already the largest departure from the original sketch.
 
 ---
 
@@ -77,8 +85,11 @@ project.
 - **Merge-base and changed-line sets** — `git merge-base HEAD <base>`, then
   per-file changed-line sets from the diff. Base branch from per-project
   config, falling back to auto-detected `origin/HEAD`.
+- **Go range enricher** — `go/ast`-based, filling phase 1's seam: given
+  file:line, the enclosing declaration's extent.
 - **Touched-entity filter** — a finding is in scope if its range intersects
-  *or contains* a changed line (ADR-0008). Consumes phase 1's enricher.
+  *or contains* a changed line (ADR-0008). Occurrences are filtered first,
+  and a grouped finding survives if any occurrence does (ADR-0005).
 - **Gate scope honored** — diff-scoped vs. whole-repo, per the manifest;
   whole-repo gates may run report-only.
 - **Config resolution** — three-layer deep merge (shipped → global →
@@ -143,7 +154,8 @@ reports that *before* fixing and never claims merge-ready.
 **Build:**
 
 - **Containment subordination** — line-level findings inside a structural
-  finding's range fold under it. Consumes `end_line` from phase 1.
+  finding's range fold under it, subordinating on the primary occurrence
+  (ADR-0005). Consumes `end_line` from phase 2's enricher.
 - **Grouping and ordering** — by (file, principle page), falling back to
   (file, rule_id); ordered by gauntlet position, then path.
 - **`plan.json`** — the ordered batch list with statuses; resumable and
