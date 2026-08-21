@@ -1,6 +1,7 @@
 package repoid
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -213,14 +214,17 @@ func gitOutput(ctx context.Context, directory string, args ...string) (string, e
 	command := append([]string{"-C", directory}, args...)
 	cmd := exec.CommandContext(ctx, "git", command...)
 	cmd.Env = gitEnvironment()
-	output, err := cmd.CombinedOutput()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", ctxErr
 		}
-		return "", &gitCommandError{args: args, err: err, output: strings.TrimSpace(string(output))}
+		return "", &gitCommandError{args: args, err: err, output: strings.TrimSpace(stderr.String())}
 	}
-	return strings.TrimSpace(string(output)), nil
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 type gitCommandError struct {
@@ -252,21 +256,12 @@ func gitEnvironment() []string {
 	var env []string
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
-		if gitSelectsRepository(name) {
+		if strings.HasPrefix(name, "GIT_") {
 			continue
 		}
 		env = append(env, entry)
 	}
-	return env
-}
-
-func gitSelectsRepository(name string) bool {
-	switch name {
-	case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_NAMESPACE":
-		return true
-	default:
-		return false
-	}
+	return append(env, "GIT_NO_REPLACE_OBJECTS=1", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
 }
 
 func hash(value string) string {

@@ -1,6 +1,7 @@
 package repoid
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -147,6 +148,68 @@ func TestResolveIgnoresRepoSelectingGitEnvironment(t *testing.T) {
 	}
 }
 
+func TestResolveIgnoresGitConfigInjection(t *testing.T) {
+	repo := newEmptyRepo(t, "config-injection")
+	gitRun(t, repo, "remote", "add", "origin", "https://github.com/JoelLarson/togi.git")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "remote.origin.url")
+	t.Setenv("GIT_CONFIG_VALUE_0", "https://github.com/injected/repository.git")
+
+	got, err := Resolve(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := sha256Hex("github.com/JoelLarson/togi"); got.Key != want {
+		t.Fatalf("Key = %q, want local origin key %q", got.Key, want)
+	}
+}
+
+func TestResolveIgnoresGitShallowOverride(t *testing.T) {
+	repo := newCommittedRepo(t)
+	want := gitTestOutput(t, repo, "rev-list", "--max-parents=0", "HEAD")
+	shallowFile := filepath.Join(t.TempDir(), "shallow")
+	if err := os.WriteFile(shallowFile, []byte(want+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_SHALLOW_FILE", shallowFile)
+
+	got, err := Resolve(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Key != want {
+		t.Fatalf("Key = %q, want repository root %q", got.Key, want)
+	}
+}
+
+func TestResolveIgnoresGitTraceDiagnostics(t *testing.T) {
+	repo := newCommittedRepo(t)
+	want := gitTestOutput(t, repo, "rev-list", "--max-parents=0", "HEAD")
+	t.Setenv("GIT_TRACE", "1")
+
+	got, err := Resolve(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Root != repo {
+		t.Fatalf("Root = %q, want %q", got.Root, repo)
+	}
+	if got.Key != want {
+		t.Fatalf("Key = %q, want %q", got.Key, want)
+	}
+}
+
+func TestGitOutputSeparatesStdoutAndStderr(t *testing.T) {
+	repo := newCommittedRepo(t)
+	_, err := gitOutput(context.Background(), repo, "rev-parse", "--show-toplevel", "--verify", "missing-ref")
+	if err == nil {
+		t.Fatal("gitOutput succeeded for a missing ref")
+	}
+	if strings.Contains(err.Error(), repo) {
+		t.Fatalf("error includes stdout repository path: %q", err)
+	}
+}
+
 func TestResolveHashesMultipleRootCommits(t *testing.T) {
 	repo := newCommittedRepo(t)
 	primary := gitTestOutput(t, repo, "branch", "--show-current")
@@ -288,29 +351,26 @@ func gitTestOutputErr(repo string, args ...string) (string, error) {
 	command := append([]string{"-c", "commit.gpgSign=false", "-c", "core.hooksPath=" + os.DevNull, "-C", repo}, args...)
 	cmd := exec.Command("git", command...)
 	cmd.Env = fixtureGitEnv()
-	output, err := cmd.CombinedOutput()
-	return string(output), err
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		return stderr.String(), err
+	}
+	return stdout.String(), nil
 }
 
 func fixtureGitEnv() []string {
 	var env []string
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(name, "GIT_CONFIG_") || fixtureGitSelectsRepository(name) {
+		if strings.HasPrefix(name, "GIT_") {
 			continue
 		}
 		env = append(env, entry)
 	}
-	return append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
-}
-
-func fixtureGitSelectsRepository(name string) bool {
-	switch name {
-	case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_NAMESPACE":
-		return true
-	default:
-		return false
-	}
+	return append(env, "GIT_NO_REPLACE_OBJECTS=1", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
 }
 
 func sha256Hex(value string) string {
