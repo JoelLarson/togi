@@ -37,7 +37,7 @@ func TestLoadAllReadsEmbeddedGoBindings(t *testing.T) {
 		t.Fatalf("complexity command = %q", got)
 	}
 	lint := gates[1]
-	if got := lint.Bindings["go"].Version.Constraint; got != ">=2.12.2" {
+	if got := lint.Bindings["go"].Version.Constraint; got != ">=2.12.2 <3.0.0" {
 		t.Fatalf("lint version constraint = %q", got)
 	}
 }
@@ -138,7 +138,6 @@ func TestManifestValidation(t *testing.T) {
 		{name: "invalid cost class", gateName: "custom", manifest: strings.Replace(validManifest("custom", ""), `cost_class = "fast"`, `cost_class = "medium"`, 1), want: "cost class"},
 		{name: "invalid fix policy", gateName: "custom", manifest: strings.Replace(validManifest("custom", ""), `fix_policy = "llm-fix"`, `fix_policy = "magic"`, 1), want: "fix policy"},
 		{name: "invalid scope", gateName: "custom", manifest: strings.Replace(validManifest("custom", ""), `scope = "diff"`, `scope = "branch"`, 1), want: "scope"},
-		{name: "blocking required", gateName: "custom", manifest: strings.Replace(validManifest("custom", ""), `blocking = ["error", "warning"]`, `blocking = []`, 1), want: "blocking"},
 		{name: "invalid blocking severity", gateName: "custom", manifest: strings.Replace(validManifest("custom", ""), `blocking = ["error", "warning"]`, `blocking = ["critical"]`, 1), want: "severity"},
 		{name: "duplicate blocking severity", gateName: "custom", manifest: strings.Replace(validManifest("custom", ""), `blocking = ["error", "warning"]`, `blocking = ["error", "error"]`, 1), want: "duplicate"},
 		{name: "empty timeout", gateName: "custom", manifest: validManifest("custom", `timeout = ""`), want: "timeout"},
@@ -153,6 +152,35 @@ func TestManifestValidation(t *testing.T) {
 			_, err := (Loader{OverrideDir: root}).Load(test.gateName)
 			if err == nil || !strings.Contains(strings.ToLower(err.Error()), test.want) {
 				t.Fatalf("error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestBlockingDefaultsOnlyWhenOmitted(t *testing.T) {
+	tests := []struct {
+		name     string
+		blocking string
+		want     []finding.Severity
+	}{
+		{name: "omitted defaults", blocking: "", want: []finding.Severity{finding.Error, finding.Warning}},
+		{name: "explicit empty is advisory", blocking: `blocking = []`, want: []finding.Severity{}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			manifest := strings.Replace(validManifest("custom", ""), `blocking = ["error", "warning"]`, test.blocking, 1)
+			writeGateFixture(t, root, "custom", manifest, validBinding(""))
+			got, err := (Loader{OverrideDir: root}).Load("custom")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(got.Manifest.Blocking, test.want) {
+				t.Fatalf("blocking = %v, want %v", got.Manifest.Blocking, test.want)
+			}
+			if test.name == "explicit empty is advisory" && got.Manifest.Blocking == nil {
+				t.Fatal("explicit empty blocking was not preserved")
 			}
 		})
 	}
@@ -196,10 +224,12 @@ func TestBindingValidation(t *testing.T) {
 		{name: "tool required", binding: strings.Replace(validBinding(""), `tool = "tool"`, `tool = ""`, 1), want: "tool"},
 		{name: "command required", binding: strings.Replace(validBinding(""), `command = ["tool", "check"]`, `command = []`, 1), want: "command"},
 		{name: "empty command argument", binding: strings.Replace(validBinding(""), `command = ["tool", "check"]`, `command = ["tool", ""]`, 1), want: "command"},
-		{name: "success exits required", binding: strings.Replace(validBinding(""), `success_exit_codes = [0, 1]`, `success_exit_codes = []`, 1), want: "exit"},
-		{name: "negative exit", binding: strings.Replace(validBinding(""), `success_exit_codes = [0, 1]`, `success_exit_codes = [-1]`, 1), want: "exit"},
-		{name: "exit above byte range", binding: strings.Replace(validBinding(""), `success_exit_codes = [0, 1]`, `success_exit_codes = [256]`, 1), want: "exit"},
-		{name: "duplicate exit", binding: strings.Replace(validBinding(""), `success_exit_codes = [0, 1]`, `success_exit_codes = [0, 0]`, 1), want: "duplicate"},
+		{name: "explicit empty success exits", binding: strings.Replace(validBinding(""), `success_exit_codes = [0]`, `success_exit_codes = []`, 1), want: "success exit"},
+		{name: "negative success exit", binding: strings.Replace(validBinding(""), `success_exit_codes = [0]`, `success_exit_codes = [-1]`, 1), want: "success exit"},
+		{name: "duplicate success exit", binding: strings.Replace(validBinding(""), `success_exit_codes = [0]`, `success_exit_codes = [0, 0]`, 1), want: "duplicate"},
+		{name: "negative finding exit", binding: strings.Replace(validBinding(""), `finding_exit_codes = [1]`, `finding_exit_codes = [-1]`, 1), want: "finding exit"},
+		{name: "duplicate finding exit", binding: strings.Replace(validBinding(""), `finding_exit_codes = [1]`, `finding_exit_codes = [1, 1]`, 1), want: "duplicate"},
+		{name: "overlapping exits", binding: strings.Replace(validBinding(""), `finding_exit_codes = [1]`, `finding_exit_codes = [0]`, 1), want: "both"},
 		{name: "normalizer required", binding: strings.Replace(validBinding(""), `normalizer = "fixture"`, `normalizer = ""`, 1), want: "normalizer"},
 		{name: "severity map required", binding: strings.Replace(validBinding(""), "\n[severity_map]\ndefault = \"warning\"\n", "", 1), want: "severity map"},
 		{name: "invalid mapped severity", binding: strings.Replace(validBinding(""), `default = "warning"`, `default = "critical"`, 1), want: "severity"},
@@ -220,6 +250,58 @@ func TestBindingValidation(t *testing.T) {
 	}
 }
 
+func TestExitCodeDefaultsAndOptionalFindingExits(t *testing.T) {
+	tests := []struct {
+		name    string
+		binding string
+		clean   []int
+		finding []int
+	}{
+		{
+			name:    "omitted success defaults to zero",
+			binding: strings.Replace(validBinding(""), "success_exit_codes = [0]\n", "", 1),
+			clean:   []int{0},
+			finding: []int{1},
+		},
+		{
+			name:    "omitted finding exits stay empty",
+			binding: strings.Replace(validBinding(""), "finding_exit_codes = [1]\n", "", 1),
+			clean:   []int{0},
+			finding: []int{},
+		},
+		{
+			name:    "explicit empty finding exits stay empty",
+			binding: strings.Replace(validBinding(""), "finding_exit_codes = [1]", "finding_exit_codes = []", 1),
+			clean:   []int{0},
+			finding: []int{},
+		},
+		{
+			name:    "exit codes are not byte limited",
+			binding: strings.Replace(validBinding(""), "finding_exit_codes = [1]", "finding_exit_codes = [256]", 1),
+			clean:   []int{0},
+			finding: []int{256},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeGateFixture(t, root, "custom", validManifest("custom", ""), test.binding)
+			got, err := (Loader{OverrideDir: root}).Load("custom")
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding := got.Bindings["go"]
+			if !slices.Equal(binding.SuccessExitCodes, test.clean) {
+				t.Fatalf("success exits = %v, want %v", binding.SuccessExitCodes, test.clean)
+			}
+			if !slices.Equal(binding.FindingExitCodes, test.finding) {
+				t.Fatalf("finding exits = %v, want %v", binding.FindingExitCodes, test.finding)
+			}
+		})
+	}
+}
+
 func TestLoaderRejectsAbsentAndUnsafeGateNames(t *testing.T) {
 	for _, name := range []string{"", ".", "..", "../lint", "lint/go", `lint\\go`, "/lint"} {
 		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
@@ -233,6 +315,47 @@ func TestLoaderRejectsAbsentAndUnsafeGateNames(t *testing.T) {
 	_, err := (Loader{OverrideDir: t.TempDir()}).Load("absent")
 	if err == nil || !strings.Contains(err.Error(), "absent") {
 		t.Fatalf("absent error = %v", err)
+	}
+}
+
+func TestOverrideRejectsSymlinkedGateDirectories(t *testing.T) {
+	tests := []struct {
+		name   string
+		target func(*testing.T, string) string
+	}{
+		{
+			name: "same root",
+			target: func(t *testing.T, root string) string {
+				writeGateFixture(t, root, "zreal", validManifest("zreal", ""), validBinding(""))
+				return "zreal"
+			},
+		},
+		{
+			name: "outside root",
+			target: func(t *testing.T, _ string) string {
+				outside := t.TempDir()
+				writeGateFixture(t, outside, "gate", validManifest("linked", ""), validBinding(""))
+				return filepath.Join(outside, "gate")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			target := test.target(t, root)
+			if err := os.Symlink(target, filepath.Join(root, "linked")); err != nil {
+				t.Skipf("create symlink: %v", err)
+			}
+
+			loader := Loader{OverrideDir: root}
+			if _, err := loader.Load("linked"); err == nil || !strings.Contains(strings.ToLower(err.Error()), "symlink") {
+				t.Fatalf("Load error = %v, want symlink error", err)
+			}
+			if _, err := loader.LoadAll(); err == nil || !strings.Contains(strings.ToLower(err.Error()), "symlink") {
+				t.Fatalf("LoadAll error = %v, want symlink error", err)
+			}
+		})
 	}
 }
 
@@ -296,18 +419,26 @@ func TestVersionObserve(t *testing.T) {
 		wantMatches bool
 		wantError   string
 	}{
-		{name: "extracts and matches minimum", version: Version{Pattern: `v?(\d+\.\d+\.\d+)`, Constraint: ">=2.12.2"}, raw: "golangci-lint has version v2.13.0 built with go", wantVersion: "2.13.0", wantMatches: true},
+		{name: "extracts and matches bounded major", version: Version{Pattern: `v?([0-9][0-9A-Za-z.+-]*)`, Constraint: ">=2.12.2 <3.0.0"}, raw: "golangci-lint has version v2.13.0", wantVersion: "2.13.0", wantMatches: true},
 		{name: "exact minimum matches", version: Version{Pattern: `(\d+\.\d+\.\d+)`, Constraint: ">=2.12.2"}, raw: "2.12.2", wantVersion: "2.12.2", wantMatches: true},
 		{name: "below minimum mismatches", version: Version{Pattern: `(\d+\.\d+\.\d+)`, Constraint: ">=2.12.2"}, raw: "2.12.1", wantVersion: "2.12.1", wantMatches: false},
+		{name: "release candidate is below final lower bound", version: Version{Pattern: `(\S+)`, Constraint: ">=2.12.2 <3.0.0"}, raw: "2.12.2-rc.1", wantVersion: "2.12.2-rc.1", wantMatches: false},
+		{name: "next major is rejected", version: Version{Pattern: `(\S+)`, Constraint: ">=2.12.2 <3.0.0"}, raw: "3.0.0", wantVersion: "3.0.0", wantMatches: false},
+		{name: "build metadata is ignored", version: Version{Pattern: `(\S+)`, Constraint: ">=2.12.2+minimum <3.0.0"}, raw: "2.12.2+observed", wantVersion: "2.12.2+observed", wantMatches: true},
+		{name: "numeric prerelease identifiers compare numerically", version: Version{Pattern: `(\S+)`, Constraint: ">=1.0.0-rc.2 <1.0.0"}, raw: "1.0.0-rc.10", wantVersion: "1.0.0-rc.10", wantMatches: true},
+		{name: "numeric prerelease is below lexical", version: Version{Pattern: `(\S+)`, Constraint: ">=1.0.0-alpha <1.0.0"}, raw: "1.0.0-1", wantVersion: "1.0.0-1", wantMatches: false},
 		{name: "optional version block", version: Version{}, raw: "anything", wantMatches: true},
 		{name: "malformed regex", version: Version{Pattern: `(`, Constraint: ">=1.0.0"}, raw: "1.0.0", wantError: "pattern"},
 		{name: "missing match", version: Version{Pattern: `(\d+\.\d+\.\d+)`, Constraint: ">=1.0.0"}, raw: "unknown", wantError: "extract"},
 		{name: "pattern needs capture", version: Version{Pattern: `\d+\.\d+\.\d+`, Constraint: ">=1.0.0"}, raw: "1.0.0", wantError: "capture"},
 		{name: "malformed observed", version: Version{Pattern: `(\S+)`, Constraint: ">=1.0.0"}, raw: "1.0", wantError: "observed"},
 		{name: "observed leading zero", version: Version{Pattern: `(\S+)`, Constraint: ">=1.0.0"}, raw: "01.0.0", wantError: "observed"},
+		{name: "prerelease leading zero", version: Version{Pattern: `(\S+)`, Constraint: ">=1.0.0-1"}, raw: "1.0.0-01", wantError: "observed"},
 		{name: "malformed constraint version", version: Version{Pattern: `(\d+\.\d+\.\d+)`, Constraint: ">=1.0"}, raw: "1.0.0", wantError: "constraint"},
 		{name: "constraint leading zero", version: Version{Pattern: `(\d+\.\d+\.\d+)`, Constraint: ">=01.0.0"}, raw: "1.0.0", wantError: "constraint"},
 		{name: "unsupported constraint", version: Version{Pattern: `(\d+\.\d+\.\d+)`, Constraint: "^1.0.0"}, raw: "1.0.0", wantError: "constraint"},
+		{name: "unsupported comparison", version: Version{Pattern: `(\d+\.\d+\.\d+)`, Constraint: "<=2.0.0"}, raw: "1.0.0", wantError: "constraint"},
+		{name: "malformed AND constraint", version: Version{Pattern: `(\d+\.\d+\.\d+)`, Constraint: ">=1.0.0 <"}, raw: "1.0.0", wantError: "constraint"},
 	}
 
 	for _, test := range tests {
@@ -346,6 +477,13 @@ func TestDefaultGateDetails(t *testing.T) {
 	if got := lint.Bindings["go"].Aliases["golangci-lint/*"]; got == "" {
 		t.Fatal("lint wildcard alias missing")
 	}
+	if binding := lint.Bindings["go"]; !slices.Equal(binding.SuccessExitCodes, []int{0}) || !slices.Equal(binding.FindingExitCodes, []int{1}) {
+		t.Fatalf("lint exits = clean %v, finding %v", binding.SuccessExitCodes, binding.FindingExitCodes)
+	}
+	observed, matches, err := lint.Bindings["go"].Version.Observe("golangci-lint has version v2.12.2-rc.1+build.7")
+	if err != nil || observed != "2.12.2-rc.1+build.7" || matches {
+		t.Fatalf("lint version observation = (%q, %v, %v)", observed, matches, err)
+	}
 
 	complexity, err := (Loader{}).Load("complexity")
 	if err != nil {
@@ -356,6 +494,9 @@ func TestDefaultGateDetails(t *testing.T) {
 	}
 	if !reflect.DeepEqual(complexity.Bindings["go"].Version, Version{}) {
 		t.Fatalf("complexity version = %#v, want empty", complexity.Bindings["go"].Version)
+	}
+	if binding := complexity.Bindings["go"]; !slices.Equal(binding.SuccessExitCodes, []int{0}) || !slices.Equal(binding.FindingExitCodes, []int{1}) {
+		t.Fatalf("complexity exits = clean %v, finding %v", binding.SuccessExitCodes, binding.FindingExitCodes)
 	}
 }
 
@@ -382,7 +523,8 @@ func validBinding(extra string) string {
 	return fmt.Sprintf(`language = "go"
 tool = "tool"
 command = ["tool", "check"]
-success_exit_codes = [0, 1]
+success_exit_codes = [0]
+finding_exit_codes = [1]
 normalizer = "fixture"
 %s
 

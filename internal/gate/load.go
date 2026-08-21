@@ -30,18 +30,34 @@ func (l Loader) Load(name string) (Gate, error) {
 	}
 
 	if l.OverrideDir != "" {
+		exists, err := validateOverrideRoot(l.OverrideDir)
+		if err != nil {
+			return Gate{}, err
+		}
+		if !exists {
+			return loadShipped(name)
+		}
+
 		overridePath := filepath.Join(l.OverrideDir, name)
-		info, err := os.Stat(overridePath)
+		info, err := os.Lstat(overridePath)
 		switch {
+		case err == nil && info.Mode()&os.ModeSymlink != 0:
+			return Gate{}, fmt.Errorf("gate override %q is a symlink", overridePath)
 		case err == nil && !info.IsDir():
 			return Gate{}, fmt.Errorf("gate override %q is not a directory", overridePath)
 		case err == nil:
+			if err := rejectSymlinks(overridePath); err != nil {
+				return Gate{}, err
+			}
 			return loadGate(os.DirFS(l.OverrideDir), name, name)
 		case !errors.Is(err, os.ErrNotExist):
 			return Gate{}, fmt.Errorf("inspect gate override %q: %w", overridePath, err)
 		}
 	}
+	return loadShipped(name)
+}
 
+func loadShipped(name string) (Gate, error) {
 	root := path.Join(shippedRoot, name)
 	if _, err := fs.Stat(shipped, root); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -66,11 +82,21 @@ func (l Loader) LoadAll() ([]Gate, error) {
 	}
 
 	if l.OverrideDir != "" {
+		exists, err := validateOverrideRoot(l.OverrideDir)
+		if err != nil {
+			return nil, err
+		}
+		if !exists {
+			return l.loadNames(names)
+		}
 		entries, err := os.ReadDir(l.OverrideDir)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err != nil {
 			return nil, fmt.Errorf("read gate override directory %q: %w", l.OverrideDir, err)
 		}
 		for _, entry := range entries {
+			if entry.Type()&os.ModeSymlink != 0 {
+				return nil, fmt.Errorf("gate override entry %q is a symlink", filepath.Join(l.OverrideDir, entry.Name()))
+			}
 			if entry.IsDir() {
 				if err := validateComponent("override gate name", entry.Name()); err != nil {
 					return nil, err
@@ -79,7 +105,10 @@ func (l Loader) LoadAll() ([]Gate, error) {
 			}
 		}
 	}
+	return l.loadNames(names)
+}
 
+func (l Loader) loadNames(names map[string]struct{}) ([]Gate, error) {
 	ordered := make([]string, 0, len(names))
 	for name := range names {
 		ordered = append(ordered, name)
@@ -98,20 +127,21 @@ func (l Loader) LoadAll() ([]Gate, error) {
 }
 
 type manifestWire struct {
-	Name        string   `toml:"name"`
-	Description string   `toml:"description"`
-	CostClass   string   `toml:"cost_class"`
-	FixPolicy   string   `toml:"fix_policy"`
-	Scope       string   `toml:"scope"`
-	Blocking    []string `toml:"blocking"`
-	Timeout     *string  `toml:"timeout"`
+	Name        string    `toml:"name"`
+	Description string    `toml:"description"`
+	CostClass   string    `toml:"cost_class"`
+	FixPolicy   string    `toml:"fix_policy"`
+	Scope       string    `toml:"scope"`
+	Blocking    *[]string `toml:"blocking"`
+	Timeout     *string   `toml:"timeout"`
 }
 
 type bindingWire struct {
 	Language         string            `toml:"language"`
 	Tool             string            `toml:"tool"`
 	Command          []string          `toml:"command"`
-	SuccessExitCodes []int             `toml:"success_exit_codes"`
+	SuccessExitCodes *[]int            `toml:"success_exit_codes"`
+	FindingExitCodes *[]int            `toml:"finding_exit_codes"`
 	Normalizer       string            `toml:"normalizer"`
 	RuleID           string            `toml:"rule_id"`
 	Message          string            `toml:"message"`
@@ -211,12 +241,13 @@ func (wire manifestWire) toManifest(requestedName string) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("invalid scope %q", wire.Scope)
 	}
 
-	if len(wire.Blocking) == 0 {
-		return Manifest{}, fmt.Errorf("at least one blocking severity is required")
+	blockingValues := []string{"error", "warning"}
+	if wire.Blocking != nil {
+		blockingValues = *wire.Blocking
 	}
-	blocking := make([]finding.Severity, len(wire.Blocking))
-	seen := make(map[finding.Severity]struct{}, len(wire.Blocking))
-	for index, value := range wire.Blocking {
+	blocking := make([]finding.Severity, len(blockingValues))
+	seen := make(map[finding.Severity]struct{}, len(blockingValues))
+	for index, value := range blockingValues {
 		severity, err := canonicalSeverity(value)
 		if err != nil {
 			return Manifest{}, fmt.Errorf("blocking severity: %w", err)
@@ -269,18 +300,28 @@ func (wire bindingWire) toBinding(directoryLanguage string) (Binding, error) {
 			return Binding{}, fmt.Errorf("binding command argument %d is empty", index)
 		}
 	}
-	if len(wire.SuccessExitCodes) == 0 {
-		return Binding{}, fmt.Errorf("at least one success exit code is required")
+	successExitCodes := []int{0}
+	if wire.SuccessExitCodes != nil {
+		if len(*wire.SuccessExitCodes) == 0 {
+			return Binding{}, fmt.Errorf("success exit codes cannot be explicitly empty")
+		}
+		successExitCodes = *wire.SuccessExitCodes
 	}
-	seenExits := make(map[int]struct{}, len(wire.SuccessExitCodes))
-	for _, exitCode := range wire.SuccessExitCodes {
-		if exitCode < 0 || exitCode > 255 {
-			return Binding{}, fmt.Errorf("invalid success exit code %d", exitCode)
-		}
+	findingExitCodes := []int(nil)
+	if wire.FindingExitCodes != nil {
+		findingExitCodes = *wire.FindingExitCodes
+	}
+	seenExits, err := validateExitCodes("success", successExitCodes)
+	if err != nil {
+		return Binding{}, err
+	}
+	if _, err := validateExitCodes("finding", findingExitCodes); err != nil {
+		return Binding{}, err
+	}
+	for _, exitCode := range findingExitCodes {
 		if _, exists := seenExits[exitCode]; exists {
-			return Binding{}, fmt.Errorf("duplicate success exit code %d", exitCode)
+			return Binding{}, fmt.Errorf("exit code %d cannot be both success and finding", exitCode)
 		}
-		seenExits[exitCode] = struct{}{}
 	}
 	if strings.TrimSpace(wire.Normalizer) == "" {
 		return Binding{}, fmt.Errorf("binding normalizer is required")
@@ -337,7 +378,8 @@ func (wire bindingWire) toBinding(directoryLanguage string) (Binding, error) {
 		Language:         wire.Language,
 		Tool:             wire.Tool,
 		Command:          append([]string(nil), wire.Command...),
-		SuccessExitCodes: append([]int(nil), wire.SuccessExitCodes...),
+		SuccessExitCodes: append([]int(nil), successExitCodes...),
+		FindingExitCodes: append([]int(nil), findingExitCodes...),
 		Normalizer:       wire.Normalizer,
 		RuleID:           wire.RuleID,
 		Message:          wire.Message,
@@ -358,6 +400,20 @@ func canonicalSeverity(value string) (finding.Severity, error) {
 	}
 }
 
+func validateExitCodes(kind string, exitCodes []int) (map[int]struct{}, error) {
+	seen := make(map[int]struct{}, len(exitCodes))
+	for _, exitCode := range exitCodes {
+		if exitCode < 0 {
+			return nil, fmt.Errorf("invalid %s exit code %d", kind, exitCode)
+		}
+		if _, exists := seen[exitCode]; exists {
+			return nil, fmt.Errorf("duplicate %s exit code %d", kind, exitCode)
+		}
+		seen[exitCode] = struct{}{}
+	}
+	return seen, nil
+}
+
 func validateVersion(version Version) error {
 	if len(version.Command) == 0 || version.Pattern == "" || version.Constraint == "" {
 		return fmt.Errorf("version command, pattern, and constraint are required")
@@ -374,14 +430,39 @@ func validateVersion(version Version) error {
 	if pattern.NumSubexp() < 1 {
 		return fmt.Errorf("version pattern requires a capture group")
 	}
-	if !strings.HasPrefix(version.Constraint, ">=") {
-		return fmt.Errorf("unsupported version constraint %q: only >= is supported", version.Constraint)
-	}
-	minimum := strings.TrimSpace(strings.TrimPrefix(version.Constraint, ">="))
-	if _, err := parseSemanticVersion(minimum); err != nil {
-		return fmt.Errorf("invalid constraint version %q: %w", minimum, err)
+	if _, err := parseConstraint(version.Constraint); err != nil {
+		return err
 	}
 	return nil
+}
+
+func validateOverrideRoot(root string) (bool, error) {
+	info, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect gate override directory %q: %w", root, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("gate override directory %q is a symlink", root)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("gate override path %q is not a directory", root)
+	}
+	return true, nil
+}
+
+func rejectSymlinks(root string) error {
+	return filepath.WalkDir(root, func(filename string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("inspect gate override entry %q: %w", filename, err)
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("gate override entry %q is a symlink", filename)
+		}
+		return nil
+	})
 }
 
 func validateComponent(label, value string) error {

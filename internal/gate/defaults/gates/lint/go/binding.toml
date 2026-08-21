@@ -1,7 +1,8 @@
 language = "go"
 tool = "golangci-lint"
 command = ["golangci-lint", "run", "--output.json.path=stdout", "--show-stats=false", "./..."]
-success_exit_codes = [0, 1]
+success_exit_codes = [0]
+finding_exit_codes = [1]
 normalizer = "golangci-json"
 
 [severity_map]
@@ -11,8 +12,8 @@ default = "warning"
 
 [version]
 command = ["golangci-lint", "version"]
-pattern = "v?(\\d+\\.\\d+\\.\\d+)"
-constraint = ">=2.12.2"
+pattern = "v?([0-9]+\\.[0-9]+\\.[0-9]+[-+0-9A-Za-z.]*)"
+constraint = ">=2.12.2 <3.0.0"
 
 [aliases]
 "golangci-lint/*" = "lint-correctness"

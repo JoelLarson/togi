@@ -490,7 +490,10 @@ func TestConfigDirectoryOverridesEmbeddedGateWholesale(t *testing.T) {
 
 Add table tests for unknown TOML fields, missing binding commands, invalid enum
 values, invalid duration, an absent requested gate, template expansion with
-settings, bad templates, version extraction, and `>=` version comparison.
+settings, bad templates, clean/finding exit-code validation, advisory gates,
+SemVer range comparison, and rejected override symlinks. Pin these defaults:
+omitted `blocking` means error/warning, explicit `blocking = []` stays empty,
+and omitted `success_exit_codes` means `[0]` while explicit empty is invalid.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -535,6 +538,7 @@ type Binding struct {
 	Tool             string
 	Command          []string
 	SuccessExitCodes []int
+	FindingExitCodes []int
 	Normalizer       string
 	RuleID           string
 	Message          string
@@ -558,7 +562,10 @@ func (v Version) Observe(raw string) (observed string, matches bool, err error)
 ```
 
 Decode wire structs using `toml.NewDecoder(...).DisallowUnknownFields()`, then
-validate and convert durations. `embed.go` owns:
+validate and convert durations. Preserve field presence where omission has a
+default but explicit empty has distinct semantics. Exit-code lists must contain
+unique nonnegative values and must not overlap. Reject symlinks anywhere in an
+override gate before opening it. `embed.go` owns:
 
 ```go
 //go:embed defaults/gates
@@ -580,7 +587,8 @@ them repo-wide because scope filtering does not exist yet. `lint` uses
 language = "go"
 tool = "golangci-lint"
 command = ["golangci-lint", "run", "--output.json.path=stdout", "--show-stats=false", "./..."]
-success_exit_codes = [0, 1]
+success_exit_codes = [0]
+finding_exit_codes = [1]
 normalizer = "golangci-json"
 
 [severity_map]
@@ -590,15 +598,16 @@ default = "warning"
 
 [version]
 command = ["golangci-lint", "version"]
-pattern = "v?(\\d+\\.\\d+\\.\\d+)"
-constraint = ">=2.12.2"
+pattern = "v?([0-9]+\\.[0-9]+\\.[0-9]+[-+0-9A-Za-z.]*)"
+constraint = ">=2.12.2 <3.0.0"
 ```
 
 ```toml
 language = "go"
 tool = "gocyclo"
 command = ["gocyclo", "-over", "{{.threshold}}", "."]
-success_exit_codes = [0, 1]
+success_exit_codes = [0]
+finding_exit_codes = [1]
 normalizer = "regex:^(?P<value>\\d+) \\S+ (?P<symbol>\\S+) (?P<file>[^:]+):(?P<line>\\d+):\\d+$"
 rule_id = "gocyclo/complexity"
 message = "cyclomatic complexity {{.value}} in {{.symbol}}"
@@ -896,9 +905,10 @@ git commit -m "Persist an exclusive external run ledger" \
 
 Build tiny Go helper binaries during tests rather than using shell scripts, so
 tests remain cross-platform. Helpers select behavior from their executable
-name or first argument. Cover: valid JSON/text, findings exit 1, crash exit 2,
-missing executable, sleep past timeout, malformed output, >1 MiB output, and
-one slow errored gate alongside one fast healthy gate.
+name or first argument. Cover: valid JSON/text, finding exit 1 with valid
+findings, finding exit 1 with zero findings, finding exit 1 with stderr, crash
+exit 2, missing executable, sleep past timeout, malformed output, >1 MiB
+output, and one slow errored gate alongside one fast healthy gate.
 
 The central regression test is:
 
@@ -951,11 +961,14 @@ func Collect(ctx context.Context, e Executor, requests []Request, limit int) []G
 
 Render arguments without a shell and invoke `exec.CommandContext` with
 `Cmd.Dir = req.Root`. Capture stdout/stderr through capped writers, persist
-both before parsing, and interpret only binding-declared success exit codes as
-normalizable. Run the optional version command separately; extraction failures
-become warnings in phase 1. Convert deadline expiry, persistence failure,
-normalizer error, and enricher error to `GateErrored`. Never cancel sibling
-requests because one result errored.
+both before parsing. A declared success exit is clean execution. A declared
+finding exit is accepted only after normalization produces at least one valid
+finding and stderr is empty; otherwise it is `GateErrored`. Normalize stdout
+for both declared classes; success exits may produce zero or more findings.
+Any undeclared exit is also `GateErrored`. Run the optional version command
+separately; extraction failures become warnings in phase 1. Convert deadline
+expiry, persistence failure, normalizer error, and enricher error to
+`GateErrored`. Never cancel sibling requests because one result errored.
 
 Use a fixed worker pool, collect every indexed result, group findings after
 enrichment, and return request order. The caller computes global deterministic

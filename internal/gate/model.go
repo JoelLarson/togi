@@ -59,6 +59,7 @@ type Binding struct {
 	Tool             string
 	Command          []string
 	SuccessExitCodes []int
+	FindingExitCodes []int
 	Normalizer       string
 	RuleID           string
 	Message          string
