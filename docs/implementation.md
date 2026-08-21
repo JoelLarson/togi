@@ -79,7 +79,9 @@ timeout     = "60s"                   # optional; cost_class implies a default
 # internal/gate/defaults/gates/complexity/go/binding.toml
 language   = "go"
 tool       = "gocyclo"
-command    = ["gocyclo", "-over", "{{.threshold}}", "./..."]
+command    = ["gocyclo", "-over", "{{.threshold}}", "."]
+success_exit_codes = [0]
+finding_exit_codes = [1]
 normalizer = "regex:^(?P<value>\\d+) \\S+ (?P<symbol>\\S+) (?P<file>[^:]+):(?P<line>\\d+):\\d+$"
 
 [settings]
@@ -88,11 +90,6 @@ threshold = 15                        # per-project overridable; substituted int
 [severity_map]
 default = "warning"                   # tool vocabulary -> error | warning | info
 
-[version]
-command    = ["gocyclo", "-version"]
-pattern    = "v?(\\d+\\.\\d+\\.\\d+)"
-constraint = ">=0.6.0"                # phase 1 warns on mismatch; phase 3 errors
-
 [aliases]                             # rule_id -> principle page (ADR-0006)
 "gocyclo/complexity" = "small-composable-functions"
 ```
@@ -100,7 +97,10 @@ constraint = ">=0.6.0"                # phase 1 warns on mismatch; phase 3 error
 Notes: `command` is a `text/template` over `[settings]`, which is what makes
 thresholds per-project overridable. Aliases may glob (`"golangci-lint/*"`).
 Bindings for tools emitting structured output name a compiled normalizer
-(`golangci-json`, `sarif`, `clippy-json`) instead of a regex.
+(`golangci-json`, `sarif`, `clippy-json`) instead of a regex. A finding exit is
+accepted only when normalization yields at least one valid finding and stderr
+is empty. The gocyclo binding omits `[version]` because its CLI documents no
+version flag; the installed module is pinned operationally instead.
 
 ## CLI surface
 
