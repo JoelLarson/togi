@@ -58,6 +58,7 @@ func main() {
 		d, _ := time.ParseDuration(os.Args[3])
 		_ = os.WriteFile(path, []byte("active"), 0600)
 		time.Sleep(d)
+		if len(os.Args) > 4 { _ = os.WriteFile(os.Args[4], []byte("complete"), 0600) }
 		_ = os.Remove(path)
 	case "panic":
 		panic("helper crash")
@@ -482,6 +483,8 @@ func TestExecuteVersionChecksAreAdvisoryAndShareDeadline(t *testing.T) {
 		{name: "observed match", version: gate.Version{Command: []string{helperBinary(t), "version", "tool v1.2.3"}, Pattern: `v(\d+\.\d+\.\d+)`, Constraint: ">=1.0.0 <2.0.0"}, wantObserved: "1.2.3"},
 		{name: "constraint mismatch", version: gate.Version{Command: []string{helperBinary(t), "version", "tool v2.0.0"}, Pattern: `v(\d+\.\d+\.\d+)`, Constraint: ">=1.0.0 <2.0.0"}, wantObserved: "2.0.0", wantWarning: "constraint"},
 		{name: "missing match", version: gate.Version{Command: []string{helperBinary(t), "version", "opaque-secret"}, Pattern: `v(\d+\.\d+\.\d+)`, Constraint: ">=1.0.0"}, wantWarning: "observe"},
+		{name: "captured invalid version is not recorded", version: gate.Version{Command: []string{helperBinary(t), "version", "opaque-secret"}, Pattern: `(\S+)`, Constraint: ">=1.0.0"}, wantWarning: "observe"},
+		{name: "constraint error does not record extracted version", version: gate.Version{Command: []string{helperBinary(t), "version", "opaque-secret v1.2.3"}, Pattern: `v(\d+\.\d+\.\d+)`, Constraint: "invalid"}, wantWarning: "observe"},
 		{name: "version command failure", version: gate.Version{Command: []string{filepath.Join(root, "missing-version")}, Pattern: `(\S+)`, Constraint: ">=1.0.0"}, wantWarning: "command"},
 	}
 	for _, test := range tests {
@@ -495,10 +498,8 @@ func TestExecuteVersionChecksAreAdvisoryAndShareDeadline(t *testing.T) {
 			if test.wantWarning != "" && (len(report.Warnings) == 0 || !strings.Contains(strings.ToLower(report.Warnings[0]), test.wantWarning)) {
 				t.Fatalf("warnings = %v", report.Warnings)
 			}
-			for _, warning := range report.Warnings {
-				if strings.Contains(warning, "opaque-secret") {
-					t.Fatalf("warning leaked raw version output")
-				}
+			if leaked := report.ObservedVersion + report.Error + strings.Join(report.Warnings, "\n"); strings.Contains(leaked, "opaque-secret") {
+				t.Fatalf("report leaked raw version output: %#v", report)
 			}
 		})
 	}
@@ -582,10 +583,12 @@ func streams(writes []rawWrite) []string {
 func TestCollectReturnsReportsInRequestOrderAndLimitsConcurrency(t *testing.T) {
 	root := t.TempDir()
 	markerDir := t.TempDir()
+	completionDir := t.TempDir()
 	store := &memoryRawStore{}
 	requests := make([]Request, 4)
+	durations := []time.Duration{320 * time.Millisecond, 40 * time.Millisecond, 180 * time.Millisecond, 80 * time.Millisecond}
 	for index := range requests {
-		binding := gate.Binding{Language: fmt.Sprintf("go%d", index), Tool: "fixture", Command: []string{helperBinary(t), "active", filepath.Join(markerDir, fmt.Sprint(index)), "180ms"}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
+		binding := gate.Binding{Language: fmt.Sprintf("go%d", index), Tool: "fixture", Command: []string{helperBinary(t), "active", filepath.Join(markerDir, fmt.Sprint(index)), durations[index].String(), filepath.Join(completionDir, fmt.Sprint(index))}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
 		requests[index] = Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: fmt.Sprintf("gate%d", index), Timeout: 2 * time.Second}}, Binding: binding, Root: root, RawStore: store}
 	}
 	type result struct {
@@ -598,14 +601,18 @@ func TestCollectReturnsReportsInRequestOrderAndLimitsConcurrency(t *testing.T) {
 		done <- result{reports: Collect(context.Background(), Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, requests, 2), elapsed: time.Since(started)}
 	}()
 	peak := 0
+	firstCompletion := ""
 	for {
 		select {
 		case got := <-done:
 			if peak > 2 || peak < 2 {
 				t.Fatalf("peak active = %d, want 2", peak)
 			}
-			if got.elapsed < 300*time.Millisecond {
+			if got.elapsed < 280*time.Millisecond {
 				t.Fatalf("elapsed = %v, worker limit was not enforced", got.elapsed)
+			}
+			if firstCompletion != "1" {
+				t.Fatalf("first completion = %q, want request 1 before request 0", firstCompletion)
 			}
 			for index, report := range got.reports {
 				if report.Gate != fmt.Sprintf("gate%d", index) {
@@ -614,6 +621,13 @@ func TestCollectReturnsReportsInRequestOrderAndLimitsConcurrency(t *testing.T) {
 			}
 			return
 		default:
+			completed, err := os.ReadDir(completionDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if firstCompletion == "" && len(completed) > 0 {
+				firstCompletion = completed[0].Name()
+			}
 			entries, err := os.ReadDir(markerDir)
 			if err != nil {
 				t.Fatal(err)
@@ -621,6 +635,34 @@ func TestCollectReturnsReportsInRequestOrderAndLimitsConcurrency(t *testing.T) {
 			peak = max(peak, len(entries))
 			time.Sleep(2 * time.Millisecond)
 		}
+	}
+}
+
+func TestCollectPreservesFastHealthyFindingsWhenEarlierGateTimesOut(t *testing.T) {
+	root := t.TempDir()
+	writeSource(t, root, "source.go", "package source\nfunc complex() {}\n")
+	store := &memoryRawStore{}
+	slow := gate.Binding{Language: "slow", Tool: "fixture", Command: []string{helperBinary(t), "sleep", "5s"}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
+	fast := gate.Binding{
+		Language: "go", Tool: "fixture", Command: emitCommand(t, "17 pkg complex source.go:2:1\n", "", 1), SuccessExitCodes: []int{0}, FindingExitCodes: []int{1},
+		Normalizer: `regex:^(?P<value>\d+) \S+ (?P<symbol>\S+) (?P<file>[^:]+):(?P<line>\d+):\d+$`, RuleID: "gocyclo/complexity", Message: "complexity {{.value}} in {{.symbol}}", SeverityMap: map[string]finding.Severity{"default": finding.Warning},
+	}
+	requests := []Request{
+		{Gate: gate.Gate{Manifest: gate.Manifest{Name: "slow", Timeout: 150 * time.Millisecond}}, Binding: slow, Root: root, RawStore: store},
+		{Gate: gate.Gate{Manifest: gate.Manifest{Name: "fast", Timeout: time.Second}}, Binding: fast, Root: root, RawStore: store},
+	}
+	reports := Collect(context.Background(), Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, requests, 2)
+	if len(reports) != 2 || reports[0].Gate != "slow" || reports[1].Gate != "fast" {
+		t.Fatalf("reports not in request order: %#v", reports)
+	}
+	if reports[0].Status != GateErrored || !strings.Contains(reports[0].Error, "deadline") {
+		t.Fatalf("slow report = %#v", reports[0])
+	}
+	if reports[1].Status != GateFindings || len(reports[1].Findings) != 1 || reports[1].Findings[0].RuleID != "gocyclo/complexity" {
+		t.Fatalf("fast report = %#v", reports[1])
+	}
+	if reports[1].DurationMS >= reports[0].DurationMS {
+		t.Fatalf("fast duration %dms did not finish before slow duration %dms", reports[1].DurationMS, reports[0].DurationMS)
 	}
 }
 

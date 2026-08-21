@@ -146,11 +146,11 @@ func observeVersion(ctx context.Context, req Request, report *GateReport) error 
 	raw = append(raw, stdout.Bytes()...)
 	raw = append(raw, stderr.Bytes()...)
 	observed, matches, err := req.Binding.Version.Observe(string(raw))
-	report.ObservedVersion = observed
 	if err != nil {
 		report.Warnings = append(report.Warnings, "could not observe tool version")
 		return nil
 	}
+	report.ObservedVersion = observed
 	if !matches {
 		report.Warnings = append(report.Warnings, "observed tool version does not satisfy the configured constraint")
 	}
