@@ -10,13 +10,10 @@ phase order in [roadmap.md](./roadmap.md).
 - `go.mod` targets **go 1.25** — one release back from the local toolchain
   (1.26), since nothing in v1 needs 1.26-only features and one version of
   slack is the usual courtesy to anyone building from source.
-- **Apache-2.0** (`SPDX-License-Identifier: Apache-2.0`), covering everything
-  in the repo — code, gate defaults, and wiki principle pages alike. Chosen
-  over MIT for three reasons that matter to a tool meant for corporate
-  adoption: the explicit patent grant that legal reviewers look for, section 5
-  putting outside contributions under the same terms without a CLA, and
-  section 6 withholding trademark rights so a fork can't trade on the name.
-  Copyright is asserted in `NOTICE`; `LICENSE` is the verbatim text.
+- **Apache-2.0** (`SPDX-License-Identifier: Apache-2.0`), covering the whole
+  repo. `LICENSE` is the verbatim text; copyright is asserted in `NOTICE`.
+  Rationale and the rejected alternatives are in
+  [ADR-0013](./adr/0013-apache-2-0-licence.md).
 
 ## Dependencies
 
