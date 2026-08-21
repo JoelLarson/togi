@@ -12,8 +12,10 @@ immediately rather than at the end.
 
 ## Phase 1 — Runner, findings, and two report-only Go gates
 
-**Goal:** `togi run` on a Go repo produces a normalized, persisted findings
-report. No diff scoping, no fixing.
+**Goal:** `togi run` on a Go repo on Linux produces a normalized, persisted
+findings report. No diff scoping, no fixing. Other operating systems retain
+buildable platform seams but return unsupported before gate execution or
+ledger access until later phases add and verify their backends.
 
 This phase is larger than the original sketch, deliberately: XDG state,
 repo-id, and fingerprints land here rather than later. All three are small to
@@ -48,10 +50,11 @@ waivers all key on.
 many-to-one aliases) and `gocyclo` (structural — exercises ranges and, later,
 containment).
 
-**Exit criteria:** a report-only run on togi's own repo emits report.json with
-findings from both gates; re-running with no code changes produces an
-identical fingerprint set; a deliberately-broken gate binary produces
-`errored` without suppressing the other gate's findings.
+**Exit criteria:** on Linux, a report-only run on togi's own repo emits
+report.json with findings from both gates; re-running with no code changes
+produces an identical fingerprint set; a deliberately-broken gate binary
+produces `errored` without suppressing the other gate's findings. A non-Linux
+build returns unsupported before launching gates or accessing ledger state.
 
 > **New scope discovered: the range enricher.** Neither phase-1 tool emits
 > ranges. golangci-lint's JSON carries a single `Pos`, and gocyclo's text

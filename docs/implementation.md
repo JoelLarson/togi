@@ -30,6 +30,20 @@ driven by shelling to plumbing commands rather than go-git: the behaviours
 togi depends on (merge-base, worktrees, root commits) are exactly where a
 reimplementation would diverge from real git.
 
+## Platform boundary
+
+Phase 1 supports Linux runtime behavior only. The `run` and `status`
+orchestration entry points check the platform before gate loading, subprocess
+startup, or any ledger access and return `ErrUnsupportedPlatform` elsewhere.
+Platform-specific files retain buildable interfaces and unsupported stubs for
+future Darwin, BSD, illumos, AIX, Solaris, and Windows implementations; their
+presence is not a claim of runtime support.
+
+On Linux, each gate and version command starts in its own process group. A
+timeout or cancellation sends `SIGKILL` to that group before waiting for and
+draining the process, so descendants cannot outlive the errored gate or hold
+capture pipes open.
+
 ## Package layout
 
 `cmd/togi` thin main; `internal/` split by glossary term (ADR-0012):
@@ -165,20 +179,13 @@ redirect pruning, raw output, report publication, or status reads.
 Completed reports publish by linking a synced same-directory temporary file to
 `report.json`. The hard-link operation is atomic and refuses an existing name,
 so concurrent publishers cannot clobber one another and readers cannot observe
-partial JSON. Linux, Darwin, the BSDs, and illumos use `flock`; AIX and Solaris
-use `FcntlFlock`. Before opening the lock file, all supported backends acquire a
-unique process-local claim keyed by the canonical lock path and retained
-repository identity. Only the matching owner releases it, after successful OS
-unlock and handle close. This is required for process-associated `F_SETLK`
-semantics, where closing another descriptor for the same file can release the
-process's lock. These platforms verify `0700` directory modes and sync
-directories after publication. Windows uses `LockFileEx`/`UnlockFileEx` and
-opens the lock without delete sharing, so the lock pathname cannot be replaced
-while owned. Windows privacy inherits the state directory's ACLs, and directory
-syncing is best-effort because Go's standard library does not expose portable
-Windows directory fsync semantics. `Ledger.Start` returns
-`ErrUnsupportedPlatform` before creating state on Plan 9, JavaScript/Wasm, and
-WASI, where the standard library has no reliable advisory file lock.
+partial JSON. Linux uses `flock`. Before opening the lock file, the backend
+acquires a unique process-local claim keyed by the canonical lock path and
+retained repository identity. Only the matching owner releases it, after
+successful OS unlock and handle close. Linux verifies `0700` directory modes
+and syncs directories after publication. The orchestration boundary returns
+`ErrUnsupportedPlatform` on every non-Linux target before `Ledger.Start` or
+`Ledger.Latest` can access state.
 
 **Raw tool output is always persisted**, size-capped around 1 MB per gate with
 a truncation marker. ADR-0005's insulation governs what reaches the LLM, not

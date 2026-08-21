@@ -13,6 +13,11 @@ The design in `CONTEXT.md`, the ADRs, `docs/design.md`,
 `docs/implementation.md`, and `docs/roadmap.md` remains authoritative. This
 document resolves only the implementation boundaries needed to build phase 1.
 
+Phase 1 runtime support is Linux only. Platform-specific interfaces and
+buildable stubs remain for later ports, but `run` and `status` return
+`ErrUnsupportedPlatform` on non-Linux systems before starting subprocesses or
+accessing ledger state. `version` remains available because it does neither.
+
 ## Delivery Approach
 
 Build package by package in the sequence from `AGENTS.md`, using
@@ -138,6 +143,12 @@ them through a worker limit of `min(runtime.NumCPU(), 4)`. Each binding gets a
 context deadline from its manifest or cost-class default. Commands run with the
 target repository root as their working directory.
 
+On Linux, every gate and version command runs in a new process group. Timeout
+or cancellation kills the group before the executor waits and finishes
+draining captured output, preventing descendants from surviving an errored
+gate. Non-Linux executors are deferred and cannot be reached through phase 1
+orchestration.
+
 Each execution produces a gate result containing status, findings, timing,
 version observations, warnings, and structured error details. Missing tools,
 unexpected nonzero exits, timeouts, invalid command templates, and malformed
@@ -153,17 +164,15 @@ type or artifact.
 ## Run Ledger
 
 An exclusive per-repository OS advisory lock is acquired on an open, persistent
-`lock` file before pruning or creating a run directory. Linux, Darwin, the BSDs,
-and illumos use `flock`; AIX and Solaris use `fcntl`; Windows uses `LockFileEx`
-and denies delete sharing while the handle is open. Process exit releases
-OS ownership automatically. Before opening the lock file, a unique
-process-local claim keyed by canonical path and repository identity prevents
-same-process contenders from disturbing process-associated `fcntl` locks. Only
-the matching owner releases that claim after unlock and close succeed. The
+`lock` file before pruning or creating a run directory. Linux uses `flock`, and
+process exit releases ownership automatically. Before opening the lock file, a
+unique process-local claim keyed by canonical path and repository identity
+prevents same-process contenders from disturbing the active owner. Only the
+matching owner releases that claim after unlock and close succeed. The
 PID/start/token JSON is informational, and close never unlinks the lock file,
-so ownership cannot split across two inodes. Plan 9, JavaScript/Wasm, and WASI
-return `ErrUnsupportedPlatform` before creating state because the Go standard
-library cannot provide reliable advisory locking there.
+so ownership cannot split across two inodes. All non-Linux targets return
+`ErrUnsupportedPlatform` at the orchestration boundary before ledger access;
+their lock types remain buildable stubs for future implementations.
 
 Run IDs use nanosecond-resolution UTC timestamps plus a cryptographically
 random suffix, for example `20260821T151230.123456789Z-a3f1`. At run start, old
@@ -194,10 +203,12 @@ Unit tests require no external gate tools and no network. Repository identity
 tests create real Git repositories in `t.TempDir`. Gate-loader tests use
 embedded fixtures plus temporary XDG overrides. Normalizer golden tests compare
 recorded raw output with stable expected finding JSON. Runner tests put small
-fake executables on a temporary `PATH` to exercise success, findings,
+fake executables on a temporary `PATH` on Linux to exercise success, findings,
 malformed output, nonzero exits, timeouts, parallel completion, raw-output
 truncation, locking, pruning, and the rule that one errored gate cannot suppress
-another gate's findings.
+another gate's findings. Cross-compilation checks keep deferred platform seams
+buildable, and non-Linux tests assert the unsupported boundary without claiming
+functional process or ledger behavior.
 
 After unit verification, pinned `golangci-lint` and `gocyclo` binaries are
 installed in the user's global Go binary directory. The build is dogfooded on

@@ -5,9 +5,10 @@
 > superpowers:executing-plans to implement this plan task-by-task. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build `togi run --report-only` so a Go repository's gate output is
-normalized, persisted outside the repository, and rendered with typed exit
-codes.
+**Goal:** Build `togi run --report-only` on Linux so a Go repository's gate
+output is normalized, persisted outside the repository, and rendered with
+typed exit codes. Preserve buildable platform seams, but return unsupported on
+non-Linux systems before gate execution or ledger access.
 
 **Architecture:** A thin Cobra command delegates to glossary-owned internal
 packages. Gate definitions are embedded TOML data; compiled normalizers feed a
@@ -56,12 +57,11 @@ v0.6.0.
 - `internal/run/report.go`: report, gate result, verdict, and count types.
 - `internal/run/ledger.go`: run IDs, directories, atomic report write, latest,
   and pruning.
-- `internal/run/lock.go`, `lock_{unix,fcntl,posix,windows,unsupported}.go`:
-  persistent advisory lock, platform-specific file locking, and explicit
-  unsupported targets.
-- `internal/run/ledger_test.go`, `ledger_windows_test.go`,
-  `lock_unsupported_test.go`: ledger, advisory lock, anchoring, publication,
-  platform behavior, and pruning tests.
+- `internal/run/lock.go` and platform-specific lock files: persistent Linux
+  advisory locking plus buildable non-Linux stubs for future backends.
+- `internal/run/ledger_test.go`, `lock_unsupported_test.go`: Linux ledger,
+  advisory lock, anchoring, publication, pruning, and the non-Linux
+  unsupported boundary.
 - `internal/run/executor.go`: subprocess execution, timeout, output cap, and
   version observation.
 - `internal/run/collector.go`: bounded fan-out and deterministic barrier.
@@ -801,7 +801,8 @@ git commit -m "Place the enricher seam in the gate flow" \
 **Files:**
 
 - Modify: `internal/run/doc.go`
-- Create: `internal/run/{report,ledger,lock,lock_unix,lock_windows}.go`
+- Create: `internal/run/{report,ledger,lock}.go` and platform-specific files
+  containing the Linux implementation and buildable non-Linux stubs
 - Create: `internal/run/ledger_test.go`
 
 - [ ] **Step 1: Write failing ledger lifecycle tests**
@@ -896,19 +897,17 @@ func (r *RunLedger) WriteReport(Report) error
 func (r *RunLedger) Close() error
 ```
 
-Open a persistent regular `lock` file and hold a nonblocking OS advisory lock
-for the run lifetime: `flock` on Linux, Darwin, the BSDs, and illumos;
-`FcntlFlock` on AIX and Solaris; and `LockFileEx` on Windows. Deny Windows
-delete sharing while the lock is open. Before any backend opens the file,
-atomically acquire a unique process-local claim by canonical path and retained
-repository identity; release only the matching claim after OS unlock and close
-succeed. This prevents same-process descriptor closes from disturbing
-process-associated `F_SETLK` locks. Return `ErrUnsupportedPlatform` before state
-creation on Plan 9, JavaScript/Wasm, and WASI. Store informational PID/start/token
-JSON only while locked; never unlink the lock on close. Retain `os.Root` handles
-for repository state, runs, the current run, and raw output. Prune before
-creating the new run. Publish synced report JSON through an atomic no-replace
-hard link from a same-directory temporary file.
+Open a persistent regular `lock` file and hold a nonblocking `flock` for the
+run lifetime on Linux. Before opening it, atomically acquire a unique
+process-local claim by canonical path and retained repository identity;
+release only the matching claim after OS unlock and close succeed. Return
+`ErrUnsupportedPlatform` on every non-Linux target before creating or reading
+state. Keep their platform files as buildable stubs rather than functional
+backends. Store informational PID/start/token JSON only while locked; never
+unlink the lock on close. Retain `os.Root` handles for repository state, runs,
+the current run, and raw output. Prune before creating the new run. Publish
+synced report JSON through an atomic no-replace hard link from a same-directory
+temporary file.
 
 - [ ] **Step 4: Verify GREEN and commit**
 
@@ -933,8 +932,8 @@ git commit -m "Persist an exclusive external run ledger" \
 
 - [ ] **Step 1: Write failing fake-process tests**
 
-Build tiny Go helper binaries during tests rather than using shell scripts, so
-tests remain cross-platform. Helpers select behavior from their executable
+Build tiny Go helper binaries during Linux tests rather than using shell
+scripts, so tests remain hermetic. Helpers select behavior from their executable
 name or first argument. Cover: valid JSON/text, finding exit 1 with valid
 findings, finding exit 1 with zero findings, finding exit 1 with stderr, crash
 exit 2, missing executable, sleep past timeout, malformed output, >1 MiB
@@ -1000,6 +999,12 @@ separately; extraction failures become warnings in phase 1. Convert deadline
 expiry, persistence failure, normalizer error, and enricher error to
 `GateErrored`. Never cancel sibling requests because one result errored.
 
+On Linux, place every gate and version command in a new process group. On
+timeout or cancellation, send `SIGKILL` to the group before waiting and
+draining output so descendants cannot outlive the result. Retain buildable
+process-tree stubs for other platforms, but phase 1 orchestration must reject
+those platforms before this executor is called.
+
 Use a fixed worker pool, collect every indexed result, group findings after
 enrichment, and return request order. The caller computes global deterministic
 ordering later.
@@ -1049,6 +1054,8 @@ func TestExitCodePrecedence(t *testing.T) {
 Add tests that counts include occurrences, output sorts by file/line, errored
 gate summaries are loud, `--no-color` disables ANSI, `status` reads rather than
 executes, `--gate` filters by exact name, and errored plus findings exits 4.
+Add an injected-platform test proving `run` and `status` return
+`ErrUnsupportedPlatform` before gate loading, process startup, or ledger access.
 Before any orchestration code exists, add the hermetic phase-level regression:
 
 ```go
@@ -1112,11 +1119,13 @@ type RenderOptions struct { Color bool }
 func Render(io.Writer, Report, RenderOptions) error
 ```
 
-`Run` resolves repo-id, creates the repo ledger, loads gates, selects Go
-bindings, collects results with `min(runtime.NumCPU(), 4)`, flattens and groups
-findings, calculates counts/verdict, writes `report.json`, then renders it.
-Always close the ledger and preserve the primary error. `Status` resolves the
-same repo state, reads the newest complete report, and renders it.
+`Run` first enforces the Linux platform boundary, then resolves repo-id,
+creates the repo ledger, loads gates, selects Go bindings, collects results
+with `min(runtime.NumCPU(), 4)`, flattens and groups findings, calculates
+counts/verdict, writes `report.json`, then renders it. Always close the ledger
+and preserve the primary error. `Status` resolves the same repo state, reads
+the newest complete report, and renders it after the same boundary check.
+Non-Linux calls perform none of those operations.
 
 - [ ] **Step 4: Wire the thin Cobra commands**
 
@@ -1167,8 +1176,9 @@ go build ./...
 go test -race ./...
 ```
 
-Expected: build succeeds and every test passes while `golangci-lint` and
-`gocyclo` are still absent from `PATH`.
+Expected: the Linux build succeeds and every test passes while `golangci-lint`
+and `gocyclo` are still absent from `PATH`; deferred targets cross-compile with
+unsupported stubs.
 
 - [ ] **Step 2: Install the user-approved pinned global binaries**
 

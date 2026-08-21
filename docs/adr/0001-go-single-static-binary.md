@@ -1,10 +1,13 @@
 # Go, distributed as a single static binary with a subcommand CLI
 
-togi has to run on any machine where a target repo is checked out, without
+togi ultimately has to run wherever a target repo is checked out, without
 adding a runtime, a virtualenv, or a package manager to that machine. Go gives
 a single static binary that drops onto PATH, plus first-class subprocess and
 concurrency handling — which is most of what togi does: fan out tool
-executions, collect their output, shell out to agent CLIs.
+executions, collect their output, shell out to agent CLIs. Phase 1 validates
+that architecture on Linux only; other platform backends remain buildable
+extension points until their locking and process-lifecycle semantics are
+implemented and tested.
 
 The CLI is subcommand-shaped (`togi run`, `togi status`, …) rather than a
 single-purpose command, because v1's gauntlet is one stage of an eventual
