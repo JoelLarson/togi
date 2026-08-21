@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -21,6 +24,10 @@ type ID struct {
 
 // Resolve derives a stable identity for the repository containing start.
 func Resolve(ctx context.Context, start string) (ID, error) {
+	if err := ctx.Err(); err != nil {
+		return ID{}, err
+	}
+
 	root, err := gitOutput(ctx, start, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return ID{}, fmt.Errorf("find repository root: %w", err)
@@ -35,8 +42,14 @@ func Resolve(ctx context.Context, start string) (ID, error) {
 	if shallow {
 		key, err = fallbackKey(ctx, root)
 	} else {
-		key, err = rootCommitKey(ctx, root)
+		var headExists bool
+		headExists, err = hasHead(ctx, root)
 		if err != nil {
+			return ID{}, err
+		}
+		if headExists {
+			key, err = rootCommitKey(ctx, root)
+		} else {
 			key, err = fallbackKey(ctx, root)
 		}
 	}
@@ -49,6 +62,17 @@ func Resolve(ctx context.Context, start string) (ID, error) {
 		Directory: sanitize(filepath.Base(root)) + "-" + key[:12],
 		Root:      root,
 	}, nil
+}
+
+func hasHead(ctx context.Context, root string) (bool, error) {
+	_, err := gitOutput(ctx, root, "rev-parse", "--verify", "--quiet", "HEAD")
+	if err == nil {
+		return true, nil
+	}
+	if gitExitCode(err) == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("verify repository HEAD: %w", err)
 }
 
 func isShallowRepository(ctx context.Context, root string) (bool, error) {
@@ -78,7 +102,11 @@ func rootCommitKey(ctx context.Context, root string) (string, error) {
 }
 
 func fallbackKey(ctx context.Context, root string) (string, error) {
-	if remote, ok := remoteKey(ctx, root); ok {
+	remote, ok, err := remoteKey(ctx, root)
+	if err != nil {
+		return "", err
+	}
+	if ok {
 		return hash(remote), nil
 	}
 
@@ -93,10 +121,10 @@ func fallbackKey(ctx context.Context, root string) (string, error) {
 	return hash(abs), nil
 }
 
-func remoteKey(ctx context.Context, root string) (string, bool) {
+func remoteKey(ctx context.Context, root string) (string, bool, error) {
 	remotes, err := gitOutput(ctx, root, "remote")
 	if err != nil {
-		return "", false
+		return "", false, fmt.Errorf("list repository remotes: %w", err)
 	}
 
 	names := strings.Fields(remotes)
@@ -110,13 +138,13 @@ func remoteKey(ctx context.Context, root string) (string, bool) {
 	for _, name := range names {
 		remote, err := gitOutput(ctx, root, "remote", "get-url", name)
 		if err != nil {
-			continue
+			return "", false, fmt.Errorf("read remote %q: %w", name, err)
 		}
 		if normalized, ok := normalizeRemote(remote); ok {
-			return normalized, true
+			return normalized, true, nil
 		}
 	}
-	return "", false
+	return "", false, nil
 }
 
 func normalizeRemote(remote string) (string, bool) {
@@ -132,7 +160,7 @@ func normalizeRemote(remote string) (string, bool) {
 				authority = authority[at+1:]
 			}
 			if authority != "" && !strings.Contains(authority, "/") {
-				return normalizedHostPath(authority, remote[colon+1:])
+				return normalizedHostPath("", authority, "", remote[colon+1:])
 			}
 		}
 	}
@@ -148,11 +176,14 @@ func normalizeRemote(remote string) (string, bool) {
 	if parsed.Hostname() == "" {
 		return "", false
 	}
-	return normalizedHostPath(parsed.Hostname(), parsed.Path)
+	return normalizedHostPath(parsed.Scheme, parsed.Hostname(), parsed.Port(), parsed.Path)
 }
 
-func normalizedHostPath(host, path string) (string, bool) {
+func normalizedHostPath(scheme, host, port, path string) (string, bool) {
 	host = strings.ToLower(strings.TrimSpace(host))
+	if port != "" && port != defaultPort(scheme) {
+		host = net.JoinHostPort(host, port)
+	}
 	path = strings.TrimSuffix(strings.TrimRight(path, "/"), ".git")
 	path = strings.TrimLeft(path, "/")
 	if host == "" || path == "" {
@@ -161,13 +192,81 @@ func normalizedHostPath(host, path string) (string, bool) {
 	return host + "/" + path, true
 }
 
+func defaultPort(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "ssh":
+		return "22"
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
+
 func gitOutput(ctx context.Context, directory string, args ...string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	command := append([]string{"-C", directory}, args...)
-	output, err := exec.CommandContext(ctx, "git", command...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "git", command...)
+	cmd.Env = gitEnvironment()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
+		return "", &gitCommandError{args: args, err: err, output: strings.TrimSpace(string(output))}
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+type gitCommandError struct {
+	args   []string
+	err    error
+	output string
+}
+
+func (err *gitCommandError) Error() string {
+	if err.output == "" {
+		return fmt.Sprintf("git %s: %v", strings.Join(err.args, " "), err.err)
+	}
+	return fmt.Sprintf("git %s: %v: %s", strings.Join(err.args, " "), err.err, err.output)
+}
+
+func (err *gitCommandError) Unwrap() error {
+	return err.err
+}
+
+func gitExitCode(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+func gitEnvironment() []string {
+	var env []string
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if gitSelectsRepository(name) {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
+}
+
+func gitSelectsRepository(name string) bool {
+	switch name {
+	case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_NAMESPACE":
+		return true
+	default:
+		return false
+	}
 }
 
 func hash(value string) string {
@@ -176,6 +275,8 @@ func hash(value string) string {
 }
 
 func sanitize(name string) string {
+	const maxBasename = 255 - 1 - 12
+
 	var builder strings.Builder
 	lastDash := false
 	for _, r := range name {
@@ -194,6 +295,9 @@ func sanitize(name string) string {
 	result := strings.Trim(builder.String(), "-")
 	if result == "" {
 		return "repo"
+	}
+	if len(result) > maxBasename {
+		return result[:maxBasename]
 	}
 	return result
 }

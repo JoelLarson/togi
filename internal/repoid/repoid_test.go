@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,6 +97,56 @@ func TestResolveHashesOriginRemoteForShallowClone(t *testing.T) {
 	}
 }
 
+func TestResolvePropagatesCorruptObjectError(t *testing.T) {
+	repo := newCommittedRepo(t)
+	gitRun(t, repo, "remote", "add", "origin", "https://github.com/JoelLarson/togi.git")
+	root := gitTestOutput(t, repo, "rev-list", "--max-parents=0", "HEAD")
+	object := filepath.Join(repo, ".git", "objects", root[:2], root[2:])
+	if err := os.Chmod(object, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(object, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Resolve(context.Background(), repo)
+	if err == nil {
+		t.Fatal("Resolve succeeded for a corrupt committed repository")
+	}
+}
+
+func TestResolvePropagatesCanceledContext(t *testing.T) {
+	repo := newCommittedRepo(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := Resolve(ctx, repo)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Resolve error = %v, want context cancellation", err)
+	}
+}
+
+func TestResolveIgnoresRepoSelectingGitEnvironment(t *testing.T) {
+	repoA := newCommittedRepo(t)
+	writeFile(t, filepath.Join(repoA, "second.txt"), "second\n")
+	gitRun(t, repoA, "add", "second.txt")
+	gitRun(t, repoA, "commit", "-m", "second commit")
+	repoB := newEmptyRepo(t, "repository-b")
+	writeFile(t, filepath.Join(repoB, "initial.txt"), "repository B\n")
+	gitRun(t, repoB, "add", "initial.txt")
+	gitRun(t, repoB, "commit", "-m", "initial commit")
+	want := gitTestOutput(t, repoB, "rev-list", "--max-parents=0", "HEAD")
+
+	t.Setenv("GIT_DIR", filepath.Join(repoA, ".git"))
+	got, err := Resolve(context.Background(), repoB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Key != want {
+		t.Fatalf("Key = %q, want repository B root %q", got.Key, want)
+	}
+}
+
 func TestResolveHashesMultipleRootCommits(t *testing.T) {
 	repo := newCommittedRepo(t)
 	primary := gitTestOutput(t, repo, "branch", "--show-current")
@@ -135,15 +186,20 @@ func TestResolveDirectoryUsesSanitizedBasenameAndShortKey(t *testing.T) {
 
 func TestResolveNormalizesEquivalentRemoteForms(t *testing.T) {
 	forms := []struct {
-		name   string
-		remote string
+		name       string
+		remote     string
+		normalized string
 	}{
-		{name: "ssh", remote: "git@GitHub.com:JoelLarson/togi.git"},
-		{name: "https", remote: "https://user:password@github.com/JoelLarson/togi.git/"},
-		{name: "scp without username", remote: "github.com:JoelLarson/togi.git"},
+		{name: "ssh", remote: "git@GitHub.com:JoelLarson/togi.git", normalized: "github.com/JoelLarson/togi"},
+		{name: "https", remote: "https://user:password@github.com/JoelLarson/togi.git/", normalized: "github.com/JoelLarson/togi"},
+		{name: "scp without username", remote: "github.com:JoelLarson/togi.git", normalized: "github.com/JoelLarson/togi"},
+		{name: "ssh default port", remote: "ssh://github.com:22/JoelLarson/togi.git", normalized: "github.com/JoelLarson/togi"},
+		{name: "http default port", remote: "http://github.com:80/JoelLarson/togi.git", normalized: "github.com/JoelLarson/togi"},
+		{name: "https default port", remote: "https://github.com:443/JoelLarson/togi.git", normalized: "github.com/JoelLarson/togi"},
+		{name: "ssh custom port 2222", remote: "ssh://github.com:2222/JoelLarson/togi.git", normalized: "github.com:2222/JoelLarson/togi"},
+		{name: "ssh custom port 2223", remote: "ssh://github.com:2223/JoelLarson/togi.git", normalized: "github.com:2223/JoelLarson/togi"},
 	}
 
-	want := sha256Hex("github.com/JoelLarson/togi")
 	for _, form := range forms {
 		t.Run(form.name, func(t *testing.T) {
 			repo := newEmptyRepo(t, form.name)
@@ -153,10 +209,25 @@ func TestResolveNormalizesEquivalentRemoteForms(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Key != want {
+			if want := sha256Hex(form.normalized); got.Key != want {
 				t.Fatalf("Key = %q, want %q", got.Key, want)
 			}
 		})
+	}
+}
+
+func TestGitFixturesIgnoreInheritedCommitSigning(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "commit.gpgSign")
+	t.Setenv("GIT_CONFIG_VALUE_0", "true")
+
+	_ = newCommittedRepo(t)
+}
+
+func TestSanitizeBoundsDirectoryBasename(t *testing.T) {
+	name := sanitize(strings.Repeat("a", 300))
+	if got, max := len(name)+1+12, 255; got > max {
+		t.Fatalf("directory component length = %d, want at most %d", got, max)
 	}
 }
 
@@ -214,9 +285,32 @@ func gitTestOutput(t *testing.T, repo string, args ...string) string {
 }
 
 func gitTestOutputErr(repo string, args ...string) (string, error) {
-	command := append([]string{"-C", repo}, args...)
-	output, err := exec.Command("git", command...).CombinedOutput()
+	command := append([]string{"-c", "commit.gpgSign=false", "-c", "core.hooksPath=" + os.DevNull, "-C", repo}, args...)
+	cmd := exec.Command("git", command...)
+	cmd.Env = fixtureGitEnv()
+	output, err := cmd.CombinedOutput()
 	return string(output), err
+}
+
+func fixtureGitEnv() []string {
+	var env []string
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, "GIT_CONFIG_") || fixtureGitSelectsRepository(name) {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+}
+
+func fixtureGitSelectsRepository(name string) bool {
+	switch name {
+	case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_NAMESPACE":
+		return true
+	default:
+		return false
+	}
 }
 
 func sha256Hex(value string) string {
