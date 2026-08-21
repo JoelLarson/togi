@@ -1,0 +1,7 @@
+name = "lint"
+description = "Static analysis and correctness checks"
+cost_class = "fast"
+fix_policy = "autofix-then-llm"
+scope = "diff"
+blocking = ["error", "warning"]
+timeout = "60s"

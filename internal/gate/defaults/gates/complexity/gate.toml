@@ -1,0 +1,7 @@
+name = "complexity"
+description = "Function-level complexity limits"
+cost_class = "fast"
+fix_policy = "llm-fix"
+scope = "diff"
+blocking = ["error", "warning"]
+timeout = "60s"
