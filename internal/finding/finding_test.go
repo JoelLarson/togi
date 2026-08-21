@@ -310,6 +310,26 @@ func TestGroupPrefersErrorForEqualLocations(t *testing.T) {
 	}
 }
 
+func TestGroupAggregatesHighestSeverityAcrossLocations(t *testing.T) {
+	info := Finding{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Info, File: "file.go", Line: 4, Snippet: "same snippet", Message: "earliest message"}
+	errorFinding := Finding{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Error, File: "file.go", Line: 8, Snippet: "same snippet", Message: "later message"}
+
+	forward := mustGroup(t, []Finding{info, errorFinding})
+	reverse := mustGroup(t, []Finding{errorFinding, info})
+	if !reflect.DeepEqual(forward, reverse) {
+		t.Fatalf("Group() depends on input order: forward %#v, reverse %#v", forward, reverse)
+	}
+	if len(forward) != 1 {
+		t.Fatalf("len(Group()) = %d, want 1", len(forward))
+	}
+	if got := forward[0]; got.Severity != Error || got.Line != 4 || got.Language != "go" || got.Message != "earliest message" {
+		t.Fatalf("Group() = %#v, want earliest metadata with error severity", got)
+	}
+	if got, want := forward[0].Occurrences, []Occurrence{{Line: 8}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("occurrences = %#v, want %#v", got, want)
+	}
+}
+
 func TestGroupDoesNotMutateInputAndIsIdempotent(t *testing.T) {
 	findings := []Finding{
 		{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Warning, File: "a/file.go", Line: 10, Snippet: "same", Message: "message", Occurrences: []Occurrence{{Line: 20}}},

@@ -59,11 +59,22 @@ func combine(findings []Finding) Finding {
 	combined := clone(findings[primary.findingIndex])
 	combined.Line = primary.location.Line
 	combined.EndLine = primary.location.EndLine
+	combined.Severity = highestSeverity(findings)
 	combined.Occurrences = make([]Occurrence, 0, len(locations)-1)
 	for _, located := range locations[1:] {
 		combined.Occurrences = append(combined.Occurrences, located.location)
 	}
 	return combined
+}
+
+func highestSeverity(findings []Finding) Severity {
+	highest := findings[0].Severity
+	for _, finding := range findings[1:] {
+		if severityPrecedence(finding.Severity) > severityPrecedence(highest) {
+			highest = finding.Severity
+		}
+	}
+	return highest
 }
 
 func lessMetadata(left, right Finding) bool {
