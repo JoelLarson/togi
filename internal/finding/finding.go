@@ -74,6 +74,8 @@ func Validate(finding Finding) error {
 		return errors.New("language is required")
 	case strings.TrimSpace(finding.RuleID) == "":
 		return errors.New("rule ID is required")
+	case !toolQualifiedRuleID(finding.RuleID):
+		return errors.New("rule ID must be tool-qualified")
 	case !validSeverity(finding.Severity):
 		return fmt.Errorf("invalid severity %q", finding.Severity)
 	case finding.File == "":
@@ -104,4 +106,9 @@ func Validate(finding Finding) error {
 
 func validSeverity(severity Severity) bool {
 	return severity == Error || severity == Warning || severity == Info
+}
+
+func toolQualifiedRuleID(ruleID string) bool {
+	slash := strings.IndexByte(ruleID, '/')
+	return slash > 0 && slash < len(ruleID)-1
 }

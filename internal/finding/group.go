@@ -67,19 +67,32 @@ func combine(findings []Finding) Finding {
 }
 
 func lessMetadata(left, right Finding) bool {
+	if left.Severity != right.Severity {
+		return severityPrecedence(left.Severity) > severityPrecedence(right.Severity)
+	}
 	if left.Language != right.Language {
 		return left.Language < right.Language
-	}
-	if left.Severity != right.Severity {
-		return left.Severity < right.Severity
-	}
-	if left.Snippet != right.Snippet {
-		return left.Snippet < right.Snippet
 	}
 	if left.Message != right.Message {
 		return left.Message < right.Message
 	}
+	if left.Snippet != right.Snippet {
+		return left.Snippet < right.Snippet
+	}
 	return false
+}
+
+func severityPrecedence(severity Severity) int {
+	switch severity {
+	case Error:
+		return 3
+	case Warning:
+		return 2
+	case Info:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func appendLocation(locations []locatedFinding, seen map[Occurrence]struct{}, findingIndex int, location Occurrence) []locatedFinding {

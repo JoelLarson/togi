@@ -190,6 +190,28 @@ func TestValidateRejectsInvalidFindings(t *testing.T) {
 	}
 }
 
+func TestValidateRequiresToolQualifiedRuleID(t *testing.T) {
+	valid := Finding{Gate: "lint", Language: "go", RuleID: "tool/rule", Severity: Warning, File: "file.go", Line: 1, Snippet: "snippet", Message: "message"}
+	for _, ruleID := range []string{"tool/rule", "tool/nested/rule"} {
+		t.Run("valid/"+ruleID, func(t *testing.T) {
+			finding := valid
+			finding.RuleID = ruleID
+			if err := Validate(finding); err != nil {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+	for _, ruleID := range []string{"/rule", "tool/", "rule"} {
+		t.Run("invalid/"+ruleID, func(t *testing.T) {
+			finding := valid
+			finding.RuleID = ruleID
+			if err := Validate(finding); err == nil {
+				t.Fatal("Validate() error = nil, want error")
+			}
+		})
+	}
+}
+
 func TestGroupReturnsValidationError(t *testing.T) {
 	valid := Finding{Gate: "lint", Language: "go", RuleID: "lint/rule", Severity: Warning, File: "file.go", Line: 1, Snippet: "snippet", Message: "message"}
 	invalid := valid
@@ -271,6 +293,20 @@ func TestGroupIsDeterministicForEqualLocations(t *testing.T) {
 	reverse := mustGroup(t, []Finding{second, first})
 	if !reflect.DeepEqual(forward, reverse) {
 		t.Fatalf("Group() depends on input order: forward %#v, reverse %#v", forward, reverse)
+	}
+}
+
+func TestGroupPrefersErrorForEqualLocations(t *testing.T) {
+	warning := Finding{Gate: "lint", Language: "a-language", RuleID: "lint/rule", Severity: Warning, File: "file.go", Line: 4, Snippet: "same snippet", Message: "warning message"}
+	errorFinding := Finding{Gate: "lint", Language: "z-language", RuleID: "lint/rule", Severity: Error, File: "file.go", Line: 4, Snippet: "same snippet", Message: "error message"}
+
+	forward := mustGroup(t, []Finding{warning, errorFinding})
+	reverse := mustGroup(t, []Finding{errorFinding, warning})
+	if !reflect.DeepEqual(forward, reverse) {
+		t.Fatalf("Group() depends on input order: forward %#v, reverse %#v", forward, reverse)
+	}
+	if len(forward) != 1 || forward[0].Severity != Error {
+		t.Fatalf("Group() = %#v, want one error finding", forward)
 	}
 }
 

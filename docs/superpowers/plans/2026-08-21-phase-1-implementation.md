@@ -352,6 +352,8 @@ git commit -m "Resolve external togi storage paths" \
 - Create: `internal/finding/finding.go`
 - Create: `internal/finding/group.go`
 - Create: `internal/finding/finding_test.go`
+- Create: `internal/finding/path_unix_test.go`
+- Create: `internal/finding/path_windows_test.go`
 
 - [ ] **Step 1: Write failing schema and fingerprint tests**
 
@@ -380,7 +382,8 @@ func TestGroupMakesEarliestLocationPrimary(t *testing.T) {
 		{Gate: "lint", Language: "go", RuleID: "tool/rule", Severity: Warning, File: "a.go", Line: 9, Snippet: "x()", Message: "bad"},
 		{Gate: "lint", Language: "go", RuleID: "tool/rule", Severity: Warning, File: "a.go", Line: 3, Snippet: "x()", Message: "bad"},
 	}
-	got := Group(input)
+	got, err := Group(input)
+	if err != nil { t.Fatal(err) }
 	if got[0].Line != 3 || len(got[0].Occurrences) != 1 || got[0].Occurrences[0].Line != 9 {
 		t.Fatalf("grouped = %#v", got)
 	}
@@ -428,13 +431,16 @@ type Finding struct {
 }
 
 func Fingerprint(f Finding) string
-func Group(input []Finding) []Finding
+func Validate(f Finding) error
+func Group(input []Finding) ([]Finding, error)
 ```
 
-Normalize snippet whitespace with `strings.Fields`, normalize file separators
-to `/`, and feed each fingerprint field to SHA-256 as an 8-byte big-endian
-length followed by bytes. `Group` copies input, computes missing fingerprints,
-sorts locations, and never mutates callers' slices.
+Normalize snippet whitespace with `strings.Fields`, normalize file paths with
+native `filepath.Clean` and `filepath.ToSlash`, and feed each fingerprint field
+to SHA-256 as an 8-byte big-endian length followed by bytes. `Validate` rejects
+malformed findings and stale supplied fingerprints. `Group` validates and
+recomputes canonical fingerprints, sorts locations, and never mutates callers'
+slices.
 
 - [ ] **Step 4: Verify GREEN and commit**
 
@@ -648,7 +654,9 @@ func TestGoldenNormalizers(t *testing.T) {
 			ctx, raw, want := goldenFixture(t, tc.name)
 			got, err := Registry().Normalize(tc.normalizer, ctx, raw)
 			if err != nil { t.Fatal(err) }
-			assertGoldenJSON(t, finding.Group(got), want)
+			grouped, err := finding.Group(got)
+			if err != nil { t.Fatal(err) }
+			assertGoldenJSON(t, grouped, want)
 		})
 	}
 }
