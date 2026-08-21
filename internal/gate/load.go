@@ -104,7 +104,7 @@ type manifestWire struct {
 	FixPolicy   string   `toml:"fix_policy"`
 	Scope       string   `toml:"scope"`
 	Blocking    []string `toml:"blocking"`
-	Timeout     string   `toml:"timeout"`
+	Timeout     *string  `toml:"timeout"`
 }
 
 type bindingWire struct {
@@ -229,10 +229,10 @@ func (wire manifestWire) toManifest(requestedName string) (Manifest, error) {
 	}
 
 	timeout := costClass.defaultTimeout()
-	if wire.Timeout != "" {
-		parsed, err := time.ParseDuration(wire.Timeout)
+	if wire.Timeout != nil {
+		parsed, err := time.ParseDuration(*wire.Timeout)
 		if err != nil {
-			return Manifest{}, fmt.Errorf("invalid timeout %q: %w", wire.Timeout, err)
+			return Manifest{}, fmt.Errorf("invalid timeout %q: %w", *wire.Timeout, err)
 		}
 		if parsed <= 0 {
 			return Manifest{}, fmt.Errorf("timeout must be positive")

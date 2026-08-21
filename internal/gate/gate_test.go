@@ -141,6 +141,7 @@ func TestManifestValidation(t *testing.T) {
 		{name: "blocking required", gateName: "custom", manifest: strings.Replace(validManifest("custom", ""), `blocking = ["error", "warning"]`, `blocking = []`, 1), want: "blocking"},
 		{name: "invalid blocking severity", gateName: "custom", manifest: strings.Replace(validManifest("custom", ""), `blocking = ["error", "warning"]`, `blocking = ["critical"]`, 1), want: "severity"},
 		{name: "duplicate blocking severity", gateName: "custom", manifest: strings.Replace(validManifest("custom", ""), `blocking = ["error", "warning"]`, `blocking = ["error", "error"]`, 1), want: "duplicate"},
+		{name: "empty timeout", gateName: "custom", manifest: validManifest("custom", `timeout = ""`), want: "timeout"},
 		{name: "invalid timeout", gateName: "custom", manifest: validManifest("custom", `timeout = "soon"`), want: "timeout"},
 		{name: "nonpositive timeout", gateName: "custom", manifest: validManifest("custom", `timeout = "0s"`), want: "positive"},
 	}
