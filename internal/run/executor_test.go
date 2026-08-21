@@ -67,6 +67,16 @@ func main() {
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
 		if err := child.Start(); err != nil { os.Exit(97) }
+	case "spawn-survivor":
+		child := exec.Command(os.Args[0], "survivor", os.Args[2], os.Args[3])
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil { os.Exit(97) }
+		time.Sleep(5 * time.Second)
+	case "survivor":
+		_ = os.WriteFile(os.Args[2], []byte("started"), 0600)
+		time.Sleep(400 * time.Millisecond)
+		_ = os.WriteFile(os.Args[3], []byte("survived"), 0600)
 	default:
 		os.Exit(98)
 	}
@@ -369,6 +379,24 @@ func TestExecuteDeadlineBoundsInheritedPipeShutdown(t *testing.T) {
 	}
 }
 
+func TestExecuteDeadlineTerminatesDescendants(t *testing.T) {
+	root := t.TempDir()
+	started := filepath.Join(root, "descendant-started")
+	survived := filepath.Join(root, "descendant-survived")
+	binding := gate.Binding{Language: "go", Tool: "fixture", Command: []string{helperBinary(t), "spawn-survivor", started, survived}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
+	report := (Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}).Execute(context.Background(), Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "tree", Timeout: 150 * time.Millisecond}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}})
+	if report.Status != GateErrored || !strings.Contains(report.Error, "deadline") {
+		t.Fatalf("report = %#v", report)
+	}
+	if _, err := os.Stat(started); err != nil {
+		t.Fatalf("descendant did not start: %v", err)
+	}
+	time.Sleep(350 * time.Millisecond)
+	if _, err := os.Stat(survived); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("descendant survived Execute return: %v", err)
+	}
+}
+
 func TestExecutePersistsBeforeClassificationAndStopsOnPersistenceFailure(t *testing.T) {
 	root := t.TempDir()
 	secret := "raw-secret-that-must-not-leak"
@@ -472,6 +500,32 @@ func TestExecuteEnricherAndGroupingErrorsAreRedacted(t *testing.T) {
 	}
 }
 
+func TestExecuteStageErrorsNeverExposePartialRawValues(t *testing.T) {
+	root := t.TempDir()
+	writeSource(t, root, "source.go", "package source\nvar value = 1\n")
+	const secret = "capture-secret"
+	raw := `{"Issues":[{"FromLinter":"check","Text":"capture-secret","Severity":"warning","Pos":{"Filename":"source.go","Line":2}}]}`
+	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, raw, "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"warning": finding.Warning}}
+	tests := []struct {
+		name, stage string
+		enricher    *recordingEnricher
+	}{
+		{name: "enricher", stage: "enrich", enricher: &recordingEnricher{err: fmt.Errorf("cannot enrich captured value %s", secret)}},
+		{name: "group", stage: "group", enricher: &recordingEnricher{mutate: func(in []finding.Finding) []finding.Finding { in[0].Severity = finding.Severity(secret); return in }}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			report := (Executor{Registry: normalizer.NewRegistry(), Enricher: test.enricher}).Execute(context.Background(), Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}})
+			if report.Status != GateErrored || !strings.Contains(report.Error, test.stage) {
+				t.Fatalf("report = %#v", report)
+			}
+			if strings.Contains(report.Error, secret) {
+				t.Fatalf("stage error leaked partial raw value: %q", report.Error)
+			}
+		})
+	}
+}
+
 func TestExecuteVersionChecksAreAdvisoryAndShareDeadline(t *testing.T) {
 	root := t.TempDir()
 	base := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, "", "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
@@ -485,6 +539,8 @@ func TestExecuteVersionChecksAreAdvisoryAndShareDeadline(t *testing.T) {
 		{name: "missing match", version: gate.Version{Command: []string{helperBinary(t), "version", "opaque-secret"}, Pattern: `v(\d+\.\d+\.\d+)`, Constraint: ">=1.0.0"}, wantWarning: "observe"},
 		{name: "captured invalid version is not recorded", version: gate.Version{Command: []string{helperBinary(t), "version", "opaque-secret"}, Pattern: `(\S+)`, Constraint: ">=1.0.0"}, wantWarning: "observe"},
 		{name: "constraint error does not record extracted version", version: gate.Version{Command: []string{helperBinary(t), "version", "opaque-secret v1.2.3"}, Pattern: `v(\d+\.\d+\.\d+)`, Constraint: "invalid"}, wantWarning: "observe"},
+		{name: "split streams cannot synthesize version", version: gate.Version{Command: emitCommand(t, "tool v1.", "2.3", 0), Pattern: `v(\d+\.\d+\.\d+)`, Constraint: ">=1.0.0"}, wantWarning: "observe"},
+		{name: "stdout version takes precedence", version: gate.Version{Command: emitCommand(t, "tool v1.2.3", "tool v9.9.9", 0), Pattern: `v(\d+\.\d+\.\d+)`, Constraint: ">=1.0.0"}, wantObserved: "1.2.3"},
 		{name: "version command failure", version: gate.Version{Command: []string{filepath.Join(root, "missing-version")}, Pattern: `(\S+)`, Constraint: ">=1.0.0"}, wantWarning: "command"},
 	}
 	for _, test := range tests {

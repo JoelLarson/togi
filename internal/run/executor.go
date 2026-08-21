@@ -75,7 +75,7 @@ func (e Executor) Execute(parent context.Context, req Request) (report GateRepor
 	stdout, stderr, runErr := runCommand(ctx, req.Root, command)
 	persistErr := persistRaw(req, stdout.Bytes(), stderr.Bytes())
 	if persistErr != nil {
-		return errored(report, redactError(persistErr, stdout.Bytes(), stderr.Bytes()))
+		return errored(report, errors.New("persist raw output: storage failure"))
 	}
 	if ctx.Err() != nil {
 		return errored(report, contextExecutionError(ctx.Err()))
@@ -101,18 +101,18 @@ func (e Executor) Execute(parent context.Context, req Request) (report GateRepor
 		Gate: req.Gate.Manifest.Name, Root: req.Root, Binding: req.Binding,
 	}, stdout.Bytes())
 	if err != nil {
-		return errored(report, redactError(fmt.Errorf("normalize gate output: %w", err), stdout.Bytes(), stderr.Bytes()))
+		return errored(report, errors.New("normalize gate output: invalid tool output; inspect persisted raw output"))
 	}
 	if findingExit && len(normalized) == 0 {
 		return errored(report, errors.New("finding exit produced no valid findings"))
 	}
 	enriched, err := e.Enricher.Enrich(ctx, enricher.Context{Root: req.Root, Language: req.Binding.Language}, normalized)
 	if err != nil {
-		return errored(report, redactError(fmt.Errorf("enrich findings: %w", err), stdout.Bytes(), stderr.Bytes()))
+		return errored(report, errors.New("enrich findings: enrichment failed"))
 	}
 	grouped, err := finding.Group(enriched)
 	if err != nil {
-		return errored(report, redactError(fmt.Errorf("group findings: %w", err), stdout.Bytes(), stderr.Bytes()))
+		return errored(report, errors.New("group findings: invalid enriched findings"))
 	}
 	report.Findings = grouped
 	if len(grouped) == 0 {
@@ -142,10 +142,7 @@ func observeVersion(ctx context.Context, req Request, report *GateReport) error 
 		report.Warnings = append(report.Warnings, "version command failed")
 		return nil
 	}
-	raw := make([]byte, 0, stdout.Len()+stderr.Len())
-	raw = append(raw, stdout.Bytes()...)
-	raw = append(raw, stderr.Bytes()...)
-	observed, matches, err := req.Binding.Version.Observe(string(raw))
+	observed, matches, err := observeVersionStreams(req.Binding.Version, stdout.Bytes(), stderr.Bytes())
 	if err != nil {
 		report.Warnings = append(report.Warnings, "could not observe tool version")
 		return nil
@@ -155,6 +152,24 @@ func observeVersion(ctx context.Context, req Request, report *GateReport) error 
 		report.Warnings = append(report.Warnings, "observed tool version does not satisfy the configured constraint")
 	}
 	return nil
+}
+
+func observeVersionStreams(version gate.Version, stdout, stderr []byte) (string, bool, error) {
+	var lastErr error
+	for _, output := range [][]byte{stdout, stderr} {
+		if len(output) == 0 {
+			continue
+		}
+		observed, matches, err := version.Observe(string(output))
+		if err == nil {
+			return observed, matches, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("version output is empty")
+	}
+	return "", false, lastErr
 }
 
 func validateExecution(parent context.Context, e Executor, req Request) error {
@@ -220,8 +235,23 @@ func runCommand(ctx context.Context, root string, command []string) (*boundedBuf
 	cmd.WaitDelay = 100 * time.Millisecond
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	err := cmd.Run()
-	return stdout, stderr, err
+	tree, err := prepareProcessTree(cmd)
+	if err != nil {
+		return stdout, stderr, fmt.Errorf("prepare process tree: %w", err)
+	}
+	cmd.Cancel = func() error {
+		return tree.terminate(cmd.Process)
+	}
+	if err := cmd.Start(); err != nil {
+		return stdout, stderr, errors.Join(err, tree.close(nil))
+	}
+	if err := tree.afterStart(cmd.Process); err != nil {
+		terminateErr := tree.terminate(cmd.Process)
+		waitErr := cmd.Wait()
+		return stdout, stderr, errors.Join(err, terminateErr, waitErr, tree.close(cmd.Process))
+	}
+	waitErr := cmd.Wait()
+	return stdout, stderr, errors.Join(waitErr, tree.close(cmd.Process))
 }
 
 func persistRaw(req Request, stdout, stderr []byte) error {
@@ -270,19 +300,6 @@ func errored(report GateReport, err error) GateReport {
 		report.Error = err.Error()
 	}
 	return report
-}
-
-func redactError(err error, raw ...[]byte) error {
-	if err == nil {
-		return nil
-	}
-	message := err.Error()
-	for _, output := range raw {
-		if len(output) != 0 {
-			message = strings.ReplaceAll(message, string(output), "[raw output redacted]")
-		}
-	}
-	return errors.New(message)
 }
 
 type boundedBuffer struct {
