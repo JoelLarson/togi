@@ -48,6 +48,12 @@ func NewRegistry() Registry {
 	}}
 }
 
+// Ready reports whether the registry contains the required compiled normalizers.
+func (r Registry) Ready() bool {
+	_, ok := r.funcs["golangci-json"]
+	return ok
+}
+
 // Normalize dispatches to a compiled normalizer or a data-defined regex.
 func (r Registry) Normalize(name string, ctx Context, raw []byte) ([]finding.Finding, error) {
 	if strings.HasPrefix(name, "regex:") {

@@ -134,6 +134,12 @@ func TestRegistryIsOpaqueAndZeroValueIsSafe(t *testing.T) {
 	if _, err := registry.Normalize("unknown", Context{}, nil); err == nil {
 		t.Fatal("zero Registry returned nil error for unknown normalizer")
 	}
+	if registry.Ready() {
+		t.Fatal("zero Registry is ready")
+	}
+	if !NewRegistry().Ready() {
+		t.Fatal("compiled Registry is not ready")
+	}
 }
 
 func TestRegistrySupportsConcurrentNormalization(t *testing.T) {

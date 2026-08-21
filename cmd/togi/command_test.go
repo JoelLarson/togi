@@ -26,6 +26,7 @@ func TestVersionCommand(t *testing.T) {
 }
 
 type fakeService struct {
+	ctx           context.Context
 	runOptions    runpkg.Options
 	runErr        error
 	statusRoot    string
@@ -33,7 +34,8 @@ type fakeService struct {
 	statusErr     error
 }
 
-func (service *fakeService) Run(_ context.Context, opts runpkg.Options) (runpkg.Report, error) {
+func (service *fakeService) Run(ctx context.Context, opts runpkg.Options) (runpkg.Report, error) {
+	service.ctx = ctx
 	service.runOptions = opts
 	return runpkg.Report{}, service.runErr
 }
@@ -89,13 +91,31 @@ func TestStatusCommandReadsWithoutRunVerdict(t *testing.T) {
 	}
 }
 
+func TestExecuteCommandPassesCanceledContextToService(t *testing.T) {
+	service := &fakeService{}
+	cmd := newRootCommandWithService(streams{out: io.Discard, err: io.Discard}, service)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := executeCommand(ctx, []string{"run"}, io.Discard, cmd); got != 0 {
+		t.Fatalf("status = %d", got)
+	}
+	if service.ctx == nil || !errors.Is(service.ctx.Err(), context.Canceled) {
+		t.Fatalf("service context = %v", service.ctx)
+	}
+}
+
 func TestMainRunMapsTypedAndInternalErrors(t *testing.T) {
+	var typedNil *runpkg.ExitError
 	for _, tc := range []struct {
 		name string
 		err  error
 		want int
 	}{
 		{name: "typed", err: &runpkg.ExitError{Code: 5, Err: errors.New("unverified")}, want: 5},
+		{name: "blocked", err: &runpkg.ExitError{Code: 2, Err: errors.New("blocked")}, want: 2},
+		{name: "typed nil", err: typedNil, want: 70},
+		{name: "zero", err: &runpkg.ExitError{Code: 0}, want: 70},
+		{name: "invalid", err: &runpkg.ExitError{Code: 6}, want: 70},
 		{name: "internal", err: errors.New("broken"), want: 70},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

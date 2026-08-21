@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -46,6 +47,9 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 	if err := service.checkPlatform(); err != nil {
 		return Report{}, err
 	}
+	if err := service.validate(true); err != nil {
+		return Report{}, err
+	}
 	if ctx == nil {
 		return Report{}, errors.New("run context is required")
 	}
@@ -60,6 +64,9 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 	repository, err := resolve(ctx, root)
 	if err != nil {
 		return Report{}, fmt.Errorf("resolve repository identity: %w", err)
+	}
+	if err := validateRepositoryID(repository); err != nil {
+		return Report{}, fmt.Errorf("validate repository identity: %w", err)
 	}
 	loader := service.Loader
 	if loader.OverrideDir == "" {
@@ -153,6 +160,9 @@ func (service Service) Status(ctx context.Context, root string, noColor bool) (R
 	if err := service.checkPlatform(); err != nil {
 		return Report{}, err
 	}
+	if err := service.validate(false); err != nil {
+		return Report{}, err
+	}
 	if ctx == nil {
 		return Report{}, errors.New("status context is required")
 	}
@@ -167,6 +177,9 @@ func (service Service) Status(ctx context.Context, root string, noColor bool) (R
 	if err != nil {
 		return Report{}, fmt.Errorf("resolve repository identity: %w", err)
 	}
+	if err := validateRepositoryID(repository); err != nil {
+		return Report{}, fmt.Errorf("validate repository identity: %w", err)
+	}
 	report, err := (Ledger{RepoState: service.Paths.RepoState(repository.Directory)}).Latest()
 	if err != nil {
 		return Report{}, fmt.Errorf("read latest report: %w", err)
@@ -179,6 +192,67 @@ func (service Service) Status(ctx context.Context, root string, noColor bool) (R
 		return Report{}, fmt.Errorf("render report: %w", err)
 	}
 	return report, nil
+}
+
+func (service Service) validate(requireExecutor bool) error {
+	if service.Paths.Config == "" || !filepath.IsAbs(service.Paths.Config) {
+		return errors.New("configuration root must be absolute")
+	}
+	if service.Paths.State == "" || !filepath.IsAbs(service.Paths.State) {
+		return errors.New("state root must be absolute")
+	}
+	if service.Loader.OverrideDir != "" && !filepath.IsAbs(service.Loader.OverrideDir) {
+		return errors.New("gate override root must be absolute")
+	}
+	if requireExecutor {
+		if !service.Executor.Registry.Ready() {
+			return errors.New("executor normalizer registry is not initialized")
+		}
+		if isNilInterface(service.Executor.Enricher) {
+			return errors.New("executor enricher is required")
+		}
+	}
+	if isNilInterface(service.Stdout) {
+		return errors.New("report output is required")
+	}
+	return nil
+}
+
+func validateRepositoryID(repository repoid.ID) error {
+	if strings.TrimSpace(repository.Key) == "" {
+		return errors.New("repository key is required")
+	}
+	if !safeRepositoryDirectory(repository.Directory) {
+		return errors.New("repository state directory must be one safe component")
+	}
+	if !filepath.IsAbs(repository.Root) {
+		return errors.New("repository root must be absolute")
+	}
+	canonical, err := filepath.EvalSymlinks(repository.Root)
+	if err != nil {
+		return errors.New("repository root cannot be resolved")
+	}
+	if filepath.Clean(repository.Root) != canonical {
+		return errors.New("repository root must be canonical")
+	}
+	info, err := os.Stat(canonical)
+	if err != nil || !info.IsDir() {
+		return errors.New("repository root must be a directory")
+	}
+	return nil
+}
+
+func safeRepositoryDirectory(directory string) bool {
+	if directory == "" || directory == "." || directory == ".." || len(directory) > 255 || filepath.Base(directory) != directory || strings.TrimSpace(directory) != directory {
+		return false
+	}
+	for _, character := range directory {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (service Service) checkPlatform() error {
@@ -204,11 +278,26 @@ func selectRequests(gates []gate.Gate, requested []string, root string) ([]Reque
 			selected[name] = struct{}{}
 		}
 	}
-	known := make(map[string]struct{}, len(gates))
+	known := make(map[string]gate.Gate, len(gates))
+	for _, candidate := range gates {
+		name := candidate.Manifest.Name
+		if _, exists := known[name]; exists {
+			return nil, fmt.Errorf("duplicate loaded gate manifest %q", name)
+		}
+		known[name] = candidate
+	}
+	for _, name := range requestedUnique {
+		candidate, ok := known[name]
+		if !ok {
+			return nil, fmt.Errorf("unknown gate %q", name)
+		}
+		if _, ok := candidate.Bindings["go"]; !ok {
+			return nil, fmt.Errorf("requested gate %q has no Go binding", name)
+		}
+	}
 	requests := make([]Request, 0, len(gates))
 	for _, candidate := range gates {
 		name := candidate.Manifest.Name
-		known[name] = struct{}{}
 		if len(selected) > 0 {
 			if _, ok := selected[name]; !ok {
 				continue
@@ -219,11 +308,6 @@ func selectRequests(gates []gate.Gate, requested []string, root string) ([]Reque
 			continue
 		}
 		requests = append(requests, Request{Gate: candidate, Binding: binding, Root: root})
-	}
-	for _, name := range requestedUnique {
-		if _, ok := known[name]; !ok {
-			return nil, fmt.Errorf("unknown gate %q", name)
-		}
 	}
 	if len(requests) == 0 {
 		return nil, errors.New("no Go gates selected")

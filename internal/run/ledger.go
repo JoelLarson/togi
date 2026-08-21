@@ -10,7 +10,9 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -513,26 +515,69 @@ func validateReport(report Report, runID string) error {
 	if report.RunID != runID {
 		return fmt.Errorf("report run ID %q does not match ledger run ID %q", report.RunID, runID)
 	}
-	if report.Verdict != "" && report.Verdict != VerdictUnverified && report.Verdict != VerdictFindings && report.Verdict != VerdictErrored {
+	if strings.TrimSpace(report.RepoID) == "" {
+		return errors.New("report repository ID is required")
+	}
+	if report.StartedAt.IsZero() || report.FinishedAt.IsZero() {
+		return errors.New("report timestamps are required")
+	}
+	if report.Verdict != VerdictUnverified && report.Verdict != VerdictFindings && report.Verdict != VerdictErrored {
 		return fmt.Errorf("invalid verdict %q", report.Verdict)
 	}
-	if !report.StartedAt.IsZero() && !report.FinishedAt.IsZero() && report.FinishedAt.Before(report.StartedAt) {
+	if report.FinishedAt.Before(report.StartedAt) {
 		return errors.New("report finished before it started")
 	}
-	if report.Counts.Errors < 0 || report.Counts.Warnings < 0 || report.Counts.Info < 0 || report.Counts.Occurrences < 0 {
-		return errors.New("report counts must not be negative")
+	if len(report.Gates) == 0 {
+		return errors.New("report must contain at least one gate")
 	}
+	if report.Findings == nil {
+		return errors.New("report findings array is required")
+	}
+	flattened := make([]finding.Finding, 0)
 	for index, gate := range report.Gates {
-		if gate.Status != "" && gate.Status != GatePassed && gate.Status != GateFindings && gate.Status != GateErrored {
+		if strings.TrimSpace(gate.Gate) == "" {
+			return fmt.Errorf("gate %d name is required", index)
+		}
+		if strings.TrimSpace(gate.Language) == "" {
+			return fmt.Errorf("gate %d language is required", index)
+		}
+		if gate.Status != GatePassed && gate.Status != GateFindings && gate.Status != GateErrored {
 			return fmt.Errorf("gate %d has invalid status %q", index, gate.Status)
 		}
 		if gate.DurationMS < 0 {
 			return fmt.Errorf("gate %d has negative duration", index)
 		}
+		switch gate.Status {
+		case GatePassed:
+			if len(gate.Findings) != 0 || gate.Error != "" {
+				return fmt.Errorf("gate %d passed with findings or an error", index)
+			}
+		case GateFindings:
+			if len(gate.Findings) == 0 || gate.Error != "" {
+				return fmt.Errorf("gate %d findings status is inconsistent", index)
+			}
+		case GateErrored:
+			if len(gate.Findings) != 0 || strings.TrimSpace(gate.Error) == "" {
+				return fmt.Errorf("gate %d errored status is inconsistent", index)
+			}
+		}
 		for findingIndex, item := range gate.Findings {
 			if err := finding.Validate(item); err != nil {
 				return fmt.Errorf("gate %d finding %d: %w", index, findingIndex, err)
 			}
+			if item.Gate != gate.Gate || item.Language != gate.Language {
+				return fmt.Errorf("gate %d finding %d ownership is inconsistent", index, findingIndex)
+			}
+		}
+		if len(gate.Findings) > 0 {
+			grouped, err := finding.Group(gate.Findings)
+			if err != nil || !equalFindings(grouped, gate.Findings) {
+				return fmt.Errorf("gate %d findings are not deterministically grouped", index)
+			}
+		}
+		flattened = append(flattened, gate.Findings...)
+		if index > 0 && compareGateReports(report.Gates[index-1], gate) >= 0 {
+			return errors.New("report gates are duplicated or out of order")
 		}
 	}
 	for index, item := range report.Findings {
@@ -540,7 +585,32 @@ func validateReport(report Report, runID string) error {
 			return fmt.Errorf("finding %d: %w", index, err)
 		}
 	}
+	grouped, err := finding.Group(flattened)
+	if err != nil || !equalFindings(grouped, report.Findings) {
+		return errors.New("top-level findings do not match gate findings")
+	}
+	if counts := countFindings(report.Findings); counts != report.Counts {
+		return fmt.Errorf("report counts are inconsistent: got %+v, want %+v", report.Counts, counts)
+	}
+	if verdict := verdictFor(report.Gates, report.Findings); verdict != report.Verdict {
+		return fmt.Errorf("report verdict %q is inconsistent with %q", report.Verdict, verdict)
+	}
 	return nil
+}
+
+func equalFindings(left, right []finding.Finding) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		leftItem, rightItem := left[index], right[index]
+		leftOccurrences, rightOccurrences := leftItem.Occurrences, rightItem.Occurrences
+		leftItem.Occurrences, rightItem.Occurrences = nil, nil
+		if !reflect.DeepEqual(leftItem, rightItem) || !slices.Equal(leftOccurrences, rightOccurrences) {
+			return false
+		}
+	}
+	return true
 }
 
 func pruneRuns(runsRoot *os.Root, retain int) error {

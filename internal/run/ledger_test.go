@@ -56,7 +56,7 @@ func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
 		}
 	}
 
-	report := Report{SchemaVersion: 1, RunID: filepath.Base(run.Dir)}
+	report := completeReportFixture(filepath.Base(run.Dir))
 	if err := run.WriteReport(report); err != nil {
 		t.Fatal(err)
 	}
@@ -895,7 +895,7 @@ func TestRunLedgerWritesRemainAnchoredAfterRepoStateReplacement(t *testing.T) {
 		_ = run.Close()
 		t.Fatal(err)
 	}
-	if err := run.WriteReport(Report{SchemaVersion: 1, RunID: runID}); err != nil {
+	if err := run.WriteReport(completeReportFixture(runID)); err != nil {
 		_ = run.Close()
 		t.Fatal(err)
 	}
@@ -1314,7 +1314,7 @@ func TestWriteReportFillsRunIDAndRejectsDuplicate(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = run.Close() })
-	first := Report{SchemaVersion: 1, Verdict: VerdictUnverified}
+	first := completeReportFixture("")
 	if err := run.WriteReport(first); err != nil {
 		t.Fatal(err)
 	}
@@ -1330,7 +1330,7 @@ func TestWriteReportFillsRunIDAndRejectsDuplicate(t *testing.T) {
 		t.Fatalf("persisted run ID = %q, want %q", got, want)
 	}
 
-	if err := run.WriteReport(Report{SchemaVersion: 1, Verdict: VerdictErrored}); !errors.Is(err, ErrReportExists) {
+	if err := run.WriteReport(completeReportFixture("")); !errors.Is(err, ErrReportExists) {
 		t.Fatalf("duplicate WriteReport error = %v, want ErrReportExists", err)
 	}
 	after, err := os.ReadFile(filepath.Join(run.Dir, "report.json"))
@@ -1441,6 +1441,72 @@ func TestWriteReportRejectsInvalidReportsWithoutArtifacts(t *testing.T) {
 	}
 }
 
+func TestWriteReportRejectsTamperedCompleteReports(t *testing.T) {
+	tests := []struct {
+		name   string
+		tamper func(*Report)
+	}{
+		{name: "repo ID", tamper: func(report *Report) { report.RepoID = "" }},
+		{name: "started", tamper: func(report *Report) { report.StartedAt = time.Time{} }},
+		{name: "finished", tamper: func(report *Report) { report.FinishedAt = time.Time{} }},
+		{name: "counts", tamper: func(report *Report) { report.Counts.Errors = 1 }},
+		{name: "verdict", tamper: func(report *Report) { report.Verdict = VerdictFindings }},
+		{name: "gate name", tamper: func(report *Report) { report.Gates[0].Gate = "" }},
+		{name: "gate language", tamper: func(report *Report) { report.Gates[0].Language = "" }},
+		{name: "passed error", tamper: func(report *Report) { report.Gates[0].Error = "failed" }},
+		{name: "findings without findings", tamper: func(report *Report) { report.Gates[0].Status = GateFindings }},
+		{name: "errored without error", tamper: func(report *Report) { report.Gates[0].Status = GateErrored; report.Verdict = VerdictErrored }},
+		{name: "duplicate gate", tamper: func(report *Report) { report.Gates = append(report.Gates, report.Gates[0]) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			run, err := (Ledger{RepoState: t.TempDir()}).Start()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer run.Close()
+			report := completeReportFixture(filepath.Base(run.Dir))
+			test.tamper(&report)
+			if err := run.WriteReport(report); err == nil {
+				t.Fatal("WriteReport accepted tampered report")
+			}
+		})
+	}
+}
+
+func TestLatestSkipsSemanticallyInvalidNewestReport(t *testing.T) {
+	repoState := t.TempDir()
+	runsDir := filepath.Join(repoState, "runs")
+	if err := os.Mkdir(runsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	older := completeReportFixture("20260821T120000.000000000Z-0000")
+	newer := completeReportFixture("20260821T120100.000000000Z-0001")
+	if err := validateReport(older, older.RunID); err != nil {
+		t.Fatalf("valid fixture: %v", err)
+	}
+	newer.Counts.Warnings = 1
+	writeReportFixture(t, runsDir, older)
+	writeReportFixture(t, runsDir, newer)
+	got, err := (Ledger{RepoState: repoState}).Latest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RunID != older.RunID {
+		t.Fatalf("Latest run ID = %q, want %q", got.RunID, older.RunID)
+	}
+
+	onlyInvalidState := t.TempDir()
+	onlyInvalidRuns := filepath.Join(onlyInvalidState, "runs")
+	if err := os.Mkdir(onlyInvalidRuns, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeReportFixture(t, onlyInvalidRuns, newer)
+	if _, err := (Ledger{RepoState: onlyInvalidState}).Latest(); !errors.Is(err, ErrNoCompleteRuns) {
+		t.Fatalf("Latest error = %v, want ErrNoCompleteRuns", err)
+	}
+}
+
 func TestWriteReportCleansTemporaryFileAfterEncodingError(t *testing.T) {
 	run, err := (Ledger{RepoState: t.TempDir()}).Start()
 	if err != nil {
@@ -1465,6 +1531,7 @@ func TestWriteReportCleansTemporaryFileAfterEncodingError(t *testing.T) {
 
 func writeReportFixture(t *testing.T, runsDir string, report Report) {
 	t.Helper()
+	report = completeReportDefaults(report)
 	runDir := filepath.Join(runsDir, report.RunID)
 	if err := os.Mkdir(runDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -1475,5 +1542,43 @@ func writeReportFixture(t *testing.T, runsDir string, report Report) {
 	}
 	if err := os.WriteFile(filepath.Join(runDir, "report.json"), contents, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func completeReportDefaults(report Report) Report {
+	defaults := completeReportFixture(report.RunID)
+	if report.RepoID == "" {
+		report.RepoID = defaults.RepoID
+	}
+	if report.StartedAt.IsZero() {
+		report.StartedAt = defaults.StartedAt
+	}
+	if report.FinishedAt.IsZero() {
+		report.FinishedAt = defaults.FinishedAt
+	}
+	if report.Verdict == "" {
+		report.Verdict = defaults.Verdict
+	}
+	if report.Gates == nil {
+		report.Gates = defaults.Gates
+	}
+	if report.Findings == nil {
+		report.Findings = defaults.Findings
+	}
+	return report
+}
+
+func completeReportFixture(runID string) Report {
+	started := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+	return Report{
+		SchemaVersion: 1,
+		RunID:         runID,
+		RepoID:        "repo-id",
+		StartedAt:     started,
+		FinishedAt:    started.Add(time.Second),
+		Verdict:       VerdictUnverified,
+		Gates:         []GateReport{{Gate: "lint", Language: "go", Status: GatePassed}},
+		Findings:      []finding.Finding{},
+		Counts:        Counts{},
 	}
 }

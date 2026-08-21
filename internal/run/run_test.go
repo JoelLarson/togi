@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -74,6 +75,58 @@ func TestServiceRejectsUnsupportedPlatformBeforeResolvingRepository(t *testing.T
 	}
 }
 
+func TestServiceRejectsUnsafeWiringBeforeRepositoryResolution(t *testing.T) {
+	abs := t.TempDir()
+	validPaths := config.Paths{Config: filepath.Join(abs, "config"), State: filepath.Join(abs, "state")}
+	validExecutor := Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}
+	for _, tc := range []struct {
+		name    string
+		service Service
+	}{
+		{name: "empty paths", service: Service{Executor: validExecutor, Stdout: io.Discard}},
+		{name: "relative config", service: Service{Paths: config.Paths{Config: "config", State: validPaths.State}, Executor: validExecutor, Stdout: io.Discard}},
+		{name: "relative state", service: Service{Paths: config.Paths{Config: validPaths.Config, State: "state"}, Executor: validExecutor, Stdout: io.Discard}},
+		{name: "empty registry", service: Service{Paths: validPaths, Executor: Executor{Enricher: enricher.Noop{}}, Stdout: io.Discard}},
+		{name: "empty enricher", service: Service{Paths: validPaths, Executor: Executor{Registry: normalizer.NewRegistry()}, Stdout: io.Discard}},
+		{name: "empty output", service: Service{Paths: validPaths, Executor: validExecutor}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			service := tc.service
+			service.ResolveRepo = func(context.Context, string) (repoid.ID, error) { called = true; return repoid.ID{}, nil }
+			if _, err := service.Run(context.Background(), Options{}); err == nil {
+				t.Fatal("Run succeeded")
+			}
+			if called {
+				t.Fatal("repository resolver called with unsafe service wiring")
+			}
+			if _, err := os.Stat(validPaths.State); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("state touched: %v", err)
+			}
+		})
+	}
+}
+
+func TestServiceRejectsUnsafeInjectedRepositoryIdentityBeforeStateUse(t *testing.T) {
+	root := t.TempDir()
+	paths := config.Paths{Config: filepath.Join(t.TempDir(), "config"), State: filepath.Join(t.TempDir(), "state")}
+	for _, id := range []repoid.ID{
+		{Key: "key", Directory: "repo-key", Root: "relative"},
+		{Key: "", Directory: "repo-key", Root: root},
+		{Key: "key", Directory: "../escape", Root: root},
+		{Key: "key", Directory: " ", Root: root},
+		{Key: "key", Directory: "bad:name", Root: root},
+	} {
+		service := Service{Paths: paths, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: io.Discard, ResolveRepo: func(context.Context, string) (repoid.ID, error) { return id, nil }}
+		if _, err := service.Run(context.Background(), Options{}); err == nil {
+			t.Fatalf("Run accepted identity %#v", id)
+		}
+		if _, err := os.Stat(paths.State); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("state touched: %v", err)
+		}
+	}
+}
+
 func TestReportOnlyRunIsStableAndKeepsErroredGateSeparate(t *testing.T) {
 	root, paths := fixtureRepository(t)
 	baselineTree := targetTree(t, root)
@@ -81,6 +134,12 @@ func TestReportOnlyRunIsStableAndKeepsErroredGateSeparate(t *testing.T) {
 	writeFixtureGate(t, paths.GateOverrides(), "complexity", fixtureJSON("complex.go", 2, "fixture/complexity", "too complex"), false)
 
 	first, firstOutput, firstDir, firstTree := runFixtureService(t, root, paths)
+	for _, name := range []string{"lint", "complexity"} {
+		gateReport := gateByName(t, first, name)
+		if gateReport.Status != GateFindings || len(gateReport.Findings) == 0 {
+			t.Fatalf("healthy gate %s = %#v", name, gateReport)
+		}
+	}
 	second, _, secondDir, secondTree := runFixtureService(t, root, paths)
 	if first.RunID == second.RunID {
 		t.Fatalf("run IDs equal: %q", first.RunID)
@@ -144,13 +203,24 @@ func TestServiceGateFilteringAndStatusDoesNotExecute(t *testing.T) {
 	if len(report.Gates) != 1 || report.Gates[0].Gate != "complexity" {
 		t.Fatalf("gates = %#v", report.Gates)
 	}
+	encoded, marshalErr := json.Marshal(report)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	var roundTrip Report
+	if unmarshalErr := json.Unmarshal(encoded, &roundTrip); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
+	}
+	if validateErr := validateReport(roundTrip, roundTrip.RunID); validateErr != nil {
+		t.Fatalf("round-trip report validation: %v", validateErr)
+	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("filtered gate executed: %v", err)
 	}
 
 	statusOut := new(bytes.Buffer)
-	service.Stdout = statusOut
-	if _, err := service.Status(context.Background(), root, true); err != nil {
+	statusService := Service{Paths: paths, Stdout: statusOut}
+	if _, err := statusService.Status(context.Background(), root, true); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -162,6 +232,17 @@ func TestServiceGateFilteringAndStatusDoesNotExecute(t *testing.T) {
 
 	if _, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"missing"}}); err == nil || strings.Contains(err.Error(), "exited with") {
 		t.Fatalf("unknown gate error = %v", err)
+	}
+}
+
+func TestSelectRequestsRejectsDuplicateManifestsAndMissingGoBinding(t *testing.T) {
+	duplicate := gate.Gate{Manifest: gate.Manifest{Name: "lint"}, Bindings: map[string]gate.Binding{"go": {Language: "go"}}}
+	if _, err := selectRequests([]gate.Gate{duplicate, duplicate}, nil, "/repo"); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate manifest error = %v", err)
+	}
+	rustOnly := gate.Gate{Manifest: gate.Manifest{Name: "rust"}, Bindings: map[string]gate.Binding{"rust": {Language: "rust"}}}
+	if _, err := selectRequests([]gate.Gate{duplicate, rustOnly}, []string{"lint", "rust"}, "/repo"); err == nil || !strings.Contains(err.Error(), "Go binding") {
+		t.Fatalf("missing Go binding error = %v", err)
 	}
 }
 
@@ -227,6 +308,17 @@ func runFixtureService(t *testing.T, root string, paths config.Paths) (Report, s
 	}
 	if exitErr.Code != ExitCode(report.Verdict) {
 		t.Fatalf("exit code = %d, want %d for %s", exitErr.Code, ExitCode(report.Verdict), report.Verdict)
+	}
+	encoded, marshalErr := json.Marshal(report)
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	var roundTrip Report
+	if unmarshalErr := json.Unmarshal(encoded, &roundTrip); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
+	}
+	if validateErr := validateReport(roundTrip, roundTrip.RunID); validateErr != nil {
+		t.Fatalf("round-trip report validation: %v", validateErr)
 	}
 	id, err := repoid.Resolve(context.Background(), root)
 	if err != nil {
