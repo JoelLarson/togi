@@ -1,4 +1,3 @@
-// Package repoid identifies a target repository.
 package repoid
 
 import (
@@ -27,12 +26,22 @@ func Resolve(ctx context.Context, start string) (ID, error) {
 		return ID{}, fmt.Errorf("find repository root: %w", err)
 	}
 
-	key, err := rootCommitKey(ctx, root)
+	shallow, err := isShallowRepository(ctx, root)
 	if err != nil {
+		return ID{}, err
+	}
+
+	var key string
+	if shallow {
 		key, err = fallbackKey(ctx, root)
+	} else {
+		key, err = rootCommitKey(ctx, root)
 		if err != nil {
-			return ID{}, err
+			key, err = fallbackKey(ctx, root)
 		}
+	}
+	if err != nil {
+		return ID{}, err
 	}
 
 	return ID{
@@ -40,6 +49,14 @@ func Resolve(ctx context.Context, start string) (ID, error) {
 		Directory: sanitize(filepath.Base(root)) + "-" + key[:12],
 		Root:      root,
 	}, nil
+}
+
+func isShallowRepository(ctx context.Context, root string) (bool, error) {
+	output, err := gitOutput(ctx, root, "rev-parse", "--is-shallow-repository")
+	if err != nil {
+		return false, fmt.Errorf("determine whether repository is shallow: %w", err)
+	}
+	return output == "true", nil
 }
 
 func rootCommitKey(ctx context.Context, root string) (string, error) {
@@ -108,16 +125,27 @@ func normalizeRemote(remote string) (string, bool) {
 		return "", false
 	}
 
-	if at := strings.LastIndex(remote, "@"); at >= 0 && !strings.Contains(remote, "://") {
-		if colon := strings.Index(remote[at+1:], ":"); colon >= 0 {
-			host := remote[at+1 : at+1+colon]
-			path := remote[at+2+colon:]
-			return normalizedHostPath(host, path)
+	if !strings.Contains(remote, "://") {
+		if colon := strings.Index(remote, ":"); colon >= 0 {
+			authority := remote[:colon]
+			if at := strings.LastIndex(authority, "@"); at >= 0 {
+				authority = authority[at+1:]
+			}
+			if authority != "" && !strings.Contains(authority, "/") {
+				return normalizedHostPath(authority, remote[colon+1:])
+			}
 		}
 	}
 
 	parsed, err := url.Parse(remote)
-	if err != nil || parsed.Hostname() == "" {
+	if err != nil {
+		return "", false
+	}
+	if parsed.Scheme == "file" && parsed.Host == "" && parsed.Path != "" {
+		path := strings.TrimSuffix(strings.TrimRight(parsed.EscapedPath(), "/"), ".git")
+		return "file://" + path, path != ""
+	}
+	if parsed.Hostname() == "" {
 		return "", false
 	}
 	return normalizedHostPath(parsed.Hostname(), parsed.Path)

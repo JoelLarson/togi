@@ -70,6 +70,32 @@ func TestResolveHashesCanonicalPathWithoutCommitOrRemote(t *testing.T) {
 	}
 }
 
+func TestResolveHashesOriginRemoteForShallowClone(t *testing.T) {
+	source := newCommittedRepoNamed(t, "source.git")
+	writeFile(t, filepath.Join(source, "second.txt"), "second\n")
+	gitRun(t, source, "add", "second.txt")
+	gitRun(t, source, "commit", "-m", "second commit")
+
+	clone := filepath.Join(t.TempDir(), "shallow")
+	origin := "file://" + source
+	gitRun(t, t.TempDir(), "clone", "--depth", "1", origin, clone)
+	if got, want := gitTestOutput(t, clone, "rev-parse", "--is-shallow-repository"), "true"; got != want {
+		t.Fatalf("shallow state = %q, want %q", got, want)
+	}
+	shallowRoot := gitTestOutput(t, clone, "rev-list", "--max-parents=0", "HEAD")
+
+	got, err := Resolve(context.Background(), clone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := sha256Hex(strings.TrimSuffix(origin, ".git")); got.Key != want {
+		t.Fatalf("Key = %q, want normalized origin hash %q", got.Key, want)
+	}
+	if got.Key == shallowRoot {
+		t.Fatalf("Key = shallow boundary %q", got.Key)
+	}
+}
+
 func TestResolveHashesMultipleRootCommits(t *testing.T) {
 	repo := newCommittedRepo(t)
 	primary := gitTestOutput(t, repo, "branch", "--show-current")
@@ -108,25 +134,29 @@ func TestResolveDirectoryUsesSanitizedBasenameAndShortKey(t *testing.T) {
 }
 
 func TestResolveNormalizesEquivalentRemoteForms(t *testing.T) {
-	sshRepo := newEmptyRepo(t, "ssh")
-	gitRun(t, sshRepo, "remote", "add", "origin", "git@GitHub.com:JoelLarson/togi.git")
+	forms := []struct {
+		name   string
+		remote string
+	}{
+		{name: "ssh", remote: "git@GitHub.com:JoelLarson/togi.git"},
+		{name: "https", remote: "https://user:password@github.com/JoelLarson/togi.git/"},
+		{name: "scp without username", remote: "github.com:JoelLarson/togi.git"},
+	}
 
-	httpsRepo := newEmptyRepo(t, "https")
-	gitRun(t, httpsRepo, "remote", "add", "origin", "https://user:password@github.com/JoelLarson/togi.git/")
+	want := sha256Hex("github.com/JoelLarson/togi")
+	for _, form := range forms {
+		t.Run(form.name, func(t *testing.T) {
+			repo := newEmptyRepo(t, form.name)
+			gitRun(t, repo, "remote", "add", "origin", form.remote)
 
-	sshID, err := Resolve(context.Background(), sshRepo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	httpsID, err := Resolve(context.Background(), httpsRepo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sshID.Key != httpsID.Key {
-		t.Fatalf("equivalent remote keys differ: SSH %q, HTTPS %q", sshID.Key, httpsID.Key)
-	}
-	if want := sha256Hex("github.com/JoelLarson/togi"); sshID.Key != want {
-		t.Fatalf("Key = %q, want %q", sshID.Key, want)
+			got, err := Resolve(context.Background(), repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Key != want {
+				t.Fatalf("Key = %q, want %q", got.Key, want)
+			}
+		})
 	}
 }
 
