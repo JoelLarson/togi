@@ -41,7 +41,8 @@ waivers all key on.
   real implementation lands in phase 2. See the note below.
 - **Gate error channel** — errored gates recorded distinctly from findings.
 - **Run ledger** — `state/<repo-id>/runs/<run-id>/` holding report.json;
-  human summary to stdout; typed exit codes; lockfile for one-run-per-repo.
+  human summary to stdout; typed exit codes; persistent advisory lock for
+  one-run-per-repo.
 
 **Gates:** `golangci-lint` (umbrella lint — exercises the normalizer and
 many-to-one aliases) and `gocyclo` (structural — exercises ranges and, later,

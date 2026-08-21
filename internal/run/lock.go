@@ -8,19 +8,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"runtime"
 	"time"
 )
 
 var (
-	// ErrLocked means another live process owns the repository run ledger.
+	// ErrLocked means another process owns the repository run ledger.
 	ErrLocked = errors.New("run ledger is locked")
-	// ErrInvalidLock means the lock path cannot be handled without risking
-	// removal of an unrelated filesystem entry.
+	// ErrInvalidLock means the persistent lock path is not a regular file.
 	ErrInvalidLock = errors.New("invalid run ledger lock")
-	// ErrLockOwnershipLost means the lock changed before its owner released it.
-	ErrLockOwnershipLost = errors.New("run ledger lock ownership lost")
 )
 
 type lockRecord struct {
@@ -30,52 +25,85 @@ type lockRecord struct {
 }
 
 type stateLock struct {
-	path   string
-	record lockRecord
+	file     *os.File
+	unlocked bool
+	closed   bool
 }
 
-func acquireStateLock(path string, now time.Time) (*stateLock, error) {
+func acquireStateLock(root *os.Root, now time.Time) (*stateLock, error) {
+	const name = "lock"
 	record, err := newLockRecord(now, rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	for attempt := 0; attempt < 4; attempt++ {
-		lock, err := createStateLock(path, record)
-		if err == nil {
-			return lock, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, err
-		}
-
-		existing, err := readLockRecord(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			if errors.Is(err, ErrInvalidLock) && attempt < 3 {
-				runtime.Gosched()
-				time.Sleep(time.Millisecond)
-				continue
-			}
-			return nil, err
-		}
-		alive, err := processIsAlive(existing.PID)
-		if err != nil {
-			return nil, fmt.Errorf("check lock process %d: %w", existing.PID, err)
-		}
-		if alive {
-			return nil, fmt.Errorf("%w: pid %d", ErrLocked, existing.PID)
-		}
-		removed, err := removeMatchingLock(path, existing)
-		if err != nil {
-			return nil, err
-		}
-		if !removed {
-			continue
-		}
+	before, err := root.Lstat(name)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
-	return nil, fmt.Errorf("%w: lock changed repeatedly", ErrLocked)
+	if err == nil && (!before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0) {
+		return nil, fmt.Errorf("%w: %s is not a regular file", ErrInvalidLock, name)
+	}
+
+	file, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	lock := &stateLock{file: file, unlocked: true}
+	cleanup := func(primary error) error {
+		return errors.Join(primary, lock.release())
+	}
+	if err := validateOpenedLock(root, name, file); err != nil {
+		return nil, cleanup(err)
+	}
+	if err := tryAdvisoryLock(file); err != nil {
+		return nil, cleanup(err)
+	}
+	lock.unlocked = false
+	if err := validateOpenedLock(root, name, file); err != nil {
+		return nil, cleanup(err)
+	}
+	if err := file.Chmod(0o600); err != nil {
+		return nil, cleanup(fmt.Errorf("tighten lock permissions: %w", err))
+	}
+	lockInfo, err := file.Stat()
+	if err != nil {
+		return nil, cleanup(fmt.Errorf("inspect lock permissions: %w", err))
+	}
+	if !privateFileMode(lockInfo.Mode()) {
+		return nil, cleanup(fmt.Errorf("lock permissions are %04o, want 0600", lockInfo.Mode().Perm()))
+	}
+	if err := file.Truncate(0); err != nil {
+		return nil, cleanup(fmt.Errorf("truncate lock record: %w", err))
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, cleanup(fmt.Errorf("seek lock record: %w", err))
+	}
+	if err := json.NewEncoder(file).Encode(record); err != nil {
+		return nil, cleanup(fmt.Errorf("encode lock record: %w", err))
+	}
+	if err := file.Sync(); err != nil {
+		return nil, cleanup(fmt.Errorf("sync lock record: %w", err))
+	}
+	if err := validateOpenedLock(root, name, file); err != nil {
+		return nil, cleanup(err)
+	}
+	return lock, nil
+}
+
+func validateOpenedLock(root *os.Root, name string, file *os.File) error {
+	opened, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect persistent lock: %w", err)
+	}
+	current, err := root.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if !opened.Mode().IsRegular() || !current.Mode().IsRegular() ||
+		current.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, current) {
+		return fmt.Errorf("%w: %s changed while opening", ErrInvalidLock, name)
+	}
+	return nil
 }
 
 func newLockRecord(now time.Time, random io.Reader) (lockRecord, error) {
@@ -90,111 +118,21 @@ func newLockRecord(now time.Time, random io.Reader) (lockRecord, error) {
 	}, nil
 }
 
-func createStateLock(path string, record lockRecord) (*stateLock, error) {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	created, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("inspect created lock: %w", err)
-	}
-	keep := false
-	defer func() {
-		_ = file.Close()
-		if !keep {
-			current, err := os.Lstat(path)
-			if err == nil && current.Mode().IsRegular() && os.SameFile(created, current) {
-				_ = os.Remove(path)
-			}
-		}
-	}()
-	if err := json.NewEncoder(file).Encode(record); err != nil {
-		return nil, fmt.Errorf("encode lock: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		return nil, fmt.Errorf("sync lock: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return nil, fmt.Errorf("close lock: %w", err)
-	}
-	keep = true
-	return &stateLock{path: path, record: record}, nil
-}
-
-func readLockRecord(path string) (lockRecord, error) {
-	before, err := os.Lstat(path)
-	if err != nil {
-		return lockRecord{}, err
-	}
-	if !before.Mode().IsRegular() {
-		return lockRecord{}, fmt.Errorf("%w: %s is not a regular file", ErrInvalidLock, path)
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return lockRecord{}, err
-	}
-	defer file.Close()
-	after, err := file.Stat()
-	if err != nil {
-		return lockRecord{}, err
-	}
-	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
-		return lockRecord{}, fmt.Errorf("%w: %s changed while opening", ErrInvalidLock, path)
-	}
-	decoder := json.NewDecoder(io.LimitReader(file, 4097))
-	decoder.DisallowUnknownFields()
-	var record lockRecord
-	if err := decoder.Decode(&record); err != nil {
-		return lockRecord{}, fmt.Errorf("%w: decode %s: %v", ErrInvalidLock, path, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return lockRecord{}, fmt.Errorf("%w: trailing data in %s", ErrInvalidLock, path)
-	}
-	if record.PID <= 0 || record.Start.IsZero() || record.Token == "" {
-		return lockRecord{}, fmt.Errorf("%w: incomplete record in %s", ErrInvalidLock, path)
-	}
-	return record, nil
-}
-
-func removeMatchingLock(path string, expected lockRecord) (bool, error) {
-	actual, err := readLockRecord(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	if actual.PID != expected.PID || !actual.Start.Equal(expected.Start) || actual.Token != expected.Token {
-		return false, nil
-	}
-	if err := os.Remove(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
 func (lock *stateLock) release() error {
-	if lock == nil || lock.path == "" {
+	if lock == nil || lock.file == nil {
 		return nil
 	}
-	removed, err := removeMatchingLock(lock.path, lock.record)
-	if err != nil {
-		return err
-	}
-	if !removed {
-		if _, err := os.Lstat(lock.path); errors.Is(err, os.ErrNotExist) {
-			return nil
+	if !lock.unlocked {
+		if err := unlockAdvisoryLock(lock.file); err != nil {
+			return fmt.Errorf("unlock run ledger: %w", err)
 		}
-		return ErrLockOwnershipLost
+		lock.unlocked = true
 	}
-	if err := syncDirectory(filepath.Dir(lock.path)); err != nil {
-		return fmt.Errorf("sync lock directory: %w", err)
+	if !lock.closed {
+		if err := lock.file.Close(); err != nil {
+			return fmt.Errorf("close run ledger lock: %w", err)
+		}
+		lock.closed = true
 	}
 	return nil
 }

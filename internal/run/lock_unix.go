@@ -8,24 +8,20 @@ import (
 	"syscall"
 )
 
-func processIsAlive(pid int) (bool, error) {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false, err
+func tryAdvisoryLock(file *os.File) error {
+	err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		return ErrLocked
 	}
-	err = process.Signal(syscall.Signal(0))
-	switch {
-	case err == nil, errors.Is(err, syscall.EPERM):
-		return true, nil
-	case errors.Is(err, syscall.ESRCH), errors.Is(err, os.ErrProcessDone):
-		return false, nil
-	default:
-		return false, err
-	}
+	return err
 }
 
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
+func unlockAdvisoryLock(file *os.File) error {
+	return syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+}
+
+func syncRootDirectory(root *os.Root) error {
+	directory, err := root.Open(".")
 	if err != nil {
 		return err
 	}
@@ -35,4 +31,8 @@ func syncDirectory(path string) error {
 
 func privateDirectoryMode(mode os.FileMode) bool {
 	return mode.Perm() == 0o700
+}
+
+func privateFileMode(mode os.FileMode) bool {
+	return mode.Perm() == 0o600
 }

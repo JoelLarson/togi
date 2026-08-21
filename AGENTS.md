@@ -46,7 +46,7 @@ A sequence that keeps every step independently testable:
 7. **`internal/enricher`** — the no-op seam only. Real implementation is
    phase 2.
 8. **`internal/run`** — parallel execution with timeouts, the errored channel,
-   the collector, run ledger, lockfile, pruning.
+   the collector, run ledger, persistent advisory lock, pruning.
 9. **Report rendering** — compiler-style output and typed exit codes.
 10. **`internal/gate/defaults/gates/`** — golangci-lint and gocyclo
     definitions.

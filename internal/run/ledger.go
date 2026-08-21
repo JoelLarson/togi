@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,6 +28,8 @@ var (
 	ErrNoCompleteRuns = errors.New("no complete runs")
 	// ErrReportExists means this run already has a completed report.
 	ErrReportExists = errors.New("run report already exists")
+	// ErrUninitialized means a RunLedger was not returned by Ledger.Start.
+	ErrUninitialized = errors.New("run ledger is uninitialized")
 )
 
 var errIncompleteRun = errors.New("incomplete run")
@@ -37,7 +40,9 @@ const rawOutputLimit = 1 << 20
 
 var rawTruncationMarker = []byte("\n[togi: output truncated]\n")
 
-var runIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{4}$`)
+const runTimestampLayout = "20060102T150405.000000000Z"
+
+var runIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}\.[0-9]{9}Z-[0-9a-f]{4}$`)
 
 var rawComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
@@ -51,10 +56,17 @@ type Ledger struct {
 
 // RunLedger is one active, exclusively locked run directory.
 type RunLedger struct {
-	Dir    string
-	lock   *stateLock
-	mu     sync.Mutex
-	closed bool
+	Dir      string
+	runID    string
+	lock     *stateLock
+	repoRoot *os.Root
+	runsRoot *os.Root
+	runRoot  *os.Root
+	rawRoot  *os.Root
+	mu       sync.Mutex
+	marker   *RunLedger
+	closing  bool
+	closed   bool
 }
 
 type directoryBoundary struct {
@@ -63,7 +75,7 @@ type directoryBoundary struct {
 }
 
 // Start acquires the repository lock and creates a new run directory.
-func (ledger Ledger) Start() (*RunLedger, error) {
+func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 	if ledger.RepoState == "" {
 		return nil, errors.New("repository state path is required")
 	}
@@ -71,11 +83,25 @@ func (ledger Ledger) Start() (*RunLedger, error) {
 	if err != nil {
 		return nil, fmt.Errorf("prepare repository state: %w", err)
 	}
-	runsDir := filepath.Join(ledger.RepoState, "runs")
-	runsDirectory, err := ensureDirectory(runsDir)
+	repoRoot, err := openBoundaryRoot(repoDirectory)
 	if err != nil {
-		return nil, fmt.Errorf("prepare runs directory: %w", err)
+		return nil, fmt.Errorf("open repository state root: %w", err)
 	}
+	runsDir := filepath.Join(ledger.RepoState, "runs")
+	runsDirectory, err := ensureChildDirectoryAt(repoRoot, "runs", runsDir)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("prepare runs directory: %w", err), repoRoot.Close())
+	}
+	runsRoot, err := openChildBoundaryRoot(repoRoot, "runs", runsDirectory)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("open runs root: %w", err), repoRoot.Close())
+	}
+	keepRoots := false
+	defer func() {
+		if !keepRoots {
+			resultErr = errors.Join(resultErr, runsRoot.Close(), repoRoot.Close())
+		}
+	}()
 	now := time.Now
 	if ledger.Now != nil {
 		now = ledger.Now
@@ -84,7 +110,7 @@ func (ledger Ledger) Start() (*RunLedger, error) {
 	if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
 		return nil, err
 	}
-	lock, err := acquireStateLock(filepath.Join(ledger.RepoState, "lock"), startedAt)
+	lock, err := acquireStateLock(repoRoot, startedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -92,9 +118,8 @@ func (ledger Ledger) Start() (*RunLedger, error) {
 	if keep <= 0 {
 		keep = defaultRunRetention
 	}
-	if err := pruneRuns(runsDirectory, keep-1); err != nil {
-		_ = lock.release()
-		return nil, err
+	if err := pruneRuns(runsRoot, keep-1); err != nil {
+		return nil, errors.Join(err, lock.release())
 	}
 	random := ledger.Random
 	if random == nil {
@@ -102,39 +127,41 @@ func (ledger Ledger) Start() (*RunLedger, error) {
 	}
 	suffix := make([]byte, 2)
 	if _, err := io.ReadFull(random, suffix); err != nil {
-		_ = lock.release()
-		return nil, fmt.Errorf("generate run ID: %w", err)
+		return nil, errors.Join(fmt.Errorf("generate run ID: %w", err), lock.release())
 	}
-	runID := startedAt.Format("20060102T150405Z") + "-" + hex.EncodeToString(suffix)
+	runID := startedAt.Format(runTimestampLayout) + "-" + hex.EncodeToString(suffix)
 	if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
-		_ = lock.release()
-		return nil, err
+		return nil, errors.Join(err, lock.release())
 	}
 	runDir := filepath.Join(runsDir, runID)
-	if err := os.Mkdir(runDir, 0o700); err != nil {
-		_ = lock.release()
-		if errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("%w: %s", ErrRunIDCollision, runID)
-		}
-		return nil, fmt.Errorf("create run directory: %w", err)
-	}
-	runDirectory, err := existingDirectory(runDir)
+	runRoot, err := createChildRoot(runsRoot, runID)
 	if err != nil {
-		_ = lock.release()
-		return nil, fmt.Errorf("restrict run directory: %w", err)
-	}
-	if err := os.Mkdir(filepath.Join(runDir, "raw"), 0o700); err != nil {
-		if runDirectory.validate() == nil {
-			_ = os.Remove(runDir)
+		if errors.Is(err, os.ErrExist) {
+			return nil, errors.Join(fmt.Errorf("%w: %s", ErrRunIDCollision, runID), lock.release())
 		}
-		_ = lock.release()
-		return nil, fmt.Errorf("create raw directory: %w", err)
+		return nil, errors.Join(fmt.Errorf("create run directory: %w", err), lock.release())
 	}
-	if _, err := existingDirectory(filepath.Join(runDir, "raw")); err != nil {
-		_ = lock.release()
-		return nil, fmt.Errorf("restrict raw directory: %w", err)
+	rawRoot, err := createChildRoot(runRoot, "raw")
+	if err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("create raw directory: %w", err),
+			runRoot.Close(),
+			runsRoot.RemoveAll(runID),
+			lock.release(),
+		)
 	}
-	return &RunLedger{Dir: runDir, lock: lock}, nil
+	keepRoots = true
+	run := &RunLedger{
+		Dir:      runDir,
+		runID:    runID,
+		lock:     lock,
+		repoRoot: repoRoot,
+		runsRoot: runsRoot,
+		runRoot:  runRoot,
+		rawRoot:  rawRoot,
+	}
+	run.marker = run
+	return run, nil
 }
 
 func ensureDirectory(path string) (directoryBoundary, error) {
@@ -151,6 +178,67 @@ func ensureDirectory(path string) (directoryBoundary, error) {
 func existingDirectory(path string) (directoryBoundary, error) {
 	info, err := os.Lstat(path)
 	return existingDirectoryInfo(path, info, err)
+}
+
+func ensureChildDirectoryAt(parent *os.Root, name, displayPath string) (directoryBoundary, error) {
+	info, err := parent.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := parent.Mkdir(name, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return directoryBoundary{}, err
+		}
+		info, err = parent.Lstat(name)
+	}
+	return existingChildDirectoryInfoAt(parent, name, displayPath, info, err)
+}
+
+func existingChildDirectoryAt(parent *os.Root, name, displayPath string) (directoryBoundary, error) {
+	info, err := parent.Lstat(name)
+	return existingChildDirectoryInfoAt(parent, name, displayPath, info, err)
+}
+
+func existingChildDirectoryInfoAt(
+	parent *os.Root,
+	name string,
+	displayPath string,
+	info os.FileInfo,
+	err error,
+) (directoryBoundary, error) {
+	if err != nil {
+		return directoryBoundary{}, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return directoryBoundary{}, fmt.Errorf("%s is not a real directory", displayPath)
+	}
+	directory, err := parent.Open(name)
+	if err != nil {
+		return directoryBoundary{}, err
+	}
+	defer directory.Close()
+	opened, err := directory.Stat()
+	if err != nil {
+		return directoryBoundary{}, err
+	}
+	if !opened.IsDir() || !os.SameFile(info, opened) {
+		return directoryBoundary{}, fmt.Errorf("%s changed while opening", displayPath)
+	}
+	if err := directory.Chmod(0o700); err != nil {
+		return directoryBoundary{}, fmt.Errorf("restrict %s: %w", displayPath, err)
+	}
+	restricted, err := directory.Stat()
+	if err != nil {
+		return directoryBoundary{}, fmt.Errorf("verify permissions for %s: %w", displayPath, err)
+	}
+	if !privateDirectoryMode(restricted.Mode()) {
+		return directoryBoundary{}, fmt.Errorf("permissions for %s are %04o, want 0700", displayPath, restricted.Mode().Perm())
+	}
+	current, err := parent.Lstat(name)
+	if err != nil {
+		return directoryBoundary{}, err
+	}
+	if !current.IsDir() || current.Mode()&os.ModeSymlink != 0 || !os.SameFile(restricted, current) {
+		return directoryBoundary{}, fmt.Errorf("%s changed while restricting permissions", displayPath)
+	}
+	return directoryBoundary{path: displayPath, identity: restricted}, nil
 }
 
 func existingDirectoryInfo(path string, info os.FileInfo, err error) (directoryBoundary, error) {
@@ -213,6 +301,98 @@ func validateDirectories(directories ...directoryBoundary) error {
 	return nil
 }
 
+func openBoundaryRoot(directory directoryBoundary) (*os.Root, error) {
+	root, err := os.OpenRoot(directory.path)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := root.Lstat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	if !opened.IsDir() || !os.SameFile(directory.identity, opened) {
+		_ = root.Close()
+		return nil, fmt.Errorf("directory boundary %s changed while opening root", directory.path)
+	}
+	return root, nil
+}
+
+func openChildBoundaryRoot(parent *os.Root, name string, directory directoryBoundary) (*os.Root, error) {
+	root, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := root.Lstat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	if !opened.IsDir() || !os.SameFile(directory.identity, opened) {
+		_ = root.Close()
+		return nil, fmt.Errorf("directory boundary %s changed while opening child root", directory.path)
+	}
+	return root, nil
+}
+
+func createChildRoot(parent *os.Root, name string) (*os.Root, error) {
+	if err := parent.Mkdir(name, 0o700); err != nil {
+		return nil, err
+	}
+	created, err := parent.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !created.IsDir() || created.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("created child %s was replaced", name)
+	}
+	root, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	if err := root.Chmod(".", 0o700); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	info, err := root.Lstat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	if !info.IsDir() || !os.SameFile(created, info) || !privateDirectoryMode(info.Mode()) {
+		_ = root.Close()
+		return nil, fmt.Errorf("created directory %s is not private", name)
+	}
+	return root, nil
+}
+
+func openExistingChildRoot(parent *os.Root, name string) (*os.Root, error) {
+	before, err := parent.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, errIncompleteRun
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+		return nil, errIncompleteRun
+	}
+	root, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	after, err := root.Lstat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	if !after.IsDir() || !os.SameFile(before, after) {
+		_ = root.Close()
+		return nil, errIncompleteRun
+	}
+	return root, nil
+}
+
 // Latest returns the newest complete, parseable report in the ledger.
 func (ledger Ledger) Latest() (Report, error) {
 	if ledger.RepoState == "" {
@@ -224,8 +404,13 @@ func (ledger Ledger) Latest() (Report, error) {
 	} else if err != nil {
 		return Report{}, fmt.Errorf("validate repository state: %w", err)
 	}
+	repoRoot, err := openBoundaryRoot(repoDirectory)
+	if err != nil {
+		return Report{}, err
+	}
+	defer repoRoot.Close()
 	runsDir := filepath.Join(ledger.RepoState, "runs")
-	runsDirectory, err := existingDirectory(runsDir)
+	runsDirectory, err := existingChildDirectoryAt(repoRoot, "runs", runsDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return Report{}, ErrNoCompleteRuns
 	} else if err != nil {
@@ -234,10 +419,16 @@ func (ledger Ledger) Latest() (Report, error) {
 	if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
 		return Report{}, err
 	}
-	entries, err := os.ReadDir(runsDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return Report{}, ErrNoCompleteRuns
+	runsRoot, err := openChildBoundaryRoot(repoRoot, "runs", runsDirectory)
+	if err != nil {
+		return Report{}, err
 	}
+	defer runsRoot.Close()
+	return latestFromRunsRoot(runsRoot)
+}
+
+func latestFromRunsRoot(runsRoot *os.Root) (Report, error) {
+	entries, err := fs.ReadDir(runsRoot.FS(), ".")
 	if err != nil {
 		return Report{}, fmt.Errorf("read runs directory: %w", err)
 	}
@@ -249,10 +440,18 @@ func (ledger Ledger) Latest() (Report, error) {
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(runIDs)))
 	for _, runID := range runIDs {
-		if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
+		runRoot, err := openExistingChildRoot(runsRoot, runID)
+		if errors.Is(err, errIncompleteRun) {
+			continue
+		}
+		if err != nil {
 			return Report{}, err
 		}
-		report, err := readCompleteReport(filepath.Join(runsDir, runID), runID)
+		report, err := readCompleteReport(runRoot, runID)
+		closeErr := runRoot.Close()
+		if err == nil && closeErr != nil {
+			return Report{}, closeErr
+		}
 		if errors.Is(err, errIncompleteRun) {
 			continue
 		}
@@ -264,19 +463,9 @@ func (ledger Ledger) Latest() (Report, error) {
 	return Report{}, ErrNoCompleteRuns
 }
 
-func readCompleteReport(runDir, runID string) (Report, error) {
-	runInfo, err := os.Lstat(runDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return Report{}, errIncompleteRun
-	}
-	if err != nil {
-		return Report{}, err
-	}
-	if !runInfo.IsDir() || runInfo.Mode()&os.ModeSymlink != 0 {
-		return Report{}, errIncompleteRun
-	}
-	reportPath := filepath.Join(runDir, "report.json")
-	before, err := os.Lstat(reportPath)
+func readCompleteReport(runRoot *os.Root, runID string) (Report, error) {
+	const reportName = "report.json"
+	before, err := runRoot.Lstat(reportName)
 	if errors.Is(err, os.ErrNotExist) {
 		return Report{}, errIncompleteRun
 	}
@@ -286,7 +475,7 @@ func readCompleteReport(runDir, runID string) (Report, error) {
 	if !before.Mode().IsRegular() {
 		return Report{}, errIncompleteRun
 	}
-	file, err := os.Open(reportPath)
+	file, err := runRoot.Open(reportName)
 	if err != nil {
 		return Report{}, err
 	}
@@ -351,11 +540,8 @@ func validateReport(report Report, runID string) error {
 	return nil
 }
 
-func pruneRuns(runsDirectory directoryBoundary, retain int) error {
-	if err := runsDirectory.validate(); err != nil {
-		return err
-	}
-	entries, err := os.ReadDir(runsDirectory.path)
+func pruneRuns(runsRoot *os.Root, retain int) error {
+	entries, err := fs.ReadDir(runsRoot.FS(), ".")
 	if err != nil {
 		return fmt.Errorf("read runs directory: %w", err)
 	}
@@ -371,11 +557,7 @@ func pruneRuns(runsDirectory directoryBoundary, retain int) error {
 	}
 	sort.Strings(valid)
 	for _, name := range valid[:len(valid)-retain] {
-		if err := runsDirectory.validate(); err != nil {
-			return err
-		}
-		path := filepath.Join(runsDirectory.path, name)
-		info, err := os.Lstat(path)
+		info, err := runsRoot.Lstat(name)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -385,7 +567,7 @@ func pruneRuns(runsDirectory directoryBoundary, retain int) error {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
-		if err := os.RemoveAll(path); err != nil {
+		if err := runsRoot.RemoveAll(name); err != nil {
 			return fmt.Errorf("prune old run %s: %w", name, err)
 		}
 	}
@@ -396,21 +578,49 @@ func validRunID(runID string) bool {
 	if !runIDPattern.MatchString(runID) {
 		return false
 	}
-	_, err := time.Parse("20060102T150405Z", runID[:16])
+	_, err := time.Parse(runTimestampLayout, runID[:26])
 	return err == nil
+}
+
+func createRootTemp(root *os.Root, prefix string) (*os.File, string, error) {
+	for range 10 {
+		suffix := make([]byte, 8)
+		if _, err := io.ReadFull(rand.Reader, suffix); err != nil {
+			return nil, "", err
+		}
+		name := "." + prefix + "-" + hex.EncodeToString(suffix) + ".tmp"
+		file, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return file, name, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, "", err
+		}
+	}
+	return nil, "", errors.New("temporary file name collisions")
+}
+
+func publishNoReplace(root *os.Root, source, destination string) error {
+	if err := root.Link(source, destination); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return ErrReportExists
+		}
+		return err
+	}
+	return nil
 }
 
 // WriteReport atomically persists the completed report.
 func (run *RunLedger) WriteReport(report Report) error {
-	if run == nil {
-		return ErrClosed
+	if run == nil || run.marker != run {
+		return ErrUninitialized
 	}
 	run.mu.Lock()
 	defer run.mu.Unlock()
-	if run.closed {
+	if run.closed || run.closing {
 		return ErrClosed
 	}
-	runID := filepath.Base(run.Dir)
+	runID := run.runID
 	if report.SchemaVersion != 1 {
 		return fmt.Errorf("unsupported report schema version %d", report.SchemaVersion)
 	}
@@ -422,22 +632,21 @@ func (run *RunLedger) WriteReport(report Report) error {
 	if err := validateReport(report, runID); err != nil {
 		return fmt.Errorf("validate report: %w", err)
 	}
-	reportPath := filepath.Join(run.Dir, "report.json")
-	if _, err := os.Lstat(reportPath); err == nil {
+	const reportName = "report.json"
+	if _, err := run.runRoot.Lstat(reportName); err == nil {
 		return ErrReportExists
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect report path: %w", err)
 	}
 
-	temporary, err := os.CreateTemp(run.Dir, ".report-*.tmp")
+	temporary, temporaryName, err := createRootTemp(run.runRoot, "report")
 	if err != nil {
 		return fmt.Errorf("create temporary report: %w", err)
 	}
-	temporaryPath := temporary.Name()
 	removeTemporary := true
 	defer func() {
 		if removeTemporary {
-			_ = os.Remove(temporaryPath)
+			_ = run.runRoot.Remove(temporaryName)
 		}
 	}()
 	if err := temporary.Chmod(0o600); err != nil {
@@ -457,11 +666,14 @@ func (run *RunLedger) WriteReport(report Report) error {
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close report: %w", err)
 	}
-	if err := os.Rename(temporaryPath, reportPath); err != nil {
+	if err := publishNoReplace(run.runRoot, temporaryName, reportName); err != nil {
 		return fmt.Errorf("publish report: %w", err)
 	}
+	if err := run.runRoot.Remove(temporaryName); err != nil {
+		return fmt.Errorf("remove published report temporary file: %w", err)
+	}
 	removeTemporary = false
-	if err := syncDirectory(run.Dir); err != nil {
+	if err := syncRootDirectory(run.runRoot); err != nil {
 		return fmt.Errorf("sync run directory: %w", err)
 	}
 	return nil
@@ -469,12 +681,12 @@ func (run *RunLedger) WriteReport(report Report) error {
 
 // WriteRaw atomically persists one captured tool stream.
 func (run *RunLedger) WriteRaw(gate, language, stream string, raw []byte) error {
-	if run == nil {
-		return ErrClosed
+	if run == nil || run.marker != run {
+		return ErrUninitialized
 	}
 	run.mu.Lock()
 	defer run.mu.Unlock()
-	if run.closed {
+	if run.closed || run.closing {
 		return ErrClosed
 	}
 	if !safeRawComponent(gate) {
@@ -486,16 +698,14 @@ func (run *RunLedger) WriteRaw(gate, language, stream string, raw []byte) error 
 	if stream != "stdout" && stream != "stderr" {
 		return fmt.Errorf("invalid raw output stream %q", stream)
 	}
-	rawDir := filepath.Join(run.Dir, "raw")
-	temporary, err := os.CreateTemp(rawDir, ".raw-*.tmp")
+	temporary, temporaryName, err := createRootTemp(run.rawRoot, "raw")
 	if err != nil {
 		return fmt.Errorf("create temporary raw output: %w", err)
 	}
-	temporaryPath := temporary.Name()
 	removeTemporary := true
 	defer func() {
 		if removeTemporary {
-			_ = os.Remove(temporaryPath)
+			_ = run.rawRoot.Remove(temporaryName)
 		}
 	}()
 	if err := temporary.Chmod(0o600); err != nil {
@@ -520,11 +730,11 @@ func (run *RunLedger) WriteRaw(gate, language, stream string, raw []byte) error 
 		return fmt.Errorf("close raw output: %w", err)
 	}
 	name := gate + "." + language + "." + stream
-	if err := os.Rename(temporaryPath, filepath.Join(rawDir, name)); err != nil {
+	if err := run.rawRoot.Rename(temporaryName, name); err != nil {
 		return fmt.Errorf("publish raw output: %w", err)
 	}
 	removeTemporary = false
-	if err := syncDirectory(rawDir); err != nil {
+	if err := syncRootDirectory(run.rawRoot); err != nil {
 		return fmt.Errorf("sync raw output directory: %w", err)
 	}
 	return nil
@@ -546,14 +756,32 @@ func safeRawComponent(component string) bool {
 
 // Close releases this run's repository lock.
 func (run *RunLedger) Close() error {
-	if run == nil {
-		return nil
+	if run == nil || run.marker != run {
+		return ErrUninitialized
 	}
 	run.mu.Lock()
 	defer run.mu.Unlock()
 	if run.closed {
 		return nil
 	}
+	run.closing = true
+	if err := run.lock.release(); err != nil {
+		return err
+	}
+	var closeErr error
+	for _, root := range []**os.Root{&run.rawRoot, &run.runRoot, &run.runsRoot, &run.repoRoot} {
+		if *root == nil {
+			continue
+		}
+		if err := (*root).Close(); err != nil {
+			closeErr = errors.Join(closeErr, err)
+			continue
+		}
+		*root = nil
+	}
+	if closeErr != nil {
+		return closeErr
+	}
 	run.closed = true
-	return run.lock.release()
+	return nil
 }

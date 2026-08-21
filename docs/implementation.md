@@ -136,9 +136,10 @@ Colour only when stdout is a TTY; `--no-color` forces it off.
 
 ## Run ledger
 
-Run ids are sortable timestamps with a random suffix — `20260821T151230Z-a3f1`
-— so `togi status` finds the most recent run by sorting directory names, with
-no `latest` symlink or pointer file to maintain.
+Run IDs are nanosecond-resolution UTC timestamps with a random suffix —
+`20260821T151230.123456789Z-a3f1` — so concurrent starts in the same second
+still sort chronologically and `togi status` needs no `latest` symlink or
+pointer file.
 
 ```
 $XDG_STATE_HOME/togi/<repo-id>/
@@ -153,6 +154,21 @@ $XDG_STATE_HOME/togi/<repo-id>/
 ```
 
 Runs prune to the most recent 20 at run start, configurable.
+
+`lock` is a persistent regular file. togi holds an OS advisory lock on its open
+file handle for the run lifetime and overwrites its informational
+PID/start/token JSON only while locked. Process exit releases ownership; close
+unlocks and closes without unlinking. Ledger directories and artifacts are
+opened through retained `os.Root` handles, so replacing a state pathname cannot
+redirect pruning, raw output, report publication, or status reads.
+
+Completed reports publish by linking a synced same-directory temporary file to
+`report.json`. The hard-link operation is atomic and refuses an existing name,
+so concurrent publishers cannot clobber one another and readers cannot observe
+partial JSON. Unix verifies `0700` directory modes and syncs directories after
+publication. Windows uses `LockFileEx`/`UnlockFileEx`; privacy inherits the
+state directory's ACLs, and directory syncing is best-effort because Go's
+standard library does not expose portable Windows directory fsync semantics.
 
 **Raw tool output is always persisted**, size-capped around 1 MB per gate with
 a truncation marker. ADR-0005's insulation governs what reaches the LLM, not

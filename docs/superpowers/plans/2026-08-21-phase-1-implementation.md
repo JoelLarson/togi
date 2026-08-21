@@ -56,9 +56,10 @@ v0.6.0.
 - `internal/run/report.go`: report, gate result, verdict, and count types.
 - `internal/run/ledger.go`: run IDs, directories, atomic report write, latest,
   and pruning.
-- `internal/run/lock.go`, `lock_unix.go`, `lock_windows.go`: exclusive lock and
-  portable PID liveness.
-- `internal/run/ledger_test.go`: ledger, stale lock, and pruning tests.
+- `internal/run/lock.go`, `lock_unix.go`, `lock_windows.go`: persistent advisory
+  lock and platform-specific file locking.
+- `internal/run/ledger_test.go`: ledger, advisory lock, anchoring, publication,
+  and pruning tests.
 - `internal/run/executor.go`: subprocess execution, timeout, output cap, and
   version observation.
 - `internal/run/collector.go`: bounded fan-out and deterministic barrier.
@@ -812,17 +813,19 @@ func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
 	run, err := l.Start()
 	if err != nil { t.Fatal(err) }
 	defer run.Close()
-	if got, want := filepath.Base(run.Dir), "20260821T151230Z-a3f1"; got != want { t.Fatalf("%q", got) }
+	if got, want := filepath.Base(run.Dir), "20260821T151230.123456789Z-a3f1"; got != want { t.Fatalf("%q", got) }
 	report := Report{SchemaVersion: 1, RunID: filepath.Base(run.Dir)}
 	if err := run.WriteReport(report); err != nil { t.Fatal(err) }
 	if _, err := os.Stat(filepath.Join(run.Dir, "report.json")); err != nil { t.Fatal(err) }
 }
 ```
 
-Add tests for O_EXCL lock contention, stale PID recovery, lock removal on
-close, pruning 25 complete/incomplete run directories down to the newest 20,
-latest selecting only a parseable complete report, raw filename sanitization,
-and a 1 MiB capped raw file ending in `\n[togi: output truncated]\n`.
+Add tests for advisory-lock contention, process-exit recovery, stale record
+overwrite, persistent lock-file close semantics, retained-root pathname
+replacement, atomic no-clobber report publication, pruning 25
+complete/incomplete run directories down to the newest 20, latest selecting
+only a parseable complete report, raw filename validation, and a 1 MiB capped
+raw file ending in `\n[togi: output truncated]\n`.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -891,17 +894,19 @@ func (r *RunLedger) WriteReport(Report) error
 func (r *RunLedger) Close() error
 ```
 
-Create the lock with `os.O_CREATE|os.O_EXCL`; store JSON containing PID and
-start timestamp. Implement liveness in build-tagged files so Linux/macOS use
-signal 0 and Windows uses `OpenProcess`. Only remove a stale lock after its PID
-is confirmed absent. Prune before creating the new run. Write JSON through a
-same-directory temporary file, `Sync`, `Close`, and `Rename`.
+Open a persistent regular `lock` file and hold a nonblocking OS advisory lock
+for the run lifetime: `flock` on Unix and `LockFileEx` on Windows. Store
+informational PID/start/token JSON only while locked; never unlink the lock on
+close. Retain `os.Root` handles for repository state, runs, the current run,
+and raw output. Prune before creating the new run. Publish synced report JSON
+through an atomic no-replace hard link from a same-directory temporary file.
 
 - [ ] **Step 4: Verify GREEN and commit**
 
 Run: `go test ./internal/run -run 'Ledger|Lock|Prune|Raw|Latest' -v && go test ./...`
 
-Expected: ledger lifecycle tests pass, including stale/live lock distinction.
+Expected: ledger lifecycle tests pass, including advisory contention,
+process-exit recovery, rooted pathname replacement, and no-clobber publication.
 
 ```bash
 git add internal/run

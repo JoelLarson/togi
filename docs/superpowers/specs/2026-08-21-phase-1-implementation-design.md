@@ -152,17 +152,20 @@ type or artifact.
 
 ## Run Ledger
 
-An exclusive per-repository lock is acquired before pruning or creating a run
-directory. The lock records enough process information to detect the stale PID
-case required by `docs/design.md`; releasing it is deferred across all run
-outcomes.
+An exclusive per-repository OS advisory lock is acquired on an open, persistent
+`lock` file before pruning or creating a run directory. Unix uses `flock` and
+Windows uses `LockFileEx`; process exit releases ownership automatically. The
+PID/start/token JSON is informational, and close never unlinks the lock file,
+so ownership cannot split across two inodes.
 
-Run IDs are UTC sortable timestamps with a cryptographically random suffix.
-At run start, old run directories are pruned to retain the configured maximum
-of 20. A run persists raw outputs and then writes `report.json` atomically by
-renaming a completed temporary file in the same directory. Interrupted runs
-may retain their directory and raw diagnostics but never expose a partial
-report as complete.
+Run IDs use nanosecond-resolution UTC timestamps plus a cryptographically
+random suffix, for example `20260821T151230.123456789Z-a3f1`. At run start, old
+run directories are pruned to retain the configured maximum of 20. Retained
+`os.Root` handles anchor pruning, writes, and latest-report reads even if a
+state pathname is replaced. A run persists raw outputs and publishes a synced
+temporary report with an atomic, no-replace hard link to `report.json`.
+Interrupted runs may retain their directory and raw diagnostics but never
+expose a partial report as complete.
 
 `report.json` records schema version, run and repository identity, timestamps,
 verdict, gate results, grouped findings, counts, and timings. It excludes

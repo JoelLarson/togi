@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -16,7 +17,7 @@ import (
 	"github.com/joellarson/togi/internal/finding"
 )
 
-var fixedTime = time.Date(2026, time.August, 21, 15, 12, 30, 0, time.UTC)
+var fixedTime = time.Date(2026, time.August, 21, 15, 12, 30, 123456789, time.UTC)
 
 func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
 	repoState := filepath.Join(t.TempDir(), "external", "repo-state")
@@ -36,7 +37,7 @@ func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
 		}
 	})
 
-	if got, want := filepath.Base(run.Dir), "20260821T151230Z-a3f1"; got != want {
+	if got, want := filepath.Base(run.Dir), "20260821T151230.123456789Z-a3f1"; got != want {
 		t.Fatalf("run ID = %q, want %q", got, want)
 	}
 	for _, path := range []string{
@@ -49,8 +50,8 @@ func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
 		if statErr != nil {
 			t.Fatalf("stat %s: %v", path, statErr)
 		}
-		if got := info.Mode().Perm(); got != 0o700 {
-			t.Errorf("mode for %s = %04o, want 0700", path, got)
+		if !privateDirectoryMode(info.Mode()) {
+			t.Errorf("mode for %s is not private: %04o", path, info.Mode().Perm())
 		}
 	}
 
@@ -63,8 +64,8 @@ func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Errorf("report mode = %04o, want 0600", got)
+	if !privateFileMode(info.Mode()) {
+		t.Errorf("report mode is not private: %04o", info.Mode().Perm())
 	}
 	contents, err := os.ReadFile(reportPath)
 	if err != nil {
@@ -84,7 +85,7 @@ func TestLedgerStartRejectsSymlinkedRepoState(t *testing.T) {
 	root := t.TempDir()
 	externalState := filepath.Join(root, "external-state")
 	runsDir := filepath.Join(externalState, "runs")
-	oldRun := filepath.Join(runsDir, "20260821T120000Z-0000")
+	oldRun := filepath.Join(runsDir, "20260821T120000.000000000Z-0000")
 	if err := os.MkdirAll(oldRun, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +126,7 @@ func TestLedgerStartRejectsSymlinkedRunsDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	externalRuns := filepath.Join(root, "external-runs")
-	oldRun := filepath.Join(externalRuns, "20260821T120000Z-0000")
+	oldRun := filepath.Join(externalRuns, "20260821T120000.000000000Z-0000")
 	if err := os.MkdirAll(oldRun, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -181,30 +182,194 @@ func TestLedgerStartTightensExistingDirectoryPermissions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := info.Mode().Perm(); got != 0o700 {
-			t.Errorf("mode for %s = %04o, want 0700", path, got)
+		if !privateDirectoryMode(info.Mode()) {
+			t.Errorf("mode for %s is not private: %04o", path, info.Mode().Perm())
 		}
 	}
 }
 
 func TestLedgerRejectsConcurrentStart(t *testing.T) {
 	repoState := t.TempDir()
-	first, err := (Ledger{RepoState: repoState}).Start()
+	first, err := (Ledger{RepoState: repoState, Now: func() time.Time { return fixedTime }}).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = first.Close() })
+	lockPath := filepath.Join(repoState, "lock")
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	second, err := (Ledger{RepoState: repoState}).Start()
+	second, err := (Ledger{
+		RepoState: repoState,
+		Now:       func() time.Time { return fixedTime.Add(time.Hour) },
+	}).Start()
 	if second != nil {
 		_ = second.Close()
 	}
 	if !errors.Is(err, ErrLocked) {
 		t.Fatalf("concurrent Start error = %v, want ErrLocked", err)
 	}
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("losing contender changed lock record:\nbefore: %s\nafter: %s", before, after)
+	}
 }
 
-func TestLedgerRecoversStaleLock(t *testing.T) {
+func TestLedgerAcquiresUnlockedPersistentLockRegardlessOfRecord(t *testing.T) {
+	repoState := t.TempDir()
+	lockPath := filepath.Join(repoState, "lock")
+	stale := fmt.Sprintf(`{"pid":%d,"start":"2026-08-20T12:00:00Z","token":"stale-owner"}`+"\n", os.Getpid())
+	if err := os.WriteFile(lockPath, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ledger := Ledger{
+		RepoState: repoState,
+		Now:       func() time.Time { return fixedTime },
+		Random:    bytes.NewReader([]byte{0xa3, 0xf1}),
+	}
+
+	run, err := ledger.Start()
+	if err != nil {
+		t.Fatalf("Start with unlocked stale record: %v", err)
+	}
+	if err := run.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(lockPath)
+	if err != nil {
+		t.Fatalf("persistent lock file missing after Close: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("lock mode = %v, want regular file", info.Mode())
+	}
+	contents, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(contents, []byte("stale-owner")) {
+		t.Fatalf("stale lock record was not replaced: %s", contents)
+	}
+}
+
+func TestLedgerTightensPersistentLockPermissions(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("Windows privacy is enforced by inherited ACLs")
+	}
+	repoState := t.TempDir()
+	lockPath := filepath.Join(repoState, "lock")
+	if err := os.WriteFile(lockPath, []byte("stale record\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := (Ledger{RepoState: repoState}).Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.Close() })
+
+	info, err := os.Lstat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := info.Mode().Perm(), os.FileMode(0o600); got != want {
+		t.Fatalf("lock permissions = %04o, want %04o", got, want)
+	}
+}
+
+func TestAdvisoryLockRemainsAnchoredAfterRepoStateReplacement(t *testing.T) {
+	root := t.TempDir()
+	repoState := filepath.Join(root, "repo-state")
+	if err := os.Mkdir(repoState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	repoRoot, err := os.OpenRoot(repoState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repoRoot.Close()
+	movedState := filepath.Join(root, "moved-state")
+	if err := os.Rename(repoState, movedState); err != nil {
+		t.Fatal(err)
+	}
+	externalState := filepath.Join(root, "external-state")
+	if err := os.Mkdir(externalState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	externalLock := filepath.Join(externalState, "lock")
+	if err := os.WriteFile(externalLock, []byte("external sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalState, repoState); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	lock, err := acquireStateLock(repoRoot, fixedTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(movedState, "lock")); err != nil {
+		t.Fatalf("anchored lock missing: %v", err)
+	}
+	contents, err := os.ReadFile(externalLock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "external sentinel" {
+		t.Fatalf("external lock changed: %q", contents)
+	}
+}
+
+func TestEnsureRunsDirectoryRemainsAnchoredAfterRepoStateReplacement(t *testing.T) {
+	root := t.TempDir()
+	repoState := filepath.Join(root, "repo-state")
+	if err := os.Mkdir(repoState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	repoBoundary, err := existingDirectory(repoState)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoRoot, err := openBoundaryRoot(repoBoundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repoRoot.Close()
+
+	movedState := filepath.Join(root, "moved-state")
+	if err := os.Rename(repoState, movedState); err != nil {
+		t.Fatal(err)
+	}
+	externalState := filepath.Join(root, "external-state")
+	if err := os.Mkdir(externalState, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalState, repoState); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if _, err := ensureChildDirectoryAt(repoRoot, "runs", filepath.Join(repoState, "runs")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(movedState, "runs")); err != nil {
+		t.Fatalf("anchored runs directory missing: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(externalState, "runs")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement tree was modified: %v", err)
+	}
+}
+
+func TestLedgerOverwritesStaleLockRecord(t *testing.T) {
 	repoState := t.TempDir()
 	lockPath := filepath.Join(repoState, "lock")
 	stale := []byte(`{"pid":2147483647,"start":"2026-08-20T12:00:00Z","token":"stale-owner"}` + "\n")
@@ -219,8 +384,12 @@ func TestLedgerRecoversStaleLock(t *testing.T) {
 	if err := run.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(lockPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lock remains after Close: %v", err)
+	contents, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("persistent lock missing after Close: %v", err)
+	}
+	if bytes.Contains(contents, []byte("stale-owner")) {
+		t.Fatalf("stale lock record remains: %s", contents)
 	}
 }
 
@@ -254,15 +423,6 @@ func TestLedgerRejectsUnsafeLockEntries(t *testing.T) {
 		name  string
 		setup func(t *testing.T, path string)
 	}{
-		{
-			name: "malformed",
-			setup: func(t *testing.T, path string) {
-				t.Helper()
-				if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
 		{
 			name: "directory",
 			setup: func(t *testing.T, path string) {
@@ -319,8 +479,8 @@ func TestClosePreservesReplacementLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := run.Close(); !errors.Is(err, ErrLockOwnershipLost) {
-		t.Fatalf("Close error = %v, want ErrLockOwnershipLost", err)
+	if err := run.Close(); err != nil {
+		t.Fatalf("Close error = %v", err)
 	}
 	got, err := os.ReadFile(lockPath)
 	if err != nil {
@@ -340,8 +500,15 @@ func TestLedgerReleasesLockWhenStartFails(t *testing.T) {
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("Start error = %v, want EOF", err)
 	}
-	if _, err := os.Lstat(filepath.Join(repoState, "lock")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lock remains after failed Start: %v", err)
+	run, err := (Ledger{RepoState: repoState}).Start()
+	if err != nil {
+		t.Fatalf("lock remained held after failed Start: %v", err)
+	}
+	if err := run.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(repoState, "lock")); err != nil {
+		t.Fatalf("persistent lock missing after failed Start recovery: %v", err)
 	}
 }
 
@@ -388,6 +555,40 @@ func TestLedgerConcurrentStartRaceHasOneOwner(t *testing.T) {
 	}
 }
 
+func TestLedgerAdvisoryLockReleasesOnProcessExit(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoState := t.TempDir()
+	command := exec.Command(executable, "-test.run=^TestLedgerLockCrashHelper$")
+	command.Env = append(os.Environ(),
+		"TOGI_LOCK_CRASH_HELPER=1",
+		"TOGI_LOCK_CRASH_STATE="+repoState,
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("crash helper: %v\n%s", err, output)
+	}
+
+	run, err := (Ledger{RepoState: repoState}).Start()
+	if err != nil {
+		t.Fatalf("Start after lock owner process exited: %v", err)
+	}
+	if err := run.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLedgerLockCrashHelper(t *testing.T) {
+	if os.Getenv("TOGI_LOCK_CRASH_HELPER") != "1" {
+		return
+	}
+	if _, err := (Ledger{RepoState: os.Getenv("TOGI_LOCK_CRASH_STATE")}).Start(); err != nil {
+		t.Fatal(err)
+	}
+	os.Exit(0)
+}
+
 func TestLedgerPrunesBeforeCreatingRun(t *testing.T) {
 	repoState := t.TempDir()
 	runsDir := filepath.Join(repoState, "runs")
@@ -396,7 +597,7 @@ func TestLedgerPrunesBeforeCreatingRun(t *testing.T) {
 	}
 	var existing []string
 	for index := range 25 {
-		id := fmt.Sprintf("20260821T14%02d00Z-%04x", index, index)
+		id := fmt.Sprintf("20260821T14%02d00.000000000Z-%04x", index, index)
 		existing = append(existing, id)
 		dir := filepath.Join(runsDir, id)
 		if err := os.Mkdir(dir, 0o700); err != nil {
@@ -416,7 +617,7 @@ func TestLedgerPrunesBeforeCreatingRun(t *testing.T) {
 	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	linkedRun := filepath.Join(runsDir, "20260821T130000Z-dead")
+	linkedRun := filepath.Join(runsDir, "20260821T130000.000000000Z-dead")
 	if err := os.Symlink(target, linkedRun); err != nil {
 		t.Logf("symlink pruning coverage unavailable: %v", err)
 		linkedRun = ""
@@ -457,22 +658,24 @@ func TestLedgerPrunesBeforeCreatingRun(t *testing.T) {
 	}
 }
 
-func TestPruneRejectsReplacedRunsDirectory(t *testing.T) {
+func TestPruneRemainsAnchoredAfterRunsDirectoryReplacement(t *testing.T) {
 	root := t.TempDir()
 	runsPath := filepath.Join(root, "runs")
-	if err := os.Mkdir(runsPath, 0o700); err != nil {
+	originalOldRun := filepath.Join(runsPath, "20260821T110000.000000000Z-0000")
+	if err := os.MkdirAll(originalOldRun, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Lstat(runsPath)
+	runsRoot, err := os.OpenRoot(runsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer runsRoot.Close()
 	originalPath := filepath.Join(root, "original-runs")
 	if err := os.Rename(runsPath, originalPath); err != nil {
 		t.Fatal(err)
 	}
 	externalRuns := filepath.Join(root, "external-runs")
-	externalOldRun := filepath.Join(externalRuns, "20260821T120000Z-0000")
+	externalOldRun := filepath.Join(externalRuns, "20260821T120000.000000000Z-0000")
 	if err := os.MkdirAll(externalOldRun, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -484,9 +687,8 @@ func TestPruneRejectsReplacedRunsDirectory(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	err = pruneRuns(directoryBoundary{path: runsPath, identity: info}, 0)
-	if err == nil {
-		t.Fatal("pruneRuns succeeded after the runs directory was replaced")
+	if err := pruneRuns(runsRoot, 0); err != nil {
+		t.Fatalf("pruneRuns through retained root: %v", err)
 	}
 	contents, err := os.ReadFile(sentinel)
 	if err != nil {
@@ -494,6 +696,9 @@ func TestPruneRejectsReplacedRunsDirectory(t *testing.T) {
 	}
 	if string(contents) != "keep" {
 		t.Fatalf("external sentinel = %q, want keep", contents)
+	}
+	if _, err := os.Stat(filepath.Join(originalPath, filepath.Base(originalOldRun))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("original old run remains after pruning: %v", err)
 	}
 }
 
@@ -503,7 +708,7 @@ func TestLedgerReportsRunIDCollisionAndReleasesLock(t *testing.T) {
 	if err := os.Mkdir(runsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	runID := "20260821T151230Z-a3f1"
+	runID := "20260821T151230.123456789Z-a3f1"
 	if err := os.Mkdir(filepath.Join(runsDir, runID), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -520,8 +725,15 @@ func TestLedgerReportsRunIDCollisionAndReleasesLock(t *testing.T) {
 	if !errors.Is(err, ErrRunIDCollision) {
 		t.Fatalf("Start error = %v, want ErrRunIDCollision", err)
 	}
-	if _, err := os.Lstat(filepath.Join(repoState, "lock")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lock remains after collision: %v", err)
+	if _, err := os.Lstat(filepath.Join(repoState, "lock")); err != nil {
+		t.Fatalf("persistent lock missing after collision: %v", err)
+	}
+	next, err := (Ledger{RepoState: repoState}).Start()
+	if err != nil {
+		t.Fatalf("lock remained held after collision: %v", err)
+	}
+	if err := next.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -548,8 +760,8 @@ func TestWriteRawPreservesBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
-		t.Errorf("raw output mode = %04o, want 0600", got)
+	if !privateFileMode(info.Mode()) {
+		t.Errorf("raw output mode is not private: %04o", info.Mode().Perm())
 	}
 	matches, err := filepath.Glob(filepath.Join(run.Dir, "raw", ".raw-*.tmp"))
 	if err != nil {
@@ -557,6 +769,60 @@ func TestWriteRawPreservesBytes(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("raw output left temporary files: %v", matches)
+	}
+}
+
+func TestRunLedgerWritesRemainAnchoredAfterRepoStateReplacement(t *testing.T) {
+	root := t.TempDir()
+	repoState := filepath.Join(root, "repo-state")
+	run, err := (Ledger{RepoState: repoState}).Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID := filepath.Base(run.Dir)
+	movedState := filepath.Join(root, "moved-state")
+	if err := os.Rename(repoState, movedState); err != nil {
+		_ = run.Close()
+		t.Fatal(err)
+	}
+	externalState := filepath.Join(root, "external-state")
+	externalRun := filepath.Join(externalState, "runs", runID)
+	if err := os.MkdirAll(filepath.Join(externalRun, "raw"), 0o700); err != nil {
+		_ = run.Close()
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalState, repoState); err != nil {
+		_ = run.Close()
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if err := run.WriteRaw("gate", "go", "stdout", []byte("anchored")); err != nil {
+		_ = run.Close()
+		t.Fatal(err)
+	}
+	if err := run.WriteReport(Report{SchemaVersion: 1, RunID: runID}); err != nil {
+		_ = run.Close()
+		t.Fatal(err)
+	}
+	if err := run.Close(); err != nil {
+		t.Fatal(err)
+	}
+	anchoredRun := filepath.Join(movedState, "runs", runID)
+	if got, err := os.ReadFile(filepath.Join(anchoredRun, "raw", "gate.go.stdout")); err != nil {
+		t.Fatalf("read anchored raw output: %v", err)
+	} else if string(got) != "anchored" {
+		t.Fatalf("anchored raw output = %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(anchoredRun, "report.json")); err != nil {
+		t.Fatalf("anchored report missing: %v", err)
+	}
+	for _, path := range []string{
+		filepath.Join(externalRun, "raw", "gate.go.stdout"),
+		filepath.Join(externalRun, "report.json"),
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("artifact escaped to replacement tree %s: %v", path, err)
+		}
 	}
 }
 
@@ -646,6 +912,47 @@ func TestRunLedgerRejectsWritesAfterClose(t *testing.T) {
 	}
 }
 
+func TestRunLedgerRejectsUninitializedValue(t *testing.T) {
+	var run RunLedger
+	if err := run.WriteRaw("gate", "go", "stdout", nil); !errors.Is(err, ErrUninitialized) {
+		t.Errorf("WriteRaw on zero value = %v, want ErrUninitialized", err)
+	}
+	if err := run.WriteReport(Report{SchemaVersion: 1}); !errors.Is(err, ErrUninitialized) {
+		t.Errorf("WriteReport on zero value = %v, want ErrUninitialized", err)
+	}
+	if err := run.Close(); !errors.Is(err, ErrUninitialized) {
+		t.Errorf("Close on zero value = %v, want ErrUninitialized", err)
+	}
+}
+
+func TestRunLedgerRejectsCopiedValue(t *testing.T) {
+	run, err := (Ledger{RepoState: t.TempDir()}).Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.Close() })
+	copied := RunLedger{
+		Dir:      run.Dir,
+		runID:    run.runID,
+		lock:     run.lock,
+		repoRoot: run.repoRoot,
+		runsRoot: run.runsRoot,
+		runRoot:  run.runRoot,
+		rawRoot:  run.rawRoot,
+		marker:   run,
+	}
+
+	if err := copied.WriteRaw("gate", "go", "stdout", nil); !errors.Is(err, ErrUninitialized) {
+		t.Errorf("WriteRaw on copied value = %v, want ErrUninitialized", err)
+	}
+	if err := copied.WriteReport(Report{SchemaVersion: 1}); !errors.Is(err, ErrUninitialized) {
+		t.Errorf("WriteReport on copied value = %v, want ErrUninitialized", err)
+	}
+	if err := copied.Close(); !errors.Is(err, ErrUninitialized) {
+		t.Errorf("Close on copied value = %v, want ErrUninitialized", err)
+	}
+}
+
 func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 	repoState := t.TempDir()
 	runsDir := filepath.Join(repoState, "runs")
@@ -654,7 +961,7 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 	}
 	wanted := Report{
 		SchemaVersion: 1,
-		RunID:         "20260821T120200Z-0002",
+		RunID:         "20260821T120200.000000000Z-0002",
 		RepoID:        "repo-id",
 		StartedAt:     time.Date(2026, time.August, 21, 12, 2, 0, 0, time.UTC),
 		FinishedAt:    time.Date(2026, time.August, 21, 12, 2, 5, 0, time.UTC),
@@ -669,8 +976,8 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 		Findings: []finding.Finding{},
 		Counts:   Counts{},
 	}
-	writeReportFixture(t, runsDir, Report{SchemaVersion: 1, RunID: "20260821T120000Z-0000"})
-	malformedDir := filepath.Join(runsDir, "20260821T120100Z-0001")
+	writeReportFixture(t, runsDir, Report{SchemaVersion: 1, RunID: "20260821T120000.000000000Z-0000"})
+	malformedDir := filepath.Join(runsDir, "20260821T120100.000000000Z-0001")
 	if err := os.Mkdir(malformedDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -678,14 +985,14 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeReportFixture(t, runsDir, wanted)
-	if err := os.Mkdir(filepath.Join(runsDir, "20260821T120300Z-0003"), 0o700); err != nil {
+	if err := os.Mkdir(filepath.Join(runsDir, "20260821T120300.000000000Z-0003"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	symlinkReportDir := filepath.Join(runsDir, "20260821T120400Z-0004")
+	symlinkReportDir := filepath.Join(runsDir, "20260821T120400.000000000Z-0004")
 	if err := os.Mkdir(symlinkReportDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	outsideReport, err := json.Marshal(Report{SchemaVersion: 1, RunID: "20260821T120400Z-0004"})
+	outsideReport, err := json.Marshal(Report{SchemaVersion: 1, RunID: "20260821T120400.000000000Z-0004"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +1007,7 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 	if err := os.Mkdir(outsideRun, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outsideRun, filepath.Join(runsDir, "20260821T120500Z-0005")); err != nil {
+	if err := os.Symlink(outsideRun, filepath.Join(runsDir, "20260821T120500.000000000Z-0005")); err != nil {
 		t.Logf("run symlink coverage unavailable: %v", err)
 	}
 
@@ -713,6 +1020,64 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 	}
 }
 
+func TestLatestSortsSameSecondRunsByNanoseconds(t *testing.T) {
+	repoState := t.TempDir()
+	runsDir := filepath.Join(repoState, "runs")
+	if err := os.Mkdir(runsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	older := Report{SchemaVersion: 1, RunID: "20260821T120000.100000000Z-ffff"}
+	newer := Report{SchemaVersion: 1, RunID: "20260821T120000.900000000Z-0000"}
+	writeReportFixture(t, runsDir, newer)
+	writeReportFixture(t, runsDir, older)
+
+	got, err := (Ledger{RepoState: repoState}).Latest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RunID != newer.RunID {
+		t.Fatalf("Latest run ID = %q, want %q", got.RunID, newer.RunID)
+	}
+}
+
+func TestLatestReadRemainsAnchoredAfterRunsDirectoryReplacement(t *testing.T) {
+	root := t.TempDir()
+	runsPath := filepath.Join(root, "runs")
+	if err := os.Mkdir(runsPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	wanted := Report{SchemaVersion: 1, RunID: "20260821T120000.100000000Z-0000"}
+	writeReportFixture(t, runsPath, wanted)
+	runsRoot, err := os.OpenRoot(runsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runsRoot.Close()
+	originalPath := filepath.Join(root, "original-runs")
+	if err := os.Rename(runsPath, originalPath); err != nil {
+		t.Fatal(err)
+	}
+	externalRuns := filepath.Join(root, "external-runs")
+	if err := os.Mkdir(externalRuns, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeReportFixture(t, externalRuns, Report{
+		SchemaVersion: 1,
+		RunID:         "20260821T120000.900000000Z-ffff",
+	})
+	if err := os.Symlink(externalRuns, runsPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	got, err := latestFromRunsRoot(runsRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RunID != wanted.RunID {
+		t.Fatalf("anchored Latest run ID = %q, want %q", got.RunID, wanted.RunID)
+	}
+}
+
 func TestLatestRejectsSymlinkedRepoState(t *testing.T) {
 	root := t.TempDir()
 	externalState := filepath.Join(root, "external-state")
@@ -720,7 +1085,7 @@ func TestLatestRejectsSymlinkedRepoState(t *testing.T) {
 	if err := os.MkdirAll(runsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	report := Report{SchemaVersion: 1, RunID: "20260821T120000Z-0000"}
+	report := Report{SchemaVersion: 1, RunID: "20260821T120000.000000000Z-0000"}
 	writeReportFixture(t, runsDir, report)
 	reportPath := filepath.Join(runsDir, report.RunID, "report.json")
 	before, err := os.ReadFile(reportPath)
@@ -754,7 +1119,7 @@ func TestLatestRejectsSymlinkedRunsDirectory(t *testing.T) {
 	if err := os.Mkdir(externalRuns, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	report := Report{SchemaVersion: 1, RunID: "20260821T120000Z-0000"}
+	report := Report{SchemaVersion: 1, RunID: "20260821T120000.000000000Z-0000"}
 	writeReportFixture(t, externalRuns, report)
 	reportPath := filepath.Join(externalRuns, report.RunID, "report.json")
 	before, err := os.ReadFile(reportPath)
@@ -798,8 +1163,8 @@ func TestLatestTightensExistingDirectoryPermissions(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := info.Mode().Perm(); got != 0o700 {
-			t.Errorf("mode for %s = %04o, want 0700", path, got)
+		if !privateDirectoryMode(info.Mode()) {
+			t.Errorf("mode for %s is not private: %04o", path, info.Mode().Perm())
 		}
 	}
 }
@@ -842,6 +1207,58 @@ func TestWriteReportFillsRunIDAndRejectsDuplicate(t *testing.T) {
 	}
 	if !bytes.Equal(after, contents) {
 		t.Error("duplicate WriteReport changed the completed report")
+	}
+}
+
+func TestPublishNoReplaceAllowsExactlyOneConcurrentWinner(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	first := []byte("first complete report\n")
+	second := []byte("second complete report\n")
+	if err := root.WriteFile("first.tmp", first, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.WriteFile("second.tmp", second, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, source := range []string{"first.tmp", "second.tmp"} {
+		go func() {
+			<-start
+			results <- publishNoReplace(root, source, "report.json")
+		}()
+	}
+	close(start)
+	firstErr := <-results
+	secondErr := <-results
+	close(results)
+	winners := 0
+	losers := 0
+	for _, err := range []error{firstErr, secondErr} {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, ErrReportExists):
+			losers++
+		default:
+			t.Fatalf("publish error = %v", err)
+		}
+	}
+	if winners != 1 || losers != 1 {
+		t.Fatalf("publish results: winners=%d losers=%d", winners, losers)
+	}
+	contents, err := root.ReadFile("report.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(contents, first) && !bytes.Equal(contents, second) {
+		t.Fatalf("published partial or unexpected report: %q", contents)
 	}
 }
 

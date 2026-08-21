@@ -110,9 +110,12 @@ are also the relief valve for touched-entity scope (ADR-0008).
 
 ## Concurrency
 
-One run per repo, enforced by a lockfile in that repo's state dir; stale locks
-are detected by pid. This is the natural consequence of one writer in the
-worktree (ADR-0007).
+One run per repo, enforced by an OS advisory lock held on an open, persistent
+`lock` file in that repo's state dir (`flock` on Unix and `LockFileEx` on
+Windows). The JSON PID/start/token record is informational; ownership is the
+open-file lock, which the OS releases when a process exits. The lock file is
+never unlinked, avoiding split ownership across old and newly-created inodes.
+This is the natural consequence of one writer in the worktree (ADR-0007).
 
 ## Run contract
 
