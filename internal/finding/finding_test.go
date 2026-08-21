@@ -141,6 +141,45 @@ func TestGroupCollapsesLocationsAndPreservesPrimaryFinding(t *testing.T) {
 	}
 }
 
+func TestGroupComputesMissingFingerprintAndUsesSuppliedFingerprint(t *testing.T) {
+	missing := Finding{Gate: "lint", RuleID: "lint/missing", File: "file.go", Line: 1, Snippet: "missing"}
+	grouped := Group([]Finding{missing})
+	if len(grouped) != 1 {
+		t.Fatalf("len(Group()) = %d, want 1", len(grouped))
+	}
+	if got, want := grouped[0].Fingerprint, Fingerprint(missing); got != want || got == "" {
+		t.Fatalf("computed fingerprint = %q, want nonempty %q", got, want)
+	}
+
+	const supplied = "supplied-fingerprint"
+	grouped = Group([]Finding{
+		{Gate: "lint", RuleID: "lint/first", File: "file.go", Line: 1, Snippet: "first", Fingerprint: supplied},
+		{Gate: "lint", RuleID: "lint/second", File: "file.go", Line: 2, Snippet: "second", Fingerprint: supplied},
+	})
+	if len(grouped) != 1 {
+		t.Fatalf("len(Group()) with a supplied fingerprint = %d, want 1", len(grouped))
+	}
+	if got := grouped[0].Fingerprint; got != supplied {
+		t.Fatalf("supplied fingerprint = %q, want %q", got, supplied)
+	}
+}
+
+func TestGroupUsesEndLineToBreakEqualLineTies(t *testing.T) {
+	grouped := Group([]Finding{
+		{Gate: "lint", RuleID: "lint/rule", File: "file.go", Line: 11, EndLine: 19, Snippet: "same", Message: "longer"},
+		{Gate: "lint", RuleID: "lint/rule", File: "file.go", Line: 11, EndLine: 13, Snippet: "same", Message: "shorter"},
+	})
+	if len(grouped) != 1 {
+		t.Fatalf("len(Group()) = %d, want 1", len(grouped))
+	}
+	if got := grouped[0]; got.Line != 11 || got.EndLine != 13 || got.Message != "shorter" {
+		t.Fatalf("primary = %#v, want shorter range and its raw fields", got)
+	}
+	if got, want := grouped[0].Occurrences, []Occurrence{{Line: 11, EndLine: 19}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("occurrences = %#v, want %#v", got, want)
+	}
+}
+
 func TestGroupSortsByLocationThenIdentity(t *testing.T) {
 	findings := []Finding{
 		{Gate: "z", RuleID: "z/rule", File: "b.go", Line: 1, Snippet: "z"},
@@ -160,6 +199,27 @@ func TestGroupSortsByLocationThenIdentity(t *testing.T) {
 		if got[index].File != want.File || got[index].Line != want.Line || got[index].Gate != want.Gate || got[index].RuleID != want.RuleID {
 			t.Fatalf("Group()[%d] = (%q, %d, %q, %q), want (%q, %d, %q, %q)", index, got[index].File, got[index].Line, got[index].Gate, got[index].RuleID, want.File, want.Line, want.Gate, want.RuleID)
 		}
+	}
+}
+
+func TestGroupSortsEqualLocationAndIdentityByFingerprint(t *testing.T) {
+	findings := []Finding{
+		{Gate: "lint", RuleID: "lint/rule", File: "file.go", Line: 4, Snippet: "first"},
+		{Gate: "lint", RuleID: "lint/rule", File: "file.go", Line: 4, Snippet: "second"},
+	}
+
+	grouped := Group(findings)
+	if len(grouped) != 2 {
+		t.Fatalf("len(Group()) = %d, want 2", len(grouped))
+	}
+	if got, want := grouped[0].Fingerprint, Fingerprint(findings[0]); got != want && got != Fingerprint(findings[1]) {
+		t.Fatalf("first fingerprint = %q, want a valid input fingerprint", got)
+	}
+	if got, want := grouped[1].Fingerprint, Fingerprint(findings[0]); got != want && got != Fingerprint(findings[1]) {
+		t.Fatalf("second fingerprint = %q, want a valid input fingerprint", got)
+	}
+	if grouped[0].Fingerprint >= grouped[1].Fingerprint {
+		t.Fatalf("fingerprints = (%q, %q), want lexical order", grouped[0].Fingerprint, grouped[1].Fingerprint)
 	}
 }
 
