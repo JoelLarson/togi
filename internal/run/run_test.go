@@ -23,7 +23,6 @@ import (
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/gate"
 	"github.com/joellarson/togi/internal/gitcmd/gitcmdtest"
-	"github.com/joellarson/togi/internal/normalizer"
 	"github.com/joellarson/togi/internal/repoid"
 )
 
@@ -201,7 +200,7 @@ func TestServiceRejectsUnsupportedPlatformBeforeResolvingRepository(t *testing.T
 func TestServiceRejectsUnsafeWiringBeforeRepositoryResolution(t *testing.T) {
 	abs := t.TempDir()
 	validPaths := config.Paths{Config: filepath.Join(abs, "config"), State: filepath.Join(abs, "state")}
-	validExecutor := Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}
+	validExecutor := Executor{Enrichers: enricher.NewRegistry()}
 	for _, tc := range []struct {
 		name    string
 		service Service
@@ -209,8 +208,7 @@ func TestServiceRejectsUnsafeWiringBeforeRepositoryResolution(t *testing.T) {
 		{name: "empty paths", service: Service{Executor: validExecutor, Stdout: io.Discard}},
 		{name: "relative config", service: Service{Paths: config.Paths{Config: "config", State: validPaths.State}, Executor: validExecutor, Stdout: io.Discard}},
 		{name: "relative state", service: Service{Paths: config.Paths{Config: validPaths.Config, State: "state"}, Executor: validExecutor, Stdout: io.Discard}},
-		{name: "empty registry", service: Service{Paths: validPaths, Executor: Executor{Enricher: enricher.Noop{}}, Stdout: io.Discard}},
-		{name: "empty enricher", service: Service{Paths: validPaths, Executor: Executor{Registry: normalizer.NewRegistry()}, Stdout: io.Discard}},
+		{name: "empty registry", service: Service{Paths: validPaths, Executor: Executor{}, Stdout: io.Discard}},
 		{name: "empty output", service: Service{Paths: validPaths, Executor: validExecutor}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -333,7 +331,7 @@ func TestServiceScopesCommittedFindingsAndProducesStableMetadata(t *testing.T) {
 
 	runOnce := func() Report {
 		service := fixtureService(paths, new(bytes.Buffer))
-		service.Executor.Enricher = enricher.Go{}
+		service.Executor.Enrichers = enricher.NewRegistry()
 		report, err := service.Run(context.Background(), Options{
 			Root: root, GateNames: []string{"entity", "point", "repository"}, ReportOnly: true, NoColor: true,
 		})
@@ -385,7 +383,7 @@ func TestServiceRejectsUnsafeInjectedRepositoryIdentityBeforeStateUse(t *testing
 		{Key: "key", Directory: " ", Root: root},
 		{Key: "key", Directory: "bad:name", Root: root},
 	} {
-		service := Service{Paths: paths, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: io.Discard, ResolveRepo: func(context.Context, string) (repoid.ID, error) { return id, nil }}
+		service := Service{Paths: paths, Executor: Executor{Enrichers: enricher.NewRegistry()}, Stdout: io.Discard, ResolveRepo: func(context.Context, string) (repoid.ID, error) { return id, nil }}
 		if _, err := service.Run(context.Background(), Options{}); err == nil {
 			t.Fatalf("Run accepted identity %#v", id)
 		}
@@ -441,7 +439,7 @@ func TestServiceRejectsRepositoryStateInsideTargetWithoutSideEffects(t *testing.
 				t.Fatal(err)
 			}
 			paths := config.Paths{Config: filepath.Join(t.TempDir(), "config"), State: tc.state(t, root)}
-			service := Service{Paths: paths, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: io.Discard}
+			service := Service{Paths: paths, Executor: Executor{Enrichers: enricher.NewRegistry()}, Stdout: io.Discard}
 			if _, err := service.Run(context.Background(), Options{Root: root}); err == nil || !strings.Contains(err.Error(), "target repository") {
 				t.Fatalf("Run error = %v", err)
 			}
@@ -594,6 +592,22 @@ func TestServiceGateFilteringAndStatusDoesNotExecute(t *testing.T) {
 	}
 }
 
+func TestPrepareRunRejectsSelectedBindingWithoutEnricher(t *testing.T) {
+	root, paths := fixtureRepository(t)
+	marker := filepath.Join(t.TempDir(), "executed")
+	writeFixtureGateCommand(t, paths.GateOverrides(), "lint", []string{helperBinary(t), "mark", marker})
+	service := fixtureService(paths, new(bytes.Buffer))
+	service.Executor.Enrichers = enricher.Registry{"rust": enricher.Noop{}}
+
+	_, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}, NoColor: true})
+	if err == nil || !strings.Contains(err.Error(), `no enricher for language "go"`) {
+		t.Fatalf("Run error = %v, want missing enricher error", err)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("gate executed before enricher validation: %v", statErr)
+	}
+}
+
 func TestSelectRequestsRejectsDuplicateManifestsAndMissingGoBinding(t *testing.T) {
 	duplicate := gate.Gate{Manifest: gate.Manifest{Name: "lint"}, Bindings: map[string]gate.Binding{"go": {Language: "go"}}}
 	if _, err := selectRequests([]gate.Gate{duplicate, duplicate}, nil, "/repo"); err == nil || !strings.Contains(err.Error(), "duplicate") {
@@ -697,7 +711,7 @@ func fixtureService(paths config.Paths, output *bytes.Buffer) Service {
 	return Service{
 		Paths:    paths,
 		Loader:   gate.Loader{OverrideDir: paths.GateOverrides()},
-		Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}},
+		Executor: Executor{Enrichers: enricher.NewRegistry()},
 		Stdout:   output,
 	}
 }

@@ -26,7 +26,14 @@ type golangCIIssue struct {
 	} `json:"Pos"`
 }
 
-func normalizeGolangCI(ctx Context, raw []byte) ([]finding.Finding, error) {
+type golangciNormalizer struct {
+	config Config
+}
+
+func (n golangciNormalizer) Normalize(ctx Context, raw []byte) ([]finding.Finding, error) {
+	if err := validUTF8Raw("normalizer", raw); err != nil {
+		return nil, err
+	}
 	if len(raw) == 0 {
 		return nil, nil
 	}
@@ -65,6 +72,7 @@ func normalizeGolangCI(ctx Context, raw []byte) ([]finding.Finding, error) {
 	for index, issue := range *envelope.Issues {
 		result, err := makeFinding(
 			ctx,
+			n.config,
 			sources,
 			"golangci-lint/"+issue.FromLinter,
 			issue.Severity,

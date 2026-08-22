@@ -19,7 +19,7 @@ func TestSourceLookupRejectsFIFOWithoutBlocking(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := NewRegistry().Normalize(
+		_, err := normalize(
 			`regex:^(?P<file>.+):(?P<line>\d+)$`,
 			regexContext(root),
 			[]byte(fmt.Sprintf("%s:1\n", filepath.Base(path))),

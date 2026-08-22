@@ -34,9 +34,8 @@ type Request struct {
 
 // Executor runs one gate through normalization, enrichment, and grouping.
 type Executor struct {
-	Registry normalizer.Registry
-	Enricher enricher.Enricher
-	Now      func() time.Time
+	Enrichers enricher.Registry
+	Now       func() time.Time
 
 	runCommand commandRunner
 }
@@ -69,7 +68,7 @@ func (e Executor) Execute(parent context.Context, req Request) (report GateRepor
 		report.DurationMS = duration.Milliseconds()
 	}()
 
-	if err := validateExecution(parent, e, req); err != nil {
+	if err := validateExecution(parent, req); err != nil {
 		return errored(report, err)
 	}
 	command, err := req.Binding.RenderCommand()
@@ -104,8 +103,8 @@ func (e Executor) finishExecution(ctx context.Context, req Request, report GateR
 	if err := validateCommandResult(ctx, req.Binding, result); err != nil {
 		return errored(report, err)
 	}
-	normalized, err := e.Registry.Normalize(req.Binding.Normalizer, normalizer.Context{
-		Gate: req.Gate.Manifest.Name, Root: req.Root, Binding: req.Binding,
+	normalized, err := req.Binding.Normalize(normalizer.Context{
+		Gate: req.Gate.Manifest.Name, Root: req.Root,
 	}, stdout.Bytes())
 	if err != nil {
 		return errored(report, errors.New("normalize gate output: invalid tool output; inspect persisted raw output"))
@@ -118,15 +117,18 @@ func (e Executor) finishExecution(ctx context.Context, req Request, report GateR
 	if err != nil {
 		return errored(report, errors.New("group findings: invalid normalized findings"))
 	}
-	enriched, err := e.Enricher.Enrich(ctx, enricher.Context{
+	languageEnricher, ok := e.Enrichers.For(req.Binding.Language)
+	if !ok {
+		return errored(report, fmt.Errorf("no enricher for language %q", req.Binding.Language))
+	}
+	enriched, err := languageEnricher.Enrich(ctx, enricher.Context{
 		Root:     req.Root,
-		Language: req.Binding.Language,
-		Location: executionLocation(req.Gate.Manifest.Location),
+		Location: req.Gate.Manifest.Location,
 	}, grouped)
 	if err != nil {
 		return errored(report, errors.New("enrich findings: enrichment failed"))
 	}
-	if executionScope(req.Gate.Manifest.Scope) == gate.Diff {
+	if req.Gate.Manifest.Scope == gate.Diff {
 		enriched, err = finding.FilterTouched(enriched, req.ChangedLines)
 		if err != nil {
 			return errored(report, errors.New("filter findings by scope: invalid changed-line scope"))
@@ -232,47 +234,27 @@ func observeVersionStreams(version gate.Version, stdout, stderr []byte) (string,
 	return "", false, lastErr
 }
 
-func validateExecution(parent context.Context, e Executor, req Request) error {
+// validateExecution checks only genuinely runtime facts: gate validity is
+// proven once by gate.Compile, so re-checking manifest and binding fields
+// here would be validating a state the loader cannot produce.
+func validateExecution(parent context.Context, req Request) error {
 	switch {
 	case parent == nil:
 		return errors.New("execution context is required")
-	case strings.TrimSpace(req.Gate.Manifest.Name) == "":
-		return errors.New("gate name is required")
-	case !safeRawComponent(req.Gate.Manifest.Name):
-		return errors.New("gate name is unsafe for raw output storage")
-	case strings.TrimSpace(req.Binding.Language) == "":
-		return errors.New("binding language is required")
-	case !safeRawComponent(req.Binding.Language):
-		return errors.New("binding language is unsafe for raw output storage")
-	case strings.TrimSpace(req.Binding.Tool) == "":
-		return errors.New("binding tool is required")
-	case req.Gate.Manifest.Timeout <= 0:
-		return errors.New("gate timeout must be positive")
+	case !req.Gate.Valid() || !req.Binding.Valid():
+		return errors.New("gate was not compiled; load gates through gate.Compile")
 	case strings.TrimSpace(req.Root) == "":
 		return errors.New("repository root is required")
 	case isNilInterface(req.RawStore):
 		return errors.New("raw store is required")
-	case isNilInterface(e.Enricher):
-		return errors.New("enricher is required")
-	case strings.TrimSpace(req.Binding.Normalizer) == "":
-		return errors.New("normalizer is required")
 	}
-	switch executionScope(req.Gate.Manifest.Scope) {
-	case gate.Repo:
-	case gate.Diff:
+	if req.Gate.Manifest.Scope == gate.Diff {
 		if req.ChangedLines == nil {
 			return errors.New("diff-scoped gate requires changed lines")
 		}
 		if err := finding.ValidateChangedLines(req.ChangedLines); err != nil {
 			return errors.New("filter findings by scope: invalid changed-line scope")
 		}
-	default:
-		return errors.New("gate scope is invalid")
-	}
-	switch executionLocation(req.Gate.Manifest.Location) {
-	case gate.PointLocation, gate.EntityLocation:
-	default:
-		return errors.New("gate location is invalid")
 	}
 	info, err := os.Stat(req.Root)
 	if err != nil {
@@ -282,20 +264,6 @@ func validateExecution(parent context.Context, e Executor, req Request) error {
 		return errors.New("repository root is not a directory")
 	}
 	return nil
-}
-
-func executionScope(scope gate.Scope) gate.Scope {
-	if scope == "" {
-		return gate.Repo
-	}
-	return scope
-}
-
-func executionLocation(location gate.Location) gate.Location {
-	if location == "" {
-		return gate.PointLocation
-	}
-	return location
 }
 
 func isNilInterface(value any) bool {

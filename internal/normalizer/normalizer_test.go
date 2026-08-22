@@ -6,13 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/joellarson/togi/internal/finding"
-	"github.com/joellarson/togi/internal/gate"
 )
 
 func TestGoldenNormalizers(t *testing.T) {
@@ -28,7 +26,8 @@ func TestGoldenNormalizers(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, raw, want := goldenFixture(t, test.name, test.gate)
-			got, err := NewRegistry().Normalize(ctx.Binding.Normalizer, ctx, raw)
+			name, cfg := goldenConfig(test.name)
+			got, err := normalizeWithConfig(name, cfg, ctx, raw)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -70,7 +69,7 @@ func TestNormalizeEmptyOutput(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := NewRegistry().Normalize(test.normalizer, test.ctx, nil)
+			got, err := normalize(test.normalizer, test.ctx, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -98,7 +97,7 @@ func TestGolangCIRejectsMalformedOutput(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := NewRegistry().Normalize("golangci-json", Context{}, []byte(test.raw))
+			_, err := normalize("golangci-json", Context{}, []byte(test.raw))
 			if err == nil {
 				t.Fatal("error = nil, want malformed output error")
 			}
@@ -110,7 +109,7 @@ func TestGolangCIRejectsMalformedOutput(t *testing.T) {
 }
 
 func TestGolangCIAllowsExplicitEmptyIssues(t *testing.T) {
-	got, err := NewRegistry().Normalize("golangci-json", Context{}, []byte(`{"Issues": []}`))
+	got, err := normalize("golangci-json", Context{}, []byte(`{"Issues": []}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,30 +119,17 @@ func TestGolangCIAllowsExplicitEmptyIssues(t *testing.T) {
 }
 
 func TestNormalizeRejectsUnknownNormalizer(t *testing.T) {
-	_, err := NewRegistry().Normalize("unknown", Context{}, nil)
+	_, err := normalize("unknown", Context{}, nil)
 	if err == nil {
 		t.Fatal("error = nil, want unknown normalizer error")
 	}
 }
 
-func TestRegistryIsOpaqueAndZeroValueIsSafe(t *testing.T) {
-	if kind := reflect.TypeOf(NewRegistry()).Kind(); kind != reflect.Struct {
-		t.Fatalf("Registry kind = %v, want opaque struct", kind)
+func TestParsedNormalizerSupportsConcurrentNormalization(t *testing.T) {
+	parsed, err := Parse("golangci-json", defaultConfig("golangci-json"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	var registry Registry
-	if _, err := registry.Normalize("unknown", Context{}, nil); err == nil {
-		t.Fatal("zero Registry returned nil error for unknown normalizer")
-	}
-	if registry.Ready() {
-		t.Fatal("zero Registry is ready")
-	}
-	if !NewRegistry().Ready() {
-		t.Fatal("compiled Registry is not ready")
-	}
-}
-
-func TestRegistrySupportsConcurrentNormalization(t *testing.T) {
-	registry := NewRegistry()
 	const workers = 32
 	var wait sync.WaitGroup
 	errors := make(chan error, workers)
@@ -151,7 +137,7 @@ func TestRegistrySupportsConcurrentNormalization(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			findings, err := registry.Normalize("golangci-json", Context{}, []byte(`{"Issues":[]}`))
+			findings, err := parsed.Normalize(Context{}, []byte(`{"Issues":[]}`))
 			if err != nil {
 				errors <- err
 				return
@@ -180,7 +166,7 @@ func TestRegexDefinitionValidation(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := NewRegistry().Normalize(test.normalizer, Context{}, nil)
+			_, err := normalize(test.normalizer, Context{}, nil)
 			if err == nil {
 				t.Fatal("error = nil, want regex definition error")
 			}
@@ -189,7 +175,7 @@ func TestRegexDefinitionValidation(t *testing.T) {
 }
 
 func TestRegexRejectsDuplicateNamedCaptures(t *testing.T) {
-	_, err := NewRegistry().Normalize(
+	_, err := normalize(
 		`regex:^(?P<file>a)(?P<file>b)(?P<line>\d+)$`,
 		Context{},
 		nil,
@@ -210,7 +196,7 @@ func TestRegexRejectsUnmatchedNonemptyLines(t *testing.T) {
 		"source.go:1\ngarbage\nsource.go:2\n",
 		"source.go:1\n \nsource.go:2\n",
 	} {
-		got, err := NewRegistry().Normalize(normalizer, ctx, []byte(raw))
+		got, err := normalize(normalizer, ctx, []byte(raw))
 		if err == nil {
 			t.Fatalf("Normalize(%q) error = nil, want unmatched line error", raw)
 		}
@@ -222,7 +208,7 @@ func TestRegexRejectsUnmatchedNonemptyLines(t *testing.T) {
 
 func TestRegexValidatesRawBeforeOpeningSourceRoot(t *testing.T) {
 	ctx := regexContext("")
-	_, err := NewRegistry().Normalize(
+	_, err := normalize(
 		`regex:^(?P<file>[^:]+):(?P<line>\d+)$`,
 		ctx,
 		[]byte("unmatched\n"),
@@ -234,7 +220,7 @@ func TestRegexValidatesRawBeforeOpeningSourceRoot(t *testing.T) {
 
 func TestRegexRejectsInvalidNumericLine(t *testing.T) {
 	ctx := regexContext(t.TempDir())
-	_, err := NewRegistry().Normalize(
+	_, err := normalize(
 		`regex:^(?P<file>[^:]+):(?P<line>[^:]+)$`,
 		ctx,
 		[]byte("source.go:not-a-number\n"),
@@ -250,9 +236,11 @@ func TestRegexMessageTemplateValidation(t *testing.T) {
 
 	for _, message := range []string{"{{.missing}}", "{{"} {
 		ctx := regexContext(root)
-		ctx.Binding.Message = message
-		_, err := NewRegistry().Normalize(
+		cfg := defaultConfig("regex:")
+		cfg.Message = message
+		_, err := normalizeWithConfig(
 			`regex:^(?P<file>[^:]+):(?P<line>\d+)$`,
+			cfg,
 			ctx,
 			[]byte("source.go:1\n"),
 		)
@@ -265,39 +253,39 @@ func TestRegexMessageTemplateValidation(t *testing.T) {
 func TestRegexPreflightsBindingWithEmptyOutput(t *testing.T) {
 	tests := []struct {
 		name   string
-		mutate func(*Context)
+		mutate func(*Config)
 	}{
-		{name: "template key", mutate: func(ctx *Context) { ctx.Binding.Message = "{{.missing}}" }},
-		{name: "indirect template key", mutate: func(ctx *Context) { ctx.Binding.Message = `{{index . "missing"}}` }},
-		{name: "template key in untaken branch", mutate: func(ctx *Context) {
-			ctx.Binding.Message = `{{if eq .file "capture"}}ok{{else}}{{.missing}}{{end}}`
+		{name: "template key", mutate: func(cfg *Config) { cfg.Message = "{{.missing}}" }},
+		{name: "indirect template key", mutate: func(cfg *Config) { cfg.Message = `{{index . "missing"}}` }},
+		{name: "template key in untaken branch", mutate: func(cfg *Config) {
+			cfg.Message = `{{if eq .file "capture"}}ok{{else}}{{.missing}}{{end}}`
 		}},
-		{name: "indirect key in untaken branch", mutate: func(ctx *Context) {
-			ctx.Binding.Message = `{{if eq .file "capture"}}ok{{else}}{{index . "missing"}}{{end}}`
+		{name: "indirect key in untaken branch", mutate: func(cfg *Config) {
+			cfg.Message = `{{if eq .file "capture"}}ok{{else}}{{index . "missing"}}{{end}}`
 		}},
-		{name: "capture in rebound dot branch", mutate: func(ctx *Context) {
-			ctx.Binding.Message = `{{if eq .file "capture"}}ok{{else}}{{with .file}}{{.line}}{{end}}{{end}}`
+		{name: "capture in rebound dot branch", mutate: func(cfg *Config) {
+			cfg.Message = `{{if eq .file "capture"}}ok{{else}}{{with .file}}{{.line}}{{end}}{{end}}`
 		}},
-		{name: "template invocation without root dot", mutate: func(ctx *Context) {
-			ctx.Binding.Message = `{{define "nested"}}{{.file}}{{end}}{{template "nested"}}`
+		{name: "template invocation without root dot", mutate: func(cfg *Config) {
+			cfg.Message = `{{define "nested"}}{{.file}}{{end}}{{template "nested"}}`
 		}},
-		{name: "range over captures", mutate: func(ctx *Context) {
-			ctx.Binding.Message = `{{range $name, $value := .}}{{$name}}={{$value}}{{end}}`
+		{name: "range over captures", mutate: func(cfg *Config) {
+			cfg.Message = `{{range $name, $value := .}}{{$name}}={{$value}}{{end}}`
 		}},
-		{name: "qualified rule", mutate: func(ctx *Context) { ctx.Binding.RuleID = "complexity" }},
-		{name: "default severity", mutate: func(ctx *Context) { ctx.Binding.SeverityMap = nil }},
-		{name: "canonical severity", mutate: func(ctx *Context) {
-			ctx.Binding.SeverityMap["default"] = finding.Severity("critical")
+		{name: "qualified rule", mutate: func(cfg *Config) { cfg.RuleID = "complexity" }},
+		{name: "default severity", mutate: func(cfg *Config) { cfg.SeverityMap = nil }},
+		{name: "canonical severity", mutate: func(cfg *Config) {
+			cfg.SeverityMap["default"] = finding.Severity("critical")
 		}},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := regexContext("")
-			test.mutate(&ctx)
-			_, err := NewRegistry().Normalize(
+			cfg := defaultConfig("regex:")
+			test.mutate(&cfg)
+			_, err := normalizeWithConfig(
 				`regex:^(?P<file>[^:]+):(?P<line>\d+)$`,
-				ctx,
+				cfg, regexContext(""),
 				nil,
 			)
 			if err == nil {
@@ -315,7 +303,7 @@ func TestRegexRejectsLeadingAndInteriorBlankLines(t *testing.T) {
 		"source.go:1\n\nsource.go:2\n",
 		"\r\nsource.go:1\r\n",
 	} {
-		_, err := NewRegistry().Normalize(
+		_, err := normalize(
 			`regex:^(?P<file>[^:]+):(?P<line>\d+)$`,
 			regexContext(root),
 			[]byte(raw),
@@ -336,7 +324,7 @@ func TestNormalizersRejectInvalidUTF8(t *testing.T) {
 		{name: "regex", normalizer: `regex:^(?P<file>.+):(?P<line>\d+)$`, ctx: regexContext("")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := NewRegistry().Normalize(test.normalizer, test.ctx, []byte{0xff})
+			_, err := normalize(test.normalizer, test.ctx, []byte{0xff})
 			if err == nil {
 				t.Fatal("error = nil, want invalid UTF-8 error")
 			}
@@ -355,6 +343,7 @@ func TestNormalizerErrorsDoNotExposeRawOutput(t *testing.T) {
 		name       string
 		normalizer string
 		ctx        Context
+		cfg        Config
 		raw        string
 		wantRawRef bool
 	}{
@@ -381,10 +370,11 @@ func TestNormalizerErrorsDoNotExposeRawOutput(t *testing.T) {
 		{
 			name:       "golangci severity",
 			normalizer: "golangci-json",
-			ctx: Context{Gate: "lint", Root: root, Binding: gate.Binding{
+			ctx:        Context{Gate: "lint", Root: root},
+			cfg: Config{
 				Language:    "go",
 				SeverityMap: map[string]finding.Severity{"warning": finding.Warning},
-			}},
+			},
 			raw: issueJSON("errcheck", "message", secret, "source.go", 1),
 		},
 		{
@@ -396,17 +386,22 @@ func TestNormalizerErrorsDoNotExposeRawOutput(t *testing.T) {
 		{
 			name:       "golangci source path",
 			normalizer: "golangci-json",
-			ctx: Context{Gate: "lint", Root: root, Binding: gate.Binding{
+			ctx:        Context{Gate: "lint", Root: root},
+			cfg: Config{
 				Language:    "go",
 				SeverityMap: map[string]finding.Severity{"default": finding.Warning},
-			}},
+			},
 			raw: issueJSON("errcheck", "message", "warning", secret+".go", 1),
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, err := NewRegistry().Normalize(test.normalizer, test.ctx, []byte(test.raw))
+			cfg := test.cfg
+			if cfg.Language == "" {
+				cfg = defaultConfig(test.normalizer)
+			}
+			_, err := normalizeWithConfig(test.normalizer, cfg, test.ctx, []byte(test.raw))
 			if err == nil {
 				t.Fatal("error = nil, want normalization error")
 			}
@@ -426,19 +421,19 @@ func TestSeverityMappingUsesExactKeyThenDefault(t *testing.T) {
 	ctx := Context{
 		Gate: "lint",
 		Root: root,
-		Binding: gate.Binding{
-			Language: "go",
-			SeverityMap: map[string]finding.Severity{
-				"warning": finding.Info,
-				"default": finding.Warning,
-			},
+	}
+	cfg := Config{
+		Language: "go",
+		SeverityMap: map[string]finding.Severity{
+			"warning": finding.Info,
+			"default": finding.Warning,
 		},
 	}
 	raw := `{"Issues":[` +
 		`{"FromLinter":"one","Text":"first","Severity":"warning","Pos":{"Filename":"source.go","Line":1}},` +
 		`{"FromLinter":"two","Text":"second","Severity":"style","Pos":{"Filename":"source.go","Line":2}}` +
 		`]}`
-	got, err := NewRegistry().Normalize("golangci-json", ctx, []byte(raw))
+	got, err := normalizeWithConfig("golangci-json", cfg, ctx, []byte(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -453,13 +448,14 @@ func TestNormalizeRejectsMissingSeverityMappingAndDefault(t *testing.T) {
 	ctx := Context{
 		Gate: "lint",
 		Root: root,
-		Binding: gate.Binding{
-			Language:    "go",
-			SeverityMap: map[string]finding.Severity{"error": finding.Error},
-		},
 	}
-	_, err := NewRegistry().Normalize(
+	cfg := Config{
+		Language:    "go",
+		SeverityMap: map[string]finding.Severity{"error": finding.Error},
+	}
+	_, err := normalizeWithConfig(
 		"golangci-json",
+		cfg,
 		ctx,
 		[]byte(issueJSON("errcheck", "message", "warning", "source.go", 1)),
 	)
@@ -468,9 +464,11 @@ func TestNormalizeRejectsMissingSeverityMappingAndDefault(t *testing.T) {
 	}
 
 	ctx = regexContext(root)
-	ctx.Binding.SeverityMap = nil
-	_, err = NewRegistry().Normalize(
+	cfg = defaultConfig("regex:")
+	cfg.SeverityMap = nil
+	_, err = normalizeWithConfig(
 		`regex:^(?P<file>[^:]+):(?P<line>\d+)$`,
+		cfg,
 		ctx,
 		[]byte("source.go:1\n"),
 	)
@@ -504,7 +502,7 @@ func TestSourceLookupRejectsUnsafeOrInvalidLocations(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := regexContext(root)
 			raw := fmt.Sprintf("%s:%d\n", test.file, test.line)
-			_, err := NewRegistry().Normalize(
+			_, err := normalize(
 				`regex:^(?P<file>.+):(?P<line>\d+)$`,
 				ctx,
 				[]byte(raw),
@@ -524,7 +522,7 @@ func TestSourceLookupAcceptsAbsolutePathInsideRoot(t *testing.T) {
 	}
 	writeTestFile(t, inside, "inside\n")
 
-	got, err := NewRegistry().Normalize(
+	got, err := normalize(
 		`regex:^(?P<file>.+):(?P<line>\d+)$`,
 		regexContext(root),
 		[]byte(fmt.Sprintf("%s:1\n", inside)),
@@ -549,7 +547,7 @@ func TestSourceLookupRejectsSymlinkEscape(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	_, err := NewRegistry().Normalize(
+	_, err := normalize(
 		`regex:^(?P<file>.+):(?P<line>\d+)$`,
 		regexContext(root),
 		[]byte("escape.go:1\n"),
@@ -642,7 +640,7 @@ func TestSourceLookupHandlesCRLFLongLinesAndNativePaths(t *testing.T) {
 	toolPath := "nested" + separator + ".." + separator + "source.go"
 	raw := fmt.Sprintf("%s:1\r\n%s:2\r\n", toolPath, toolPath)
 
-	got, err := NewRegistry().Normalize(
+	got, err := normalize(
 		`regex:^(?P<file>.+):(?P<line>\d+)$`,
 		regexContext(root),
 		[]byte(raw),
@@ -665,7 +663,7 @@ func TestSourceLookupHandlesCRLFLongLinesAndNativePaths(t *testing.T) {
 func TestSourceLookupRejectsOverlongLine(t *testing.T) {
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "source.go"), strings.Repeat("x", 64*1024+1)+"\n")
-	_, err := NewRegistry().Normalize(
+	_, err := normalize(
 		`regex:^(?P<file>.+):(?P<line>\d+)$`,
 		regexContext(root),
 		[]byte("source.go:1\n"),
@@ -679,7 +677,7 @@ func TestSourceLookupAcceptsMaximumLengthLine(t *testing.T) {
 	root := t.TempDir()
 	want := strings.Repeat("x", maxSnippetBytes)
 	writeTestFile(t, filepath.Join(root, "source.go"), want+"\r\n")
-	got, err := NewRegistry().Normalize(
+	got, err := normalize(
 		`regex:^(?P<file>.+):(?P<line>\d+)$`,
 		regexContext(root),
 		[]byte("source.go:1\n"),
@@ -698,7 +696,7 @@ func TestSourceLookupRejectsInvalidUTF8WithoutExposingSource(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, sourceName), []byte{0xff, '\n'}, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := NewRegistry().Normalize(
+	_, err := normalize(
 		`regex:^(?P<file>.+):(?P<line>\d+)$`,
 		regexContext(root),
 		[]byte(sourceName+":1\n"),
@@ -723,7 +721,7 @@ func TestSourceLookupIgnoresInvalidUTF8BeforeRequestedLine(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	got, err := NewRegistry().Normalize(
+	got, err := normalize(
 		`regex:^(?P<file>.+):(?P<line>\d+)$`,
 		regexContext(root),
 		[]byte("source.go:2\n"),
@@ -741,7 +739,7 @@ func TestNormalizeValidatesEveryFindingAndSetsFingerprint(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "source.go"), "line one\n")
 	ctx := regexContext(root)
 	ctx.Gate = ""
-	_, err := NewRegistry().Normalize(
+	_, err := normalize(
 		`regex:^(?P<file>.+):(?P<line>\d+)$`,
 		ctx,
 		[]byte("source.go:1\n"),
@@ -751,7 +749,7 @@ func TestNormalizeValidatesEveryFindingAndSetsFingerprint(t *testing.T) {
 	}
 
 	ctx.Gate = "complexity"
-	got, err := NewRegistry().Normalize(
+	got, err := normalize(
 		`regex:^(?P<file>.+):(?P<line>\d+)$`,
 		ctx,
 		[]byte("source.go:1\n"),
@@ -766,15 +764,6 @@ func TestNormalizeValidatesEveryFindingAndSetsFingerprint(t *testing.T) {
 
 func goldenFixture(t *testing.T, name, gateName string) (Context, []byte, []byte) {
 	t.Helper()
-	loaded, err := (gate.Loader{}).Load(gateName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding, ok := loaded.Bindings["go"]
-	if !ok {
-		t.Fatalf("gate %q has no Go binding", gateName)
-	}
-
 	fixtureDir := filepath.Join("testdata", name)
 	raw := readTestFile(t, filepath.Join(fixtureDir, "output.raw"))
 	want := readTestFile(t, filepath.Join(fixtureDir, "want.json"))
@@ -782,20 +771,44 @@ func goldenFixture(t *testing.T, name, gateName string) (Context, []byte, []byte
 	root := t.TempDir()
 	writeTestFile(t, filepath.Join(root, "source.go"), string(source))
 
-	return Context{Gate: loaded.Manifest.Name, Root: root, Binding: binding}, raw, want
+	return Context{Gate: gateName, Root: root}, raw, want
 }
 
 func regexContext(root string) Context {
-	return Context{
-		Gate: "complexity",
-		Root: root,
-		Binding: gate.Binding{
-			Language:    "go",
-			RuleID:      "gocyclo/complexity",
-			Message:     "finding at {{.file}}:{{.line}}",
-			SeverityMap: map[string]finding.Severity{"default": finding.Warning},
-		},
+	return Context{Gate: "complexity", Root: root}
+}
+
+func normalize(name string, ctx Context, raw []byte) ([]finding.Finding, error) {
+	return normalizeWithConfig(name, defaultConfig(name), ctx, raw)
+}
+
+func normalizeWithConfig(name string, cfg Config, ctx Context, raw []byte) ([]finding.Finding, error) {
+	parsed, err := Parse(name, cfg)
+	if err != nil {
+		return nil, err
 	}
+	return parsed.Normalize(ctx, raw)
+}
+
+func defaultConfig(name string) Config {
+	cfg := Config{Language: "go", SeverityMap: map[string]finding.Severity{
+		"error": finding.Error, "warning": finding.Warning, "default": finding.Warning,
+	}}
+	if strings.HasPrefix(name, "regex:") {
+		cfg.RuleID = "gocyclo/complexity"
+		cfg.Message = "finding at {{.file}}:{{.line}}"
+	}
+	return cfg
+}
+
+func goldenConfig(name string) (string, Config) {
+	if name == "golangci" {
+		return "golangci-json", defaultConfig("golangci-json")
+	}
+	const pattern = `regex:^(?P<value>\d+) \S+ (?P<symbol>\S+) (?P<file>[^:]+):(?P<line>\d+):\d+$`
+	cfg := defaultConfig(pattern)
+	cfg.Message = "cyclomatic complexity {{.value}} in {{.symbol}}"
+	return pattern, cfg
 }
 
 func issueJSON(linter, message, severity, file string, line int) string {

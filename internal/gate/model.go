@@ -1,10 +1,12 @@
 package gate
 
 import (
+	"errors"
 	"sort"
 	"time"
 
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/normalizer"
 )
 
 // CostClass is a gate's declared runtime tier.
@@ -62,7 +64,9 @@ type Version struct {
 	Constraint string
 }
 
-// Binding defines how a gate runs for one language.
+// Binding defines how a gate runs for one language. A binding minted by
+// Compile carries its compiled normalizer and an unforgeable validity
+// witness; a hand-built literal reports Valid() == false and cannot run.
 type Binding struct {
 	Language         string
 	Tool             string
@@ -76,13 +80,33 @@ type Binding struct {
 	SeverityMap      map[string]finding.Severity
 	Version          Version
 	Aliases          map[string]string
+
+	compiled normalizer.Normalizer
+	valid    bool
+}
+
+// Valid reports whether this binding was minted by Compile.
+func (b Binding) Valid() bool { return b.valid }
+
+// Normalize converts raw tool output into findings via the binding's
+// compiled normalizer.
+func (b Binding) Normalize(ctx normalizer.Context, raw []byte) ([]finding.Finding, error) {
+	if !b.valid || b.compiled == nil {
+		return nil, errors.New("binding is not compiled")
+	}
+	return b.compiled.Normalize(ctx, raw)
 }
 
 // Gate combines a manifest with its language bindings.
 type Gate struct {
 	Manifest Manifest
 	Bindings map[string]Binding
+
+	valid bool
 }
+
+// Valid reports whether this gate was minted by Compile.
+func (g Gate) Valid() bool { return g.valid }
 
 // BindingLanguages returns a gate's binding languages in stable order.
 func (g Gate) BindingLanguages() []string {

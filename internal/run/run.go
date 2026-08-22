@@ -247,7 +247,10 @@ func (service Service) prepareRun(ctx context.Context, opts Options) (preparedRu
 		return preparedRun{}, err
 	}
 	for index := range requests {
-		if executionScope(requests[index].Gate.Manifest.Scope) == gate.Diff {
+		if _, ok := service.Executor.Enrichers.For(requests[index].Binding.Language); !ok {
+			return preparedRun{}, fmt.Errorf("gate %q: no enricher for language %q", requests[index].Gate.Manifest.Name, requests[index].Binding.Language)
+		}
+		if requests[index].Gate.Manifest.Scope == gate.Diff {
 			requests[index].ChangedLines = diff.Lines
 		}
 	}
@@ -307,11 +310,8 @@ func (service Service) validateRun() error {
 	if service.Loader.OverrideDir != "" && !filepath.IsAbs(service.Loader.OverrideDir) {
 		return errors.New("gate override root must be absolute")
 	}
-	if !service.Executor.Registry.Ready() {
-		return errors.New("executor normalizer registry is not initialized")
-	}
-	if isNilInterface(service.Executor.Enricher) {
-		return errors.New("executor enricher is required")
+	if len(service.Executor.Enrichers.Languages()) == 0 {
+		return errors.New("executor enricher registry is not initialized")
 	}
 	if isNilInterface(service.Stdout) {
 		return errors.New("report output is required")

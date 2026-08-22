@@ -193,11 +193,11 @@ func loadGate(fsys fs.FS, root, requestedName string) (Gate, error) {
 		}
 		bindings[language] = binding
 	}
-	if len(bindings) == 0 {
-		return Gate{}, fmt.Errorf("%s: at least one language binding is required", root)
+	compiled, err := Compile(manifest, bindings)
+	if err != nil {
+		return Gate{}, fmt.Errorf("%s: %w", root, err)
 	}
-
-	return Gate{Manifest: manifest, Bindings: bindings}, nil
+	return compiled, nil
 }
 
 func decodeStrictFile(fsys fs.FS, filename string, destination any) error {
@@ -215,206 +215,64 @@ func decodeStrictFile(fsys fs.FS, filename string, destination any) error {
 }
 
 func (wire manifestWire) toManifest(requestedName string) (Manifest, error) {
-	if strings.TrimSpace(wire.Name) == "" {
-		return Manifest{}, fmt.Errorf("manifest name is required")
-	}
-	if wire.Name != requestedName {
+	if strings.TrimSpace(wire.Name) != "" && wire.Name != requestedName {
 		return Manifest{}, fmt.Errorf("manifest name %q does not match directory %q", wire.Name, requestedName)
-	}
-	if strings.TrimSpace(wire.Description) == "" {
-		return Manifest{}, fmt.Errorf("manifest description is required")
 	}
 
 	costClass := CostClass(wire.CostClass)
-	if costClass.defaultTimeout() == 0 {
-		return Manifest{}, fmt.Errorf("invalid cost class %q", wire.CostClass)
-	}
-	fixPolicy := FixPolicy(wire.FixPolicy)
-	switch fixPolicy {
-	case AutofixOnly, AutofixThenLLM, LLMFix, ReportOnly:
-	default:
-		return Manifest{}, fmt.Errorf("invalid fix policy %q", wire.FixPolicy)
-	}
-	scope := Scope(wire.Scope)
-	switch scope {
-	case Diff, Repo:
-	default:
-		return Manifest{}, fmt.Errorf("invalid scope %q", wire.Scope)
-	}
 	location := PointLocation
 	if wire.Location != nil {
 		location = Location(*wire.Location)
-		switch location {
-		case PointLocation, EntityLocation:
-		default:
-			return Manifest{}, fmt.Errorf("invalid location %q", *wire.Location)
-		}
 	}
-
 	blockingValues := []string{"error", "warning"}
 	if wire.Blocking != nil {
 		blockingValues = *wire.Blocking
 	}
 	blocking := make([]finding.Severity, len(blockingValues))
-	seen := make(map[finding.Severity]struct{}, len(blockingValues))
 	for index, value := range blockingValues {
-		severity, err := canonicalSeverity(value)
-		if err != nil {
-			return Manifest{}, fmt.Errorf("blocking severity: %w", err)
-		}
-		if _, exists := seen[severity]; exists {
-			return Manifest{}, fmt.Errorf("duplicate blocking severity %q", severity)
-		}
-		seen[severity] = struct{}{}
-		blocking[index] = severity
+		blocking[index] = finding.Severity(value)
 	}
-
 	timeout := costClass.defaultTimeout()
 	if wire.Timeout != nil {
 		parsed, err := time.ParseDuration(*wire.Timeout)
 		if err != nil {
 			return Manifest{}, fmt.Errorf("invalid timeout %q: %w", *wire.Timeout, err)
 		}
-		if parsed <= 0 {
-			return Manifest{}, fmt.Errorf("timeout must be positive")
-		}
 		timeout = parsed
 	}
 
-	return Manifest{
+	manifest := Manifest{
 		Name:        wire.Name,
 		Description: wire.Description,
 		CostClass:   costClass,
-		FixPolicy:   fixPolicy,
-		Scope:       scope,
+		FixPolicy:   FixPolicy(wire.FixPolicy),
+		Scope:       Scope(wire.Scope),
 		Location:    location,
 		Blocking:    blocking,
 		Timeout:     timeout,
-	}, nil
+	}
+	if err := validateManifest(manifest); err != nil {
+		return Manifest{}, err
+	}
+	return manifest, nil
 }
 
 func (wire bindingWire) toBinding(directoryLanguage string) (Binding, error) {
-	if err := wire.validateIdentityAndCommand(directoryLanguage); err != nil {
-		return Binding{}, err
+	if strings.TrimSpace(wire.Language) != "" && wire.Language != directoryLanguage {
+		return Binding{}, fmt.Errorf("binding language %q does not match directory %q", wire.Language, directoryLanguage)
 	}
-	successExitCodes, findingExitCodes, err := wire.exitCodes()
-	if err != nil {
-		return Binding{}, err
-	}
-	if err := wire.validateNormalizer(); err != nil {
-		return Binding{}, err
-	}
-	severityMap, err := wire.normalizedSeverities()
-	if err != nil {
-		return Binding{}, err
-	}
-	version, err := wire.normalizedVersion()
-	if err != nil {
-		return Binding{}, err
-	}
-	for ruleID, page := range wire.Aliases {
-		if strings.TrimSpace(ruleID) == "" || strings.TrimSpace(page) == "" {
-			return Binding{}, fmt.Errorf("alias rule ID and principle page are required")
-		}
-	}
-
-	return Binding{
-		Language: wire.Language, Tool: wire.Tool, Command: append([]string(nil), wire.Command...),
-		SuccessExitCodes: append([]int(nil), successExitCodes...), FindingExitCodes: append([]int(nil), findingExitCodes...),
-		Normalizer: wire.Normalizer, RuleID: wire.RuleID, Message: wire.Message, Settings: wire.Settings,
-		SeverityMap: severityMap, Version: version, Aliases: wire.Aliases,
-	}, nil
-}
-
-func (wire bindingWire) validateIdentityAndCommand(directoryLanguage string) error {
-	if strings.TrimSpace(wire.Language) == "" {
-		return fmt.Errorf("binding language is required")
-	}
-	if wire.Language != directoryLanguage {
-		return fmt.Errorf("binding language %q does not match directory %q", wire.Language, directoryLanguage)
-	}
-	if strings.TrimSpace(wire.Tool) == "" {
-		return fmt.Errorf("binding tool is required")
-	}
-	if len(wire.Command) == 0 {
-		return fmt.Errorf("binding command is required")
-	}
-	for index, argument := range wire.Command {
-		if argument == "" {
-			return fmt.Errorf("binding command argument %d is empty", index)
-		}
-	}
-	return nil
-}
-
-func (wire bindingWire) exitCodes() ([]int, []int, error) {
 	successExitCodes := []int{0}
 	if wire.SuccessExitCodes != nil {
-		if len(*wire.SuccessExitCodes) == 0 {
-			return nil, nil, fmt.Errorf("success exit codes cannot be explicitly empty")
-		}
 		successExitCodes = *wire.SuccessExitCodes
 	}
 	findingExitCodes := []int(nil)
 	if wire.FindingExitCodes != nil {
 		findingExitCodes = *wire.FindingExitCodes
 	}
-	seenExits, err := validateExitCodes("success", successExitCodes)
-	if err != nil {
-		return nil, nil, err
-	}
-	if _, err := validateExitCodes("finding", findingExitCodes); err != nil {
-		return nil, nil, err
-	}
-	for _, exitCode := range findingExitCodes {
-		if _, exists := seenExits[exitCode]; exists {
-			return nil, nil, fmt.Errorf("exit code %d cannot be both success and finding", exitCode)
-		}
-	}
-	return successExitCodes, findingExitCodes, nil
-}
-
-func (wire bindingWire) validateNormalizer() error {
-	if strings.TrimSpace(wire.Normalizer) == "" {
-		return fmt.Errorf("binding normalizer is required")
-	}
-	if strings.HasPrefix(wire.Normalizer, "regex:") {
-		pattern := strings.TrimPrefix(wire.Normalizer, "regex:")
-		if pattern == "" {
-			return fmt.Errorf("regex normalizer pattern is required")
-		}
-		if _, err := regexp.Compile(pattern); err != nil {
-			return fmt.Errorf("invalid regex normalizer: %w", err)
-		}
-		if strings.TrimSpace(wire.RuleID) == "" {
-			return fmt.Errorf("regex normalizer rule ID is required")
-		}
-		if strings.TrimSpace(wire.Message) == "" {
-			return fmt.Errorf("regex normalizer message is required")
-		}
-	}
-	return nil
-}
-
-func (wire bindingWire) normalizedSeverities() (map[string]finding.Severity, error) {
-	if len(wire.SeverityMap) == 0 {
-		return nil, fmt.Errorf("severity map is required")
-	}
 	severityMap := make(map[string]finding.Severity, len(wire.SeverityMap))
 	for source, value := range wire.SeverityMap {
-		if strings.TrimSpace(source) == "" {
-			return nil, fmt.Errorf("severity map source is required")
-		}
-		severity, err := canonicalSeverity(value)
-		if err != nil {
-			return nil, fmt.Errorf("severity map entry %q: %w", source, err)
-		}
-		severityMap[source] = severity
+		severityMap[source] = finding.Severity(value)
 	}
-	return severityMap, nil
-}
-
-func (wire bindingWire) normalizedVersion() (Version, error) {
 	version := Version{}
 	if wire.Version != nil {
 		version = Version{
@@ -423,10 +281,20 @@ func (wire bindingWire) normalizedVersion() (Version, error) {
 			Constraint: wire.Version.Constraint,
 		}
 		if err := validateVersion(version); err != nil {
-			return Version{}, err
+			return Binding{}, err
 		}
 	}
-	return version, nil
+
+	binding := Binding{
+		Language: wire.Language, Tool: wire.Tool, Command: append([]string(nil), wire.Command...),
+		SuccessExitCodes: append([]int(nil), successExitCodes...), FindingExitCodes: append([]int(nil), findingExitCodes...),
+		Normalizer: wire.Normalizer, RuleID: wire.RuleID, Message: wire.Message, Settings: wire.Settings,
+		SeverityMap: severityMap, Version: version, Aliases: wire.Aliases,
+	}
+	if err := validateBindingValue(binding); err != nil {
+		return Binding{}, err
+	}
+	return binding, nil
 }
 
 func canonicalSeverity(value string) (finding.Severity, error) {

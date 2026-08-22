@@ -80,8 +80,12 @@ func TestDefaultServiceUsesGoEnricher(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := service.Executor.Enricher.(enricher.Go); !ok {
-		t.Fatalf("enricher = %T, want enricher.Go", service.Executor.Enricher)
+	got, ok := service.Executor.Enrichers.For("go")
+	if !ok {
+		t.Fatal("Go enricher is not registered")
+	}
+	if _, ok := got.(enricher.Go); !ok {
+		t.Fatalf("enricher = %T, want enricher.Go", got)
 	}
 }
 

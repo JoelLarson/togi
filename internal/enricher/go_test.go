@@ -126,7 +126,6 @@ func TestGoEnrichPointLocationDoesNotRequireSource(t *testing.T) {
 
 	got, err := (Go{}).Enrich(context.Background(), Context{
 		Root:     filepath.Join(t.TempDir(), "does-not-exist"),
-		Language: "go",
 		Location: gate.PointLocation,
 	}, in)
 	if err != nil {
@@ -141,7 +140,7 @@ func TestGoEnrichPointLocationDoesNotRequireSource(t *testing.T) {
 	}
 }
 
-func TestGoEnrichRejectsUnsupportedEntityContexts(t *testing.T) {
+func TestGoEnrichRejectsInvalidEntityContexts(t *testing.T) {
 	root := t.TempDir()
 	in := []finding.Finding{{File: "example.go", Line: 1}}
 
@@ -149,9 +148,8 @@ func TestGoEnrichRejectsUnsupportedEntityContexts(t *testing.T) {
 		name string
 		ctx  Context
 	}{
-		{name: "language", ctx: Context{Root: root, Language: "rust", Location: gate.EntityLocation}},
-		{name: "relative root", ctx: Context{Root: "relative", Language: "go", Location: gate.EntityLocation}},
-		{name: "unknown location", ctx: Context{Root: root, Language: "go", Location: gate.Location("unknown")}},
+		{name: "relative root", ctx: Context{Root: "relative", Location: gate.EntityLocation}},
+		{name: "unknown location", ctx: Context{Root: root, Location: gate.Location("unknown")}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := (Go{}).Enrich(context.Background(), test.ctx, in)
@@ -276,7 +274,7 @@ func TestGoEnrichPreservesNilAndEmptyInputs(t *testing.T) {
 }
 
 func goEntityContext(root string) Context {
-	return Context{Root: root, Language: "go", Location: gate.EntityLocation}
+	return Context{Root: root, Location: gate.EntityLocation}
 }
 
 func writeGoSource(t *testing.T, root, name, source string) {

@@ -14,15 +14,20 @@ import (
 	"github.com/joellarson/togi/internal/finding"
 )
 
-func normalizeRegex(pattern string, ctx Context, raw []byte) ([]finding.Finding, error) {
-	compiled, message, err := preflightRegex(pattern, ctx)
-	if err != nil {
+type regexNormalizer struct {
+	config   Config
+	compiled *regexp.Regexp
+	message  *template.Template
+}
+
+func (n *regexNormalizer) Normalize(ctx Context, raw []byte) ([]finding.Finding, error) {
+	if err := validUTF8Raw("regex", raw); err != nil {
 		return nil, err
 	}
 	if len(raw) == 0 {
 		return nil, nil
 	}
-	records, err := parseRegexOutput(compiled, message, raw)
+	records, err := parseRegexOutput(n.compiled, n.message, raw)
 	if err != nil {
 		return nil, err
 	}
@@ -36,8 +41,9 @@ func normalizeRegex(pattern string, ctx Context, raw []byte) ([]finding.Finding,
 	for _, record := range records {
 		result, err := makeFinding(
 			ctx,
+			n.config,
 			sources,
-			ctx.Binding.RuleID,
+			n.config.RuleID,
 			"default",
 			record.file,
 			record.line,
@@ -95,10 +101,22 @@ func parseRegexOutput(compiled *regexp.Regexp, message *template.Template, raw [
 	return records, nil
 }
 
-func preflightRegex(pattern string, ctx Context) (*regexp.Regexp, *template.Template, error) {
+func parseRegex(pattern string, cfg Config) (*regexNormalizer, error) {
+	if pattern == "" {
+		return nil, errors.New("regex normalizer pattern is required")
+	}
+	if strings.TrimSpace(cfg.RuleID) == "" {
+		return nil, errors.New("regex normalizer rule ID is required")
+	}
+	if strings.TrimSpace(cfg.Message) == "" {
+		return nil, errors.New("regex normalizer message is required")
+	}
+	if _, ok := cfg.SeverityMap["default"]; !ok {
+		return nil, errors.New("regex binding requires a default severity")
+	}
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
-		return nil, nil, fmt.Errorf("compile regex normalizer: %w", err)
+		return nil, fmt.Errorf("compile regex normalizer: %w", err)
 	}
 	seenCaptures := make(map[string]struct{})
 	for _, name := range compiled.SubexpNames()[1:] {
@@ -106,34 +124,31 @@ func preflightRegex(pattern string, ctx Context) (*regexp.Regexp, *template.Temp
 			continue
 		}
 		if _, exists := seenCaptures[name]; exists {
-			return nil, nil, fmt.Errorf("regex normalizer has duplicate named capture %q", name)
+			return nil, fmt.Errorf("regex normalizer has duplicate named capture %q", name)
 		}
 		seenCaptures[name] = struct{}{}
 	}
 	if compiled.SubexpIndex("file") < 0 {
-		return nil, nil, fmt.Errorf("regex normalizer requires named capture %q", "file")
+		return nil, fmt.Errorf("regex normalizer requires named capture %q", "file")
 	}
 	if compiled.SubexpIndex("line") < 0 {
-		return nil, nil, fmt.Errorf("regex normalizer requires named capture %q", "line")
+		return nil, fmt.Errorf("regex normalizer requires named capture %q", "line")
 	}
-	message, err := template.New("message").Option("missingkey=error").Parse(ctx.Binding.Message)
+	message, err := template.New("message").Option("missingkey=error").Parse(cfg.Message)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse regex message template: %w", err)
+		return nil, fmt.Errorf("parse regex message template: %w", err)
 	}
 	if err := validateTemplateCaptureReferences(message, seenCaptures); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	defaultSeverity, ok := ctx.Binding.SeverityMap["default"]
-	if !ok {
-		return nil, nil, errors.New("regex binding requires a default severity")
-	}
+	defaultSeverity := cfg.SeverityMap["default"]
 	probe := finding.Finding{
-		Gate: "preflight", Language: "preflight", RuleID: ctx.Binding.RuleID,
+		Gate: "preflight", Language: "preflight", RuleID: cfg.RuleID,
 		Severity: defaultSeverity, File: "source", Line: 1,
 		Snippet: "source", Message: "source",
 	}
 	if err := finding.Validate(probe); err != nil {
-		return nil, nil, errors.New("regex binding rule ID or default severity is invalid")
+		return nil, errors.New("regex binding rule ID or default severity is invalid")
 	}
 	values := make(map[string]string)
 	for _, name := range compiled.SubexpNames()[1:] {
@@ -142,9 +157,9 @@ func preflightRegex(pattern string, ctx Context) (*regexp.Regexp, *template.Temp
 		}
 	}
 	if err := message.Execute(io.Discard, values); err != nil {
-		return nil, nil, fmt.Errorf("validate regex message template: %w", err)
+		return nil, fmt.Errorf("validate regex message template: %w", err)
 	}
-	return compiled, message, nil
+	return &regexNormalizer{config: cfg, compiled: compiled, message: message}, nil
 }
 
 func validateTemplateCaptureReferences(message *template.Template, captures map[string]struct{}) error {

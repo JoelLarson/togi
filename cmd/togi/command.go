@@ -10,7 +10,6 @@ import (
 	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/enricher"
 	"github.com/joellarson/togi/internal/gate"
-	"github.com/joellarson/togi/internal/normalizer"
 	runpkg "github.com/joellarson/togi/internal/run"
 	"github.com/joellarson/togi/internal/wiki"
 	"github.com/spf13/cobra"
@@ -92,7 +91,7 @@ func defaultService(s streams) (runpkg.Service, error) {
 	return runpkg.Service{
 		Paths:      paths,
 		Loader:     gate.Loader{OverrideDir: paths.GateOverrides()},
-		Executor:   runpkg.Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Go{}},
+		Executor:   runpkg.Executor{Enrichers: enricher.NewRegistry()},
 		Stdout:     s.out,
 		VerboseOut: s.err,
 	}, nil

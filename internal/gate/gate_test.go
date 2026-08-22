@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/normalizer"
 )
 
 func TestLoadAllReadsEmbeddedGoBindings(t *testing.T) {
@@ -271,11 +272,14 @@ func TestBindingValidation(t *testing.T) {
 		{name: "negative finding exit", binding: strings.Replace(validBinding(""), `finding_exit_codes = [1]`, `finding_exit_codes = [-1]`, 1), want: "finding exit"},
 		{name: "duplicate finding exit", binding: strings.Replace(validBinding(""), `finding_exit_codes = [1]`, `finding_exit_codes = [1, 1]`, 1), want: "duplicate"},
 		{name: "overlapping exits", binding: strings.Replace(validBinding(""), `finding_exit_codes = [1]`, `finding_exit_codes = [0]`, 1), want: "both"},
-		{name: "normalizer required", binding: strings.Replace(validBinding(""), `normalizer = "fixture"`, `normalizer = ""`, 1), want: "normalizer"},
+		{name: "normalizer required", binding: strings.Replace(validBinding(""), `normalizer = "golangci-json"`, `normalizer = ""`, 1), want: "normalizer"},
+		{name: "unknown normalizer", binding: strings.Replace(validBinding(""), `normalizer = "golangci-json"`, `normalizer = "unknown"`, 1), want: "unknown normalizer"},
+		{name: "bad regex", binding: strings.Replace(validBinding("rule_id = \"tool/rule\"\nmessage = \"message\""), `normalizer = "golangci-json"`, `normalizer = 'regex:('`, 1), want: "compile regex"},
 		{name: "severity map required", binding: strings.Replace(validBinding(""), "\n[severity_map]\ndefault = \"warning\"\n", "", 1), want: "severity map"},
 		{name: "invalid mapped severity", binding: strings.Replace(validBinding(""), `default = "warning"`, `default = "critical"`, 1), want: "severity"},
-		{name: "regex rule ID required", binding: strings.Replace(validBinding(""), `normalizer = "fixture"`, `normalizer = "regex:^(.*)$"`, 1), want: "rule"},
-		{name: "regex message required", binding: strings.Replace(validBinding("rule_id = \"tool/rule\""), `normalizer = "fixture"`, `normalizer = "regex:^(.*)$"`, 1), want: "message"},
+		{name: "regex rule ID required", binding: strings.Replace(validBinding(""), `normalizer = "golangci-json"`, `normalizer = "regex:^(?P<file>.+):(?P<line>\\d+)$"`, 1), want: "rule"},
+		{name: "regex message required", binding: strings.Replace(validBinding("rule_id = \"tool/rule\""), `normalizer = "golangci-json"`, `normalizer = "regex:^(?P<file>.+):(?P<line>\\d+)$"`, 1), want: "message"},
+		{name: "regex default severity required", binding: strings.Replace(strings.Replace(validBinding("rule_id = \"tool/rule\"\nmessage = \"message\""), `normalizer = "golangci-json"`, `normalizer = "regex:^(?P<file>.+):(?P<line>\\d+)$"`, 1), `default = "warning"`, `warning = "warning"`, 1), want: "default severity"},
 		{name: "incomplete version block", binding: validBinding("[version]\ncommand = [\"tool\", \"version\"]"), want: "version"},
 	}
 
@@ -288,6 +292,35 @@ func TestBindingValidation(t *testing.T) {
 				t.Fatalf("error = %v, want containing %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestCompileMintsValidityWitnesses(t *testing.T) {
+	manifest := Manifest{
+		Name: "fixture", Description: "fixture", CostClass: Fast, FixPolicy: ReportOnly,
+		Scope: Repo, Location: PointLocation, Blocking: []finding.Severity{}, Timeout: time.Second,
+	}
+	binding := Binding{
+		Language: "go", Tool: "fixture", Command: []string{"fixture"}, SuccessExitCodes: []int{0},
+		Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning},
+	}
+	if (Gate{Manifest: manifest, Bindings: map[string]Binding{"go": binding}}).Valid() || binding.Valid() {
+		t.Fatal("hand-built gate or binding reported valid")
+	}
+	if _, err := binding.Normalize(normalizer.Context{}, nil); err == nil {
+		t.Fatal("hand-built binding normalized output")
+	}
+
+	compiled, err := Compile(manifest, map[string]Binding{"go": binding})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiledBinding := compiled.Bindings["go"]
+	if !compiled.Valid() || !compiledBinding.Valid() {
+		t.Fatalf("compiled validity = %v/%v, want true/true", compiled.Valid(), compiledBinding.Valid())
+	}
+	if _, err := compiledBinding.Normalize(normalizer.Context{}, nil); err != nil {
+		t.Fatalf("compiled binding Normalize() error = %v", err)
 	}
 }
 
@@ -577,7 +610,7 @@ tool = "tool"
 command = ["tool", "check"]
 success_exit_codes = [0]
 finding_exit_codes = [1]
-normalizer = "fixture"
+normalizer = "golangci-json"
 %s
 
 [severity_map]

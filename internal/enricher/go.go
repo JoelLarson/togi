@@ -33,9 +33,6 @@ func (Go) Enrich(ctx context.Context, enrichment Context, in []finding.Finding) 
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("enrich Go findings: %w", err)
 	}
-	if enrichment.Language != "go" {
-		return nil, fmt.Errorf("cannot enrich %q entity findings as Go", enrichment.Language)
-	}
 	if !filepath.IsAbs(enrichment.Root) {
 		return nil, fmt.Errorf("repository root must be an absolute path")
 	}

@@ -11,7 +11,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/joellarson/togi/internal/finding"
-	"github.com/joellarson/togi/internal/gate"
 )
 
 const (
@@ -28,62 +27,60 @@ var (
 
 // Context supplies the gate metadata and repository used during normalization.
 type Context struct {
-	Gate    string
-	Root    string
-	Binding gate.Binding
+	Gate string
+	Root string
 }
 
-// Func converts one tool's raw output into normalized findings.
-type Func func(Context, []byte) ([]finding.Finding, error)
-
-// Registry dispatches immutable compiled normalizers by stable name.
-type Registry struct {
-	funcs map[string]Func
+// Config is the binding-derived data a normalizer is compiled against.
+type Config struct {
+	Language    string
+	RuleID      string
+	Message     string
+	SeverityMap map[string]finding.Severity
 }
 
-// NewRegistry returns all compiled normalizers.
-func NewRegistry() Registry {
-	return Registry{funcs: map[string]Func{
-		"golangci-json": normalizeGolangCI,
-	}}
+// Normalizer is one tool's parser, compiled against its binding's Config.
+type Normalizer interface {
+	Normalize(ctx Context, raw []byte) ([]finding.Finding, error)
 }
 
-// Ready reports whether the registry contains the required compiled normalizers.
-func (r Registry) Ready() bool {
-	_, ok := r.funcs["golangci-json"]
-	return ok
-}
-
-// Normalize dispatches to a compiled normalizer or a data-defined regex.
-func (r Registry) Normalize(name string, ctx Context, raw []byte) ([]finding.Finding, error) {
+// Parse resolves and compiles a normalizer name against its binding config.
+// This is the single home of the normalizer-name grammar: a name that Parse
+// accepts is guaranteed runnable, so grammar mistakes surface at gate load
+// time rather than as errored gates mid-run.
+func Parse(name string, cfg Config) (Normalizer, error) {
 	if strings.HasPrefix(name, "regex:") {
-		if !utf8.Valid(raw) {
-			return nil, fmt.Errorf("regex output is not valid UTF-8; %s", rawOutputGuidance)
-		}
-		return normalizeRegex(strings.TrimPrefix(name, "regex:"), ctx, raw)
+		return parseRegex(strings.TrimPrefix(name, "regex:"), cfg)
 	}
-	normalize, ok := r.funcs[name]
-	if !ok {
+	switch name {
+	case "golangci-json":
+		return golangciNormalizer{config: cfg}, nil
+	case "":
+		return nil, errors.New("normalizer name is required")
+	default:
 		return nil, fmt.Errorf("unknown normalizer %q", name)
 	}
-	if !utf8.Valid(raw) {
-		return nil, fmt.Errorf("normalizer output is not valid UTF-8; %s", rawOutputGuidance)
-	}
-	return normalize(ctx, raw)
 }
 
-func mappedSeverity(binding gate.Binding, toolSeverity string) (finding.Severity, error) {
-	if severity, ok := binding.SeverityMap[toolSeverity]; ok {
+func validUTF8Raw(kind string, raw []byte) error {
+	if !utf8.Valid(raw) {
+		return fmt.Errorf("%s output is not valid UTF-8; %s", kind, rawOutputGuidance)
+	}
+	return nil
+}
+
+func mappedSeverity(cfg Config, toolSeverity string) (finding.Severity, error) {
+	if severity, ok := cfg.SeverityMap[toolSeverity]; ok {
 		return severity, nil
 	}
-	if severity, ok := binding.SeverityMap["default"]; ok {
+	if severity, ok := cfg.SeverityMap["default"]; ok {
 		return severity, nil
 	}
 	return "", errors.New("tool severity has no mapping and no default")
 }
 
-func makeFinding(ctx Context, sources *sourceSession, ruleID, toolSeverity, file string, line int, message string) (finding.Finding, error) {
-	severity, err := mappedSeverity(ctx.Binding, toolSeverity)
+func makeFinding(ctx Context, cfg Config, sources *sourceSession, ruleID, toolSeverity, file string, line int, message string) (finding.Finding, error) {
+	severity, err := mappedSeverity(cfg, toolSeverity)
 	if err != nil {
 		return finding.Finding{}, err
 	}
@@ -94,7 +91,7 @@ func makeFinding(ctx Context, sources *sourceSession, ruleID, toolSeverity, file
 
 	result := finding.Finding{
 		Gate:     ctx.Gate,
-		Language: ctx.Binding.Language,
+		Language: cfg.Language,
 		RuleID:   ruleID,
 		Severity: severity,
 		File:     normalizedFile,

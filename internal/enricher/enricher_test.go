@@ -31,7 +31,7 @@ func TestNoopEnrichPreservesFindings(t *testing.T) {
 	}
 	wantInput := cloneFindings(in)
 
-	got, err := (Noop{}).Enrich(context.Background(), Context{Root: "/repo", Language: "go", Location: gate.PointLocation}, in)
+	got, err := (Noop{}).Enrich(context.Background(), Context{Root: "/repo", Location: gate.PointLocation}, in)
 	if err != nil {
 		t.Fatalf("Noop.Enrich() error = %v, want nil", err)
 	}
@@ -43,6 +43,23 @@ func TestNoopEnrichPreservesFindings(t *testing.T) {
 	}
 	if len(got) > 0 && &got[0] != &in[0] {
 		t.Fatal("Noop.Enrich() allocated a replacement slice")
+	}
+}
+
+func TestRegistryProvidesSupportedLanguages(t *testing.T) {
+	registry := NewRegistry()
+	got, ok := registry.For("go")
+	if !ok {
+		t.Fatal("For(go) did not find an enricher")
+	}
+	if _, ok := got.(Go); !ok {
+		t.Fatalf("For(go) = %T, want Go", got)
+	}
+	if _, ok := registry.For("rust"); ok {
+		t.Fatal("For(rust) unexpectedly found an enricher")
+	}
+	if want := []string{"go"}; !reflect.DeepEqual(registry.Languages(), want) {
+		t.Fatalf("Languages() = %v, want %v", registry.Languages(), want)
 	}
 }
 
