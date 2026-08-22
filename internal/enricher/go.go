@@ -146,18 +146,27 @@ func parseGoFile(ctx context.Context, root *os.Root, path string) (parsedFile, e
 
 func enclosingDeclarationEndLine(parsed parsedFile, line int) int {
 	shortestRange := 0
+	startLine := 0
 	endLine := 0
-	for _, declaration := range parsed.file.Decls {
+	ast.Inspect(parsed.file, func(node ast.Node) bool {
+		declaration, ok := node.(ast.Decl)
+		if !ok {
+			return true
+		}
 		start := parsed.fset.Position(declaration.Pos()).Line
 		end := parsed.fset.Position(declaration.End()).Line
 		if line < start || line > end {
-			continue
+			return true
 		}
 		declarationRange := end - start
-		if endLine == 0 || declarationRange < shortestRange {
+		isShorter := endLine == 0 || declarationRange < shortestRange
+		isEarlierEqualRange := declarationRange == shortestRange && (start < startLine || (start == startLine && end < endLine))
+		if isShorter || isEarlierEqualRange {
 			shortestRange = declarationRange
+			startLine = start
 			endLine = end
 		}
-	}
+		return true
+	})
 	return endLine
 }

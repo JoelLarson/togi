@@ -3,6 +3,7 @@ package enricher
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -100,6 +101,26 @@ func TestGoEnrichLeavesPackageAndOutsideDeclarationLocationsAsPoints(t *testing.
 	}
 }
 
+func TestGoEnrichChoosesSmallestNestedDeclaration(t *testing.T) {
+	root := t.TempDir()
+	writeGoSource(t, root, "nested.go", nestedDeclarationSource)
+	in := []finding.Finding{
+		{File: "nested.go", Line: 5},
+		{File: "nested.go", Line: 7},
+		{File: "nested.go", Line: 9},
+	}
+
+	got, err := (Go{}).Enrich(context.Background(), goEntityContext(root), in)
+	if err != nil {
+		t.Fatalf("Go.Enrich() error = %v, want nil", err)
+	}
+	for index, want := range []int{6, 7, 10} {
+		if got[index].EndLine != want {
+			t.Fatalf("finding %d end line = %d, want %d", index, got[index].EndLine, want)
+		}
+	}
+}
+
 func TestGoEnrichPointLocationDoesNotRequireSource(t *testing.T) {
 	in := []finding.Finding{{File: "../unsafe.go", Line: 4, Occurrences: []finding.Occurrence{{Line: 8}}}}
 	want := cloneFindings(in)
@@ -145,6 +166,9 @@ func TestGoEnrichRejectsUnsupportedEntityContexts(t *testing.T) {
 func TestGoEnrichFailsForUnreadableOrInvalidGoSource(t *testing.T) {
 	root := t.TempDir()
 	writeGoSource(t, root, "invalid.go", "package sample\nfunc broken() { one topSecret }\n")
+	if err := os.Mkdir(filepath.Join(root, "source-dir"), 0o700); err != nil {
+		t.Fatalf("Mkdir(source-dir): %v", err)
+	}
 
 	for _, test := range []struct {
 		name string
@@ -152,6 +176,7 @@ func TestGoEnrichFailsForUnreadableOrInvalidGoSource(t *testing.T) {
 	}{
 		{name: "missing", file: "missing.go"},
 		{name: "invalid", file: "invalid.go"},
+		{name: "read failure", file: "source-dir"},
 		{name: "parent traversal", file: "../outside.go"},
 		{name: "absolute path", file: filepath.Join(root, "invalid.go")},
 	} {
@@ -163,7 +188,28 @@ func TestGoEnrichFailsForUnreadableOrInvalidGoSource(t *testing.T) {
 			if strings.Contains(err.Error(), "topSecret") {
 				t.Fatalf("Go.Enrich() error exposed source content: %v", err)
 			}
+			if test.name == "read failure" && !strings.Contains(err.Error(), "read finding source") {
+				t.Fatalf("Go.Enrich() error = %v, want read failure", err)
+			}
 		})
+	}
+}
+
+func TestGoEnrichRejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	escape := t.TempDir()
+	writeGoSource(t, escape, "outside.go", declarationSource)
+	link := filepath.Join(root, "outside")
+	if err := os.Symlink(escape, link); err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		t.Fatalf("Symlink(%q, %q): %v", escape, link, err)
+	}
+
+	_, err := (Go{}).Enrich(context.Background(), goEntityContext(root), []finding.Finding{{File: "outside/outside.go", Line: 4}})
+	if err == nil {
+		t.Fatal("Go.Enrich() error = nil, want symlink escape rejection")
 	}
 }
 
@@ -224,5 +270,19 @@ func Work() {
 
 func (Record) Method() {
 	println("method")
+}
+`
+
+const nestedDeclarationSource = `package sample
+
+func Work() {
+	var localValue = struct {
+		Value int
+	}{}
+	const localConst = 1
+	type localType struct {
+		Value int
+	}
+	println(localValue, localConst, localType{})
 }
 `
