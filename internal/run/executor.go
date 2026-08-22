@@ -253,6 +253,9 @@ func validateExecution(parent context.Context, e Executor, req Request) error {
 		if req.ChangedLines == nil {
 			return errors.New("diff-scoped gate requires changed lines")
 		}
+		if err := finding.ValidateChangedLines(req.ChangedLines); err != nil {
+			return errors.New("filter findings by scope: invalid changed-line scope")
+		}
 	default:
 		return errors.New("gate scope is invalid")
 	}

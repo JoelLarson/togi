@@ -353,6 +353,53 @@ func TestExecuteRejectsNilChangedLinesForDiffScopeBeforeCommand(t *testing.T) {
 	}
 }
 
+func TestExecuteRejectsInvalidChangedLinesForDiffScopeBeforeVersionOrGate(t *testing.T) {
+	root := t.TempDir()
+	for _, test := range []struct {
+		name    string
+		changed finding.ChangedLines
+	}{
+		{name: "invalid range", changed: finding.ChangedLines{"source.go": {{Start: 0, End: 1}}}},
+		{name: "unsafe path", changed: finding.ChangedLines{"../scope-secret": {{Start: 1, End: 1}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			versionMarker := filepath.Join(root, "version-"+strings.ReplaceAll(test.name, " ", "-"))
+			store := &memoryRawStore{}
+			runnerCalled := false
+			binding := gate.Binding{
+				Language: "go", Tool: "fixture", Command: []string{"fixture"}, SuccessExitCodes: []int{0},
+				Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning},
+				Version: gate.Version{Command: []string{helperBinary(t), "mark", versionMarker}},
+			}
+			report := (Executor{
+				Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{},
+				runCommand: func(context.Context, string, []string) commandResult {
+					runnerCalled = true
+					return commandResult{stdout: newBoundedBuffer(rawOutputLimit, rawTruncationMarker), stderr: newBoundedBuffer(rawOutputLimit, rawTruncationMarker)}
+				},
+			}).Execute(context.Background(), Request{
+				Gate:         gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff}},
+				Binding:      binding,
+				Root:         root,
+				RawStore:     store,
+				ChangedLines: test.changed,
+			})
+			if report.Status != GateErrored || report.Error != "filter findings by scope: invalid changed-line scope" {
+				t.Fatalf("report = %#v", report)
+			}
+			if _, err := os.Stat(versionMarker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("version command ran: %v", err)
+			}
+			if runnerCalled {
+				t.Fatal("gate runner was called")
+			}
+			if len(store.writes) != 0 {
+				t.Fatalf("raw writes = %#v", store.writes)
+			}
+		})
+	}
+}
+
 func TestExecuteRedactsInvalidDiffScope(t *testing.T) {
 	root := t.TempDir()
 	writeSource(t, root, "source.go", "package source\nvar value = 1\n")

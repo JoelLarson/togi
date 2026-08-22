@@ -90,26 +90,34 @@ func TestFilterTouchedNormalizesFileSeparators(t *testing.T) {
 	}
 }
 
-func TestFilterTouchedRejectsInvalidChangedRanges(t *testing.T) {
+func TestValidateChangedLinesRejectsInvalidRanges(t *testing.T) {
 	for name, changed := range map[string]ChangedLines{
 		"zero start":       {"file.go": {{Start: 0, End: 1}}},
 		"end before start": {"file.go": {{Start: 3, End: 2}}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := FilterTouched(nil, changed); err == nil {
-				t.Fatal("FilterTouched() error = nil, want validation error")
+			if err := ValidateChangedLines(changed); err == nil {
+				t.Fatal("ValidateChangedLines() error = nil, want validation error")
 			}
 		})
 	}
 }
 
-func TestFilterTouchedRejectsChangedPathTraversal(t *testing.T) {
+func TestValidateChangedLinesRejectsUnsafePaths(t *testing.T) {
 	for _, path := range []string{"../file.go", "dir/../../file.go", `..\file.go`} {
 		t.Run(path, func(t *testing.T) {
-			if _, err := FilterTouched(nil, ChangedLines{path: {{Start: 1, End: 1}}}); err == nil {
-				t.Fatal("FilterTouched() error = nil, want path validation error")
+			if err := ValidateChangedLines(ChangedLines{path: {{Start: 1, End: 1}}}); err == nil {
+				t.Fatal("ValidateChangedLines() error = nil, want path validation error")
 			}
 		})
+	}
+}
+
+func TestValidateChangedLinesAcceptsNilAndEmptyScopes(t *testing.T) {
+	for _, changed := range []ChangedLines{nil, {}} {
+		if err := ValidateChangedLines(changed); err != nil {
+			t.Fatalf("ValidateChangedLines() error = %v", err)
+		}
 	}
 }
 

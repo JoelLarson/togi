@@ -20,7 +20,7 @@ type ChangedLines map[string][]LineRange
 // FilterTouched keeps only finding locations that overlap changed lines.
 // The returned findings are independent clones; filtering never changes identity.
 func FilterTouched(findings []Finding, changed ChangedLines) ([]Finding, error) {
-	changedPaths, err := validateChangedLines(changed)
+	changedPaths, err := validatedChangedLines(changed)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,13 @@ func FilterTouched(findings []Finding, changed ChangedLines) ([]Finding, error) 
 	return filtered, nil
 }
 
-func validateChangedLines(changed ChangedLines) (map[string][]LineRange, error) {
+// ValidateChangedLines verifies that changed-line paths and ranges are safe for scope filtering.
+func ValidateChangedLines(changed ChangedLines) error {
+	_, err := validatedChangedLines(changed)
+	return err
+}
+
+func validatedChangedLines(changed ChangedLines) (map[string][]LineRange, error) {
 	validated := make(map[string][]LineRange, len(changed))
 	for path, ranges := range changed {
 		canonical, err := canonicalRepositoryPath(path)
