@@ -159,6 +159,7 @@ type recordingEnricher struct {
 	calls    int
 	contexts []enricher.Context
 	err      error
+	errFor   func(enricher.Context) error
 	mutate   func([]finding.Finding) []finding.Finding
 }
 
@@ -167,6 +168,11 @@ func (e *recordingEnricher) Enrich(_ context.Context, ctx enricher.Context, in [
 	defer e.mu.Unlock()
 	e.calls++
 	e.contexts = append(e.contexts, ctx)
+	if e.errFor != nil {
+		if err := e.errFor(ctx); err != nil {
+			return nil, err
+		}
+	}
 	if e.err != nil {
 		return nil, e.err
 	}
@@ -231,7 +237,7 @@ func TestExecuteNormalizesEnrichesAndGroupsGolangCI(t *testing.T) {
 	if report.Findings[0].Severity != finding.Error {
 		t.Fatalf("severity = %q, want error", report.Findings[0].Severity)
 	}
-	if enrich.calls != 1 || !reflect.DeepEqual(enrich.contexts, []enricher.Context{{Root: root, Language: "go"}}) {
+	if enrich.calls != 1 || !reflect.DeepEqual(enrich.contexts, []enricher.Context{{Root: root, Language: "go", Location: gate.PointLocation}}) {
 		t.Fatalf("enricher calls = %d, contexts = %#v", enrich.calls, enrich.contexts)
 	}
 	if !slices.Equal(store.raw("stdout"), []byte(raw)) || len(store.raw("stderr")) != 0 {
@@ -261,6 +267,148 @@ func TestExecuteNormalizesRegexAndAcceptsCleanSuccess(t *testing.T) {
 	report, _, enrich := executeFixture(t, root, binding, gate.Manifest{Name: "complexity"})
 	if report.Status != GatePassed || len(report.Findings) != 0 || enrich.calls != 1 {
 		t.Fatalf("clean report = %#v, enrich calls=%d", report, enrich.calls)
+	}
+}
+
+func TestExecuteDiffScopeFiltersEnrichedFindingsBeforeGrouping(t *testing.T) {
+	root := t.TempDir()
+	writeSource(t, root, "source.go", "package source\nvar same = 1\nvar same = 1\nvar same = 1\n")
+	raw := `{"Issues":[{"FromLinter":"check","Text":"same","Severity":"warning","Pos":{"Filename":"source.go","Line":2}},{"FromLinter":"check","Text":"same","Severity":"error","Pos":{"Filename":"source.go","Line":3}},{"FromLinter":"check","Text":"same","Severity":"info","Pos":{"Filename":"source.go","Line":4}}]}`
+	binding := gate.Binding{
+		Language: "go", Tool: "fixture", Command: emitCommand(t, raw, "", 0),
+		SuccessExitCodes: []int{0}, Normalizer: "golangci-json",
+		SeverityMap: map[string]finding.Severity{"warning": finding.Warning, "error": finding.Error, "info": finding.Info},
+	}
+	enrich := &recordingEnricher{mutate: func(in []finding.Finding) []finding.Finding {
+		in[0].EndLine = 6
+		in[1].Line = 8
+		in[1].EndLine = 8
+		in[2].Line = 2
+		in[2].Occurrences = []finding.Occurrence{{Line: 4, EndLine: 6}}
+		return in
+	}}
+	report := (Executor{Registry: normalizer.NewRegistry(), Enricher: enrich}).Execute(context.Background(), Request{
+		Gate:    gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff, Location: gate.EntityLocation}},
+		Binding: binding, Root: root, RawStore: &memoryRawStore{},
+		ChangedLines: finding.ChangedLines{"source.go": {{Start: 6, End: 6}}},
+	})
+
+	if report.Status != GateFindings || len(report.Findings) != 1 {
+		t.Fatalf("report = %#v", report)
+	}
+	got := report.Findings[0]
+	if got.Severity != finding.Warning || got.Line != 2 || got.EndLine != 6 || !reflect.DeepEqual(got.Occurrences, []finding.Occurrence{{Line: 4, EndLine: 6}}) {
+		t.Fatalf("scoped grouped finding = %#v", got)
+	}
+	if !reflect.DeepEqual(enrich.contexts, []enricher.Context{{Root: root, Language: "go", Location: gate.EntityLocation}}) {
+		t.Fatalf("enricher contexts = %#v", enrich.contexts)
+	}
+}
+
+func TestExecuteRepoScopeBypassesNilChangedLines(t *testing.T) {
+	root := t.TempDir()
+	writeSource(t, root, "source.go", "package source\nvar value = 1\n")
+	raw := `{"Issues":[{"FromLinter":"check","Text":"message","Severity":"warning","Pos":{"Filename":"source.go","Line":2}}]}`
+	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, raw, "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"warning": finding.Warning}}
+	report := (Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}).Execute(context.Background(), Request{
+		Gate:    gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Repo}},
+		Binding: binding, Root: root, RawStore: &memoryRawStore{},
+	})
+	if report.Status != GateFindings || len(report.Findings) != 1 {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestExecuteDiffScopeAcceptsEmptyChangedLines(t *testing.T) {
+	root := t.TempDir()
+	writeSource(t, root, "source.go", "package source\nvar value = 1\n")
+	raw := `{"Issues":[{"FromLinter":"check","Text":"message","Severity":"warning","Pos":{"Filename":"source.go","Line":2}}]}`
+	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, raw, "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"warning": finding.Warning}}
+	report := (Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}).Execute(context.Background(), Request{
+		Gate:    gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff}},
+		Binding: binding, Root: root, RawStore: &memoryRawStore{}, ChangedLines: finding.ChangedLines{},
+	})
+	if report.Status != GatePassed || len(report.Findings) != 0 {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestExecuteRejectsNilChangedLinesForDiffScopeBeforeCommand(t *testing.T) {
+	root := t.TempDir()
+	marker := filepath.Join(root, "executed")
+	binding := gate.Binding{Language: "go", Tool: "fixture", Command: []string{helperBinary(t), "mark", marker}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
+	store := &memoryRawStore{}
+	report := (Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}).Execute(context.Background(), Request{
+		Gate:    gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff}},
+		Binding: binding, Root: root, RawStore: store,
+	})
+	if report.Status != GateErrored || report.Error != "diff-scoped gate requires changed lines" {
+		t.Fatalf("report = %#v", report)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("command ran: %v", err)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("raw writes = %#v", store.writes)
+	}
+}
+
+func TestExecuteRedactsInvalidDiffScope(t *testing.T) {
+	root := t.TempDir()
+	writeSource(t, root, "source.go", "package source\nvar value = 1\n")
+	const secret = "scope-secret"
+	raw := `{"Issues":[{"FromLinter":"check","Text":"scope-secret","Severity":"warning","Pos":{"Filename":"source.go","Line":2}}]}`
+	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, raw, "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"warning": finding.Warning}}
+	report := (Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}).Execute(context.Background(), Request{
+		Gate:    gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff}},
+		Binding: binding, Root: root, RawStore: &memoryRawStore{},
+		ChangedLines: finding.ChangedLines{"../" + secret: {{Start: 1, End: 1}}},
+	})
+	if report.Status != GateErrored || report.Error != "filter findings by scope: invalid changed-line scope" || len(report.Findings) != 0 {
+		t.Fatalf("report = %#v", report)
+	}
+	if strings.Contains(report.Error, secret) {
+		t.Fatalf("scope error leaked changed-line data: %q", report.Error)
+	}
+}
+
+func TestCollectKeepsHealthySiblingWhenScopeOrEnrichmentFails(t *testing.T) {
+	root := t.TempDir()
+	writeSource(t, root, "source.go", "package source\nvar value = 1\n")
+	raw := `{"Issues":[{"FromLinter":"check","Text":"message","Severity":"warning","Pos":{"Filename":"source.go","Line":2}}]}`
+	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, raw, "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"warning": finding.Warning}}
+
+	for _, test := range []struct {
+		name     string
+		executor Executor
+		broken   Request
+	}{
+		{
+			name:     "scope",
+			executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}},
+			broken:   Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "broken", Timeout: time.Second, Scope: gate.Diff}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}, ChangedLines: finding.ChangedLines{"../invalid": {{Start: 1, End: 1}}}},
+		},
+		{
+			name: "enrichment",
+			executor: Executor{Registry: normalizer.NewRegistry(), Enricher: &recordingEnricher{errFor: func(ctx enricher.Context) error {
+				if ctx.Location == gate.EntityLocation {
+					return errors.New("enrichment-secret")
+				}
+				return nil
+			}}},
+			broken: Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "broken", Timeout: time.Second, Scope: gate.Repo, Location: gate.EntityLocation}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			healthy := Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "healthy", Timeout: time.Second, Scope: gate.Repo, Location: gate.PointLocation}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}}
+			reports := Collect(context.Background(), test.executor, []Request{test.broken, healthy}, 2)
+			if len(reports) != 2 || reports[0].Status != GateErrored || reports[1].Status != GateFindings || len(reports[1].Findings) != 1 {
+				t.Fatalf("reports = %#v", reports)
+			}
+			if strings.Contains(reports[0].Error, "secret") {
+				t.Fatalf("broken report leaked error details: %#v", reports[0])
+			}
+		})
 	}
 }
 

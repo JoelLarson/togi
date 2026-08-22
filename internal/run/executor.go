@@ -25,10 +25,11 @@ type RawStore interface {
 
 // Request identifies one gate binding to execute against a repository.
 type Request struct {
-	Gate     gate.Gate
-	Binding  gate.Binding
-	Root     string
-	RawStore RawStore
+	Gate         gate.Gate
+	Binding      gate.Binding
+	Root         string
+	RawStore     RawStore
+	ChangedLines finding.ChangedLines
 }
 
 // Executor runs one gate through normalization, enrichment, and grouping.
@@ -110,9 +111,19 @@ func (e Executor) finishExecution(ctx context.Context, req Request, report GateR
 	if findingExit && len(normalized) == 0 {
 		return errored(report, errors.New("finding exit produced no valid findings"))
 	}
-	enriched, err := e.Enricher.Enrich(ctx, enricher.Context{Root: req.Root, Language: req.Binding.Language}, normalized)
+	enriched, err := e.Enricher.Enrich(ctx, enricher.Context{
+		Root:     req.Root,
+		Language: req.Binding.Language,
+		Location: executionLocation(req.Gate.Manifest.Location),
+	}, normalized)
 	if err != nil {
 		return errored(report, errors.New("enrich findings: enrichment failed"))
+	}
+	if executionScope(req.Gate.Manifest.Scope) == gate.Diff {
+		enriched, err = finding.FilterTouched(enriched, req.ChangedLines)
+		if err != nil {
+			return errored(report, errors.New("filter findings by scope: invalid changed-line scope"))
+		}
 	}
 	grouped, err := finding.Group(enriched)
 	if err != nil {
@@ -236,6 +247,20 @@ func validateExecution(parent context.Context, e Executor, req Request) error {
 	case strings.TrimSpace(req.Binding.Normalizer) == "":
 		return errors.New("normalizer is required")
 	}
+	switch executionScope(req.Gate.Manifest.Scope) {
+	case gate.Repo:
+	case gate.Diff:
+		if req.ChangedLines == nil {
+			return errors.New("diff-scoped gate requires changed lines")
+		}
+	default:
+		return errors.New("gate scope is invalid")
+	}
+	switch executionLocation(req.Gate.Manifest.Location) {
+	case gate.PointLocation, gate.EntityLocation:
+	default:
+		return errors.New("gate location is invalid")
+	}
 	info, err := os.Stat(req.Root)
 	if err != nil {
 		return errors.New("repository root cannot be opened")
@@ -244,6 +269,20 @@ func validateExecution(parent context.Context, e Executor, req Request) error {
 		return errors.New("repository root is not a directory")
 	}
 	return nil
+}
+
+func executionScope(scope gate.Scope) gate.Scope {
+	if scope == "" {
+		return gate.Repo
+	}
+	return scope
+}
+
+func executionLocation(location gate.Location) gate.Location {
+	if location == "" {
+		return gate.PointLocation
+	}
+	return location
 }
 
 func isNilInterface(value any) bool {
