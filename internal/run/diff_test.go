@@ -111,6 +111,31 @@ func TestResolveDiffIgnoresHostileGitEnvironmentWithoutRefreshingIndex(t *testin
 	}
 }
 
+func TestResolveDiffIgnoresInjectedAttributesConfig(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "base\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	writeDiffTestFile(t, repo, "file.go", "feature\n")
+	head := commitDiffTestRepo(t, repo, "feature")
+
+	attributes := filepath.Join(t.TempDir(), "attributes")
+	if err := os.WriteFile(attributes, []byte("*.go binary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "core.attributesFile")
+	t.Setenv("GIT_CONFIG_VALUE_0", attributes)
+
+	got, err := resolveDiff(context.Background(), repo, base)
+	if err != nil {
+		t.Fatalf("resolveDiff() error = %v", err)
+	}
+	want := finding.ChangedLines{"file.go": {{Start: 1, End: 1}}}
+	if got.BaseCommit != base || got.Head != head || !reflect.DeepEqual(got.Lines, want) {
+		t.Fatalf("resolveDiff() = %#v, want base %s, head %s, and text line scope %#v", got, base, head, want)
+	}
+}
+
 func TestResolveDiffExplicitBaseTakesPrecedence(t *testing.T) {
 	repo := newDiffTestRepo(t)
 	writeDiffTestFile(t, repo, "file.go", "base\n")
