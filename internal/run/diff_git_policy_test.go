@@ -109,6 +109,63 @@ func TestResolveDiffRejectsGitConversionFiltersBeforeExecution(t *testing.T) {
 	}
 }
 
+func TestResolveDiffRejectsSubmoduleConversionFiltersBeforeExecution(t *testing.T) {
+	for _, field := range []string{"clean", "process"} {
+		t.Run(field, func(t *testing.T) {
+			parent := newDiffTestRepo(t)
+			source := newDiffTestRepo(t)
+			writeDiffTestFile(t, source, ".gitattributes", "*.go filter=marker\n")
+			writeDiffTestFile(t, source, "nested.go", "clean\n")
+			commitDiffTestRepo(t, source, "submodule base")
+			gitDiffTest(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", source, "nested")
+			commitDiffTestRepo(t, parent, "add submodule")
+
+			marker := filepath.Join(t.TempDir(), "executed")
+			command := helperBinary(t) + " mark " + marker + " submodule-filter-secret"
+			gitDiffTest(t, filepath.Join(parent, "nested"), "config", "filter.marker."+field, command)
+			// Invalidate the cached stat tuple so an unhardened parent status must
+			// perform conversion even though the worktree bytes are unchanged.
+			writeDiffTestFile(t, filepath.Join(parent, "nested"), "nested.go", "clean\n")
+
+			_, err := resolveDiff(context.Background(), parent, "main")
+			if err == nil || !strings.Contains(err.Error(), "Git conversion filters") {
+				t.Fatalf("resolveDiff() error = %v, want conversion-filter diagnostic", err)
+			}
+			if strings.Contains(err.Error(), "submodule-filter-secret") || strings.Contains(err.Error(), command) {
+				t.Fatalf("resolveDiff() exposed submodule conversion command: %v", err)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("submodule conversion filter executed: %v", err)
+			}
+		})
+	}
+}
+
+func TestResolveDiffRejectsSubmoduleLocalAttributes(t *testing.T) {
+	parent := newDiffTestRepo(t)
+	source := newDiffTestRepo(t)
+	writeDiffTestFile(t, source, "nested.go", "clean\n")
+	commitDiffTestRepo(t, source, "submodule base")
+	gitDiffTest(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", source, "nested")
+	commitDiffTestRepo(t, parent, "add submodule")
+	submodule := filepath.Join(parent, "nested")
+	attributes := gitDiffTest(t, submodule, "rev-parse", "--git-path", "info/attributes")
+	if !filepath.IsAbs(attributes) {
+		attributes = filepath.Join(submodule, attributes)
+	}
+	if err := os.MkdirAll(filepath.Dir(attributes), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(attributes, []byte("*.go binary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolveDiff(context.Background(), parent, "main")
+	if err == nil || !strings.Contains(err.Error(), "local Git attributes") {
+		t.Fatalf("resolveDiff() error = %v, want local-attributes diagnostic", err)
+	}
+}
+
 func TestResolveDiffAllowsSmudgeOnlyGitFilter(t *testing.T) {
 	repo := newDiffTestRepo(t)
 	writeDiffTestFile(t, repo, ".gitattributes", "*.go filter=marker\n")
