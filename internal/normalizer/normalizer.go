@@ -153,18 +153,12 @@ func (s *sourceSession) readLine(reportedFile string, line int) (string, string,
 		return "", "", errors.New("source line is invalid")
 	}
 
-	cleanFile := filepath.Clean(reportedFile)
-	if filepath.IsAbs(cleanFile) {
-		relative, err := filepath.Rel(s.canonicalRoot, cleanFile)
-		if err != nil || pathEscapesRoot(relative) {
-			return "", "", errors.New("source path is outside repository root")
-		}
-		cleanFile = relative
-	} else if pathEscapesRoot(cleanFile) {
+	path, err := finding.NewPath(s.canonicalRoot, reportedFile)
+	if err != nil {
 		return "", "", errors.New("source path is outside repository root")
 	}
 
-	file, err := openRegularSource(s.root, cleanFile)
+	file, err := openRegularSource(s.root, filepath.FromSlash(path.String()))
 	if err != nil {
 		return "", "", fmt.Errorf("source file cannot be opened; %s", rawOutputGuidance)
 	}
@@ -176,11 +170,7 @@ func (s *sourceSession) readLine(reportedFile string, line int) (string, string,
 		}
 		return "", "", fmt.Errorf("source line cannot be read; %s", rawOutputGuidance)
 	}
-	return filepath.ToSlash(cleanFile), snippet, nil
-}
-
-func pathEscapesRoot(path string) bool {
-	return path == ".." || strings.HasPrefix(path, ".."+string(filepath.Separator)) || filepath.IsAbs(path)
+	return path.String(), snippet, nil
 }
 
 func openRegularSource(root *os.Root, path string) (*os.File, error) {

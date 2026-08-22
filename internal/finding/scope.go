@@ -1,11 +1,8 @@
 package finding
 
 import (
-	"errors"
 	"fmt"
-	"path/filepath"
 	"sort"
-	"strings"
 )
 
 // LineRange identifies an inclusive range of changed lines.
@@ -29,11 +26,11 @@ func FilterTouched(findings []Finding, changed ChangedLines) ([]Finding, error) 
 		if err := Validate(finding); err != nil {
 			return nil, fmt.Errorf("finding %d: %w", index, err)
 		}
-		file, err := canonicalRepositoryPath(finding.File)
+		file, err := ParsePath(finding.File)
 		if err != nil {
 			return nil, fmt.Errorf("finding %d: %w", index, err)
 		}
-		ranges := changedPaths[file]
+		ranges := changedPaths[file.String()]
 		if len(ranges) == 0 {
 			continue
 		}
@@ -55,7 +52,7 @@ func FilterTouched(findings []Finding, changed ChangedLines) ([]Finding, error) 
 		})
 
 		copied := clone(finding)
-		copied.File = file
+		copied.File = file.String()
 		copied.Line = survivors[0].Line
 		copied.EndLine = survivors[0].EndLine
 		copied.Occurrences = append([]Occurrence(nil), survivors[1:]...)
@@ -73,7 +70,7 @@ func ValidateChangedLines(changed ChangedLines) error {
 func validatedChangedLines(changed ChangedLines) (map[string][]LineRange, error) {
 	validated := make(map[string][]LineRange, len(changed))
 	for path, ranges := range changed {
-		canonical, err := canonicalRepositoryPath(path)
+		canonical, err := ParsePath(path)
 		if err != nil {
 			return nil, err
 		}
@@ -82,29 +79,9 @@ func validatedChangedLines(changed ChangedLines) (map[string][]LineRange, error)
 				return nil, fmt.Errorf("changed range %q[%d] is invalid: start=%d end=%d", path, index, lineRange.Start, lineRange.End)
 			}
 		}
-		validated[canonical] = append(validated[canonical], ranges...)
+		validated[canonical.String()] = append(validated[canonical.String()], ranges...)
 	}
 	return validated, nil
-}
-
-func canonicalRepositoryPath(path string) (string, error) {
-	if strings.TrimSpace(path) == "" {
-		return "", errors.New("repository path must not be empty")
-	}
-	portable := strings.ReplaceAll(path, `\`, "/")
-	if filepath.IsAbs(path) || strings.HasPrefix(portable, "/") || isWindowsAbsolute(portable) {
-		return "", fmt.Errorf("repository path %q must be repository-relative", path)
-	}
-	for _, component := range strings.Split(portable, "/") {
-		if component == ".." {
-			return "", fmt.Errorf("repository path %q must not contain traversal", path)
-		}
-	}
-	return normalizeFile(path), nil
-}
-
-func isWindowsAbsolute(path string) bool {
-	return len(path) >= 3 && ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) && path[1] == ':' && path[2] == '/'
 }
 
 func overlapsChanged(location Occurrence, changed []LineRange) bool {

@@ -579,23 +579,17 @@ func literalPathspec(path string) string {
 }
 
 func validateDiffPath(root, path string) error {
-	if path == "" || filepath.IsAbs(path) || strings.HasPrefix(path, "/") || isWindowsDiffAbsolute(path) || filepath.ToSlash(filepath.Clean(filepath.FromSlash(path))) != path {
+	// Git output must arrive already canonical: a parseable path that is not
+	// byte-identical to its canonical form is treated as hostile.
+	parsed, err := finding.ParsePath(path)
+	if err != nil || parsed.String() != path {
 		return errors.New("Git returned an unsafe repository path")
-	}
-	for _, component := range strings.Split(path, "/") {
-		if component == "" || component == "." || component == ".." {
-			return errors.New("Git returned an unsafe repository path")
-		}
 	}
 	joined := filepath.Join(root, filepath.FromSlash(path))
 	if !pathWithinRoot(root, joined) {
 		return errors.New("Git returned an unsafe repository path")
 	}
 	return nil
-}
-
-func isWindowsDiffAbsolute(path string) bool {
-	return len(path) >= 3 && ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) && path[1] == ':' && path[2] == '/'
 }
 
 func parseDiffHunks(ctx context.Context, root, head, path string, patch []byte, blobLineCounts map[string]int) ([]finding.LineRange, error) {

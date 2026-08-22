@@ -103,6 +103,9 @@ func validateIdentity(finding Finding) error {
 	case strings.TrimSpace(finding.Message) == "":
 		return errors.New("message is required")
 	}
+	if _, err := ParsePath(finding.File); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/gate"
@@ -56,10 +55,11 @@ func (Go) Enrich(ctx context.Context, enrichment Context, in []finding.Finding) 
 			continue
 		}
 
-		path, err := repositoryPath(out[index].File)
+		repositoryPath, err := finding.ParsePath(out[index].File)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("finding file: %w", err)
 		}
+		path := filepath.FromSlash(repositoryPath.String())
 		parsed, ok := files[path]
 		if !ok {
 			parsed, err = parseGoFile(ctx, root, path)
@@ -124,17 +124,6 @@ func allOccurrencesBounded(occurrences []finding.Occurrence) bool {
 		}
 	}
 	return true
-}
-
-func repositoryPath(path string) (string, error) {
-	if path == "" || filepath.IsAbs(path) {
-		return "", fmt.Errorf("finding file must be a repository-relative path")
-	}
-	cleaned := filepath.Clean(path)
-	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("finding file escapes repository root")
-	}
-	return cleaned, nil
 }
 
 func parseGoFile(ctx context.Context, root *os.Root, path string) (parsedFile, error) {
