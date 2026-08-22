@@ -1,0 +1,25 @@
+# Executable acceptance specifications
+
+This directory is the human-readable catalog of togi's user-level behavior.
+Start with the feature links below. Open the adjacent `_test.go` only when you
+need to see how application language maps to a driver action.
+
+<!-- feature-index:start -->
+<!-- feature-index:end -->
+
+Read **Running the gauntlet** first for the core report contract, then
+**Judging a feature diff** for scope. The remaining features can be read by
+domain: history, gate customization, principle pages, and platform support.
+
+The default command runs the application service driver:
+
+```sh
+go test ./acceptance/... -v
+```
+
+Use the compiled process boundary explicitly:
+
+```sh
+go test ./acceptance/... -v -args -acceptance.driver=cli
+go test ./acceptance/... -v -args -acceptance.driver=all
+```
