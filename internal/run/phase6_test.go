@@ -109,6 +109,37 @@ func TestComposeReportRejectsInvalidExecutionMetadata(t *testing.T) {
 	}
 }
 
+func TestComposeReportSnapshotsNestedGateState(t *testing.T) {
+	item := reportFinding(t, "lint", finding.Warning, "source.go", 1)
+	item.Occurrences = []finding.Occurrence{{Line: 2}}
+	source := []GateReport{{
+		Gate: "lint", Language: "go", Blocking: []finding.Severity{finding.Warning},
+		FixPolicy: gate.ReportOnly, Position: 0, Status: GateFindings,
+		Warnings: []string{"version drift"}, Findings: []finding.Finding{item},
+	}}
+	report, err := ComposeReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime, fixtureDiff(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	source[0].Blocking[0] = finding.Info
+	source[0].Warnings[0] = "mutated"
+	source[0].Findings[0].Message = "mutated"
+	source[0].Findings[0].Occurrences[0].Line = 99
+	if !reflect.DeepEqual(report.Gates[0].Blocking, []finding.Severity{finding.Warning}) || !reflect.DeepEqual(report.Gates[0].Warnings, []string{"version drift"}) {
+		t.Fatalf("report metadata aliases source: %#v", report.Gates[0])
+	}
+	if report.Gates[0].Findings[0].Message != "message" || report.Gates[0].Findings[0].Occurrences[0].Line != 2 {
+		t.Fatalf("report gate finding aliases source: %#v", report.Gates[0].Findings[0])
+	}
+
+	report.Gates[0].Findings[0].Message = "gate mutation"
+	report.Gates[0].Findings[0].Occurrences[0].Line = 77
+	if report.Findings[0].Message != "message" || report.Findings[0].Occurrences[0].Line != 2 {
+		t.Fatalf("top-level finding aliases gate finding: %#v", report.Findings[0])
+	}
+}
+
 func TestReportRefIsRuntimeOnly(t *testing.T) {
 	report := completeReportFixture("20260821T120000.000000000Z-0000")
 	report.Ref = RunRef{ID: report.RunID, Dir: "/external/run"}
@@ -161,15 +192,12 @@ func TestComposeReportLedgerRoundTripPreservesCanonicalArtifact(t *testing.T) {
 	}
 }
 
-func TestRunLedgerRawSinkValidatesIdentityUpFrontAndWritesStreams(t *testing.T) {
+func TestRunLedgerRawSinkBindsIdentityAndWritesStreams(t *testing.T) {
 	run, err := (testLedger(t.TempDir())).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = run.Close() })
-	if _, err := run.RawSink("../lint", "go"); err == nil {
-		t.Fatal("RawSink accepted unsafe gate identity")
-	}
 	sink, err := run.RawSink("lint", "go")
 	if err != nil {
 		t.Fatal(err)
@@ -181,14 +209,52 @@ func TestRunLedgerRawSinkValidatesIdentityUpFrontAndWritesStreams(t *testing.T) 
 		t.Fatal(err)
 	}
 	for stream, want := range map[string]string{"stdout": "out", "stderr": "err"} {
-		got, err := filepath.Abs(filepath.Join(run.Dir, "raw", "lint.go."+stream))
-		if err != nil {
-			t.Fatal(err)
-		}
-		contents, err := os.ReadFile(got)
+		contents, err := os.ReadFile(filepath.Join(run.Dir, "raw", rawOutputName("lint", "go", stream)))
 		if err != nil || string(contents) != want {
 			t.Fatalf("%s = %q, %v; want %q", stream, contents, err, want)
 		}
+	}
+}
+
+func TestRunLedgerRawSinkEncodesDistinctCompiledIdentitiesWithinRawDirectory(t *testing.T) {
+	run, err := (testLedger(t.TempDir())).Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.Close() })
+	identities := [][2]string{
+		{"gate.name", "go lang"},
+		{"gate name", "go.lang"},
+		{strings.Repeat("g", 200), strings.Repeat("l", 200)},
+	}
+	names := make(map[string]struct{}, len(identities))
+	for index, identity := range identities {
+		sink, err := run.RawSink(identity[0], identity[1])
+		if err != nil {
+			t.Fatalf("RawSink(%q, %q): %v", identity[0], identity[1], err)
+		}
+		if err := sink.WriteRaw("stdout", []byte{byte(index)}); err != nil {
+			t.Fatal(err)
+		}
+		name := rawOutputName(identity[0], identity[1], "stdout")
+		if filepath.Base(name) != name || name == "." || name == ".." || len(name) > 255 {
+			t.Fatalf("raw name escaped or exceeded filesystem limits: %q", name)
+		}
+		if _, duplicate := names[name]; duplicate {
+			t.Fatalf("distinct identities collided at %q", name)
+		}
+		names[name] = struct{}{}
+		contents, err := os.ReadFile(filepath.Join(run.Dir, "raw", name))
+		if err != nil || !bytes.Equal(contents, []byte{byte(index)}) {
+			t.Fatalf("raw %q = %v, %v", name, contents, err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(run.Dir, "raw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != len(identities) {
+		t.Fatalf("raw entries = %d, want %d", len(entries), len(identities))
 	}
 }
 

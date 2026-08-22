@@ -884,7 +884,7 @@ func TestWriteRawPreservesBytes(t *testing.T) {
 	if err := mustRawSink(t, run, "golangci-lint", "go").WriteRaw("stdout", raw); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(run.Dir, "raw", "golangci-lint.go.stdout")
+	path := filepath.Join(run.Dir, "raw", rawOutputName("golangci-lint", "go", "stdout"))
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -947,7 +947,8 @@ func TestRunLedgerWritesRemainAnchoredAfterRepoStateReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	anchoredRun := filepath.Join(movedState, "runs", runID)
-	if got, err := os.ReadFile(filepath.Join(anchoredRun, "raw", "gate.go.stdout")); err != nil {
+	rawName := rawOutputName("gate", "go", "stdout")
+	if got, err := os.ReadFile(filepath.Join(anchoredRun, "raw", rawName)); err != nil {
 		t.Fatalf("read anchored raw output: %v", err)
 	} else if string(got) != "anchored" {
 		t.Fatalf("anchored raw output = %q", got)
@@ -956,7 +957,7 @@ func TestRunLedgerWritesRemainAnchoredAfterRepoStateReplacement(t *testing.T) {
 		t.Fatalf("anchored report missing: %v", err)
 	}
 	for _, path := range []string{
-		filepath.Join(externalRun, "raw", "gate.go.stdout"),
+		filepath.Join(externalRun, "raw", rawName),
 		filepath.Join(externalRun, "report.json"),
 	} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -979,7 +980,7 @@ func TestWriteRawCapsOutputIncludingMarker(t *testing.T) {
 	if err := sink.WriteRaw("stderr", raw); err != nil {
 		t.Fatal(err)
 	}
-	got, err := os.ReadFile(filepath.Join(run.Dir, "raw", "gocyclo.go.stderr"))
+	got, err := os.ReadFile(filepath.Join(run.Dir, "raw", rawOutputName("gocyclo", "go", "stderr")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -997,7 +998,7 @@ func TestWriteRawCapsOutputIncludingMarker(t *testing.T) {
 	if err := sink.WriteRaw("stdout", exact); err != nil {
 		t.Fatal(err)
 	}
-	got, err = os.ReadFile(filepath.Join(run.Dir, "raw", "gocyclo.go.stdout"))
+	got, err = os.ReadFile(filepath.Join(run.Dir, "raw", rawOutputName("gocyclo", "go", "stdout")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1006,7 +1007,7 @@ func TestWriteRawCapsOutputIncludingMarker(t *testing.T) {
 	}
 }
 
-func TestWriteRawRejectsUnsafeNames(t *testing.T) {
+func TestRawSinkEncodesArbitraryIdentitiesAndRejectsInvalidStreams(t *testing.T) {
 	run, err := (testLedger(t.TempDir())).Start()
 	if err != nil {
 		t.Fatal(err)
@@ -1015,28 +1016,28 @@ func TestWriteRawRejectsUnsafeNames(t *testing.T) {
 	for _, test := range []struct {
 		gate     string
 		language string
-		stream   string
 	}{
-		{gate: "", language: "go", stream: "stdout"},
-		{gate: "../escape", language: "go", stream: "stdout"},
-		{gate: "gate/name", language: "go", stream: "stdout"},
-		{gate: `gate\name`, language: "go", stream: "stdout"},
-		{gate: "gate.name", language: "go", stream: "stdout"},
-		{gate: "gate name", language: "go", stream: "stdout"},
-		{gate: "CON", language: "go", stream: "stdout"},
-		{gate: "gate", language: "../go", stream: "stdout"},
-		{gate: "gate", language: "go", stream: "output"},
+		{gate: "", language: "go"},
+		{gate: "../escape", language: "go"},
+		{gate: "gate/name", language: "go"},
+		{gate: `gate\name`, language: "go"},
+		{gate: "gate.name", language: "go"},
+		{gate: "gate name", language: "go"},
+		{gate: "CON", language: "go"},
+		{gate: "gate", language: "../go"},
 	} {
 		sink, err := run.RawSink(test.gate, test.language)
-		if test.stream != "stdout" && test.stream != "stderr" && err == nil {
-			err = sink.WriteRaw(test.stream, []byte("unsafe"))
+		if err != nil {
+			t.Errorf("RawSink(%q, %q): %v", test.gate, test.language, err)
+			continue
 		}
-		if err == nil {
-			t.Errorf("RawSink/WriteRaw(%q, %q, %q) succeeded", test.gate, test.language, test.stream)
+		if err := sink.WriteRaw("stdout", []byte("confined")); err != nil {
+			t.Errorf("WriteRaw(%q, %q): %v", test.gate, test.language, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(run.Dir, "escape.go.stdout")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("traversal output exists outside raw directory: %v", err)
+	sink := mustRawSink(t, run, "gate", "go")
+	if err := sink.WriteRaw("output", []byte("invalid")); err == nil {
+		t.Fatal("WriteRaw accepted an invalid stream")
 	}
 }
 

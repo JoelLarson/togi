@@ -131,7 +131,7 @@ func ComposeReport(runID, repoID string, startedAt, finishedAt time.Time, diff D
 	if err := validateDiff(diff); err != nil {
 		return Report{}, fmt.Errorf("validate report diff: %w", err)
 	}
-	gateReports = append([]GateReport(nil), gateReports...)
+	gateReports = cloneGateReports(gateReports)
 	findings := make([]finding.Finding, 0)
 	for _, gateReport := range gateReports {
 		findings = append(findings, gateReport.Findings...)
@@ -426,7 +426,7 @@ func selectRequests(gates []gate.Gate, requested []string, root string) ([]Reque
 		}
 	}
 	requests := make([]Request, 0, len(gates))
-	for _, candidate := range gates {
+	for position, candidate := range gates {
 		name := candidate.Manifest.Name
 		if len(selected) > 0 {
 			if _, ok := selected[name]; !ok {
@@ -437,7 +437,7 @@ func selectRequests(gates []gate.Gate, requested []string, root string) ([]Reque
 		if !ok {
 			continue
 		}
-		requests = append(requests, Request{Gate: candidate, Binding: binding, Position: len(requests), Root: root})
+		requests = append(requests, Request{Gate: candidate, Binding: binding, Position: position, Root: root})
 	}
 	if len(requests) == 0 {
 		return nil, errors.New("no Go gates selected")

@@ -2,6 +2,8 @@ package run
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -48,8 +50,6 @@ var rawTruncationMarker = []byte("\n[togi: output truncated]\n")
 const runTimestampLayout = "20060102T150405.000000000Z"
 
 var runIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}\.[0-9]{9}Z-[0-9a-f]{4}$`)
-
-var rawComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
 // Ledger manages run artifacts below one repository's external state path.
 type Ledger struct {
@@ -931,9 +931,6 @@ func (run *RunLedger) RawSink(gate, language string) (RawSink, error) {
 	if run == nil || run.marker != run {
 		return nil, ErrUninitialized
 	}
-	if err := validateRawName(gate, language, "stdout"); err != nil {
-		return nil, err
-	}
 	run.mu.Lock()
 	defer run.mu.Unlock()
 	if run.closed || run.closing {
@@ -975,7 +972,7 @@ func (run *RunLedger) writeRaw(gate, language, stream string, raw []byte) error 
 	if err := writeRawTemporary(temporary, raw); err != nil {
 		return err
 	}
-	name := gate + "." + language + "." + stream
+	name := rawOutputName(gate, language, stream)
 	if err := run.rawRoot.Rename(temporaryName, name); err != nil {
 		return fmt.Errorf("publish raw output: %w", err)
 	}
@@ -986,17 +983,16 @@ func (run *RunLedger) writeRaw(gate, language, stream string, raw []byte) error 
 	return nil
 }
 
-func validateRawName(gateName, language, stream string) error {
-	if !safeRawComponent(gateName) {
-		return fmt.Errorf("invalid raw output gate %q", gateName)
+func rawOutputName(gateName, language, stream string) string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("togi/raw-output-identity/v1\x00"))
+	for _, component := range []string{gateName, language} {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(component)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write([]byte(component))
 	}
-	if !safeRawComponent(language) {
-		return fmt.Errorf("invalid raw output language %q", language)
-	}
-	if stream != "stdout" && stream != "stderr" {
-		return fmt.Errorf("invalid raw output stream %q", stream)
-	}
-	return nil
+	return "gate-" + hex.EncodeToString(hash.Sum(nil)) + "." + stream
 }
 
 func writeRawTemporary(temporary *os.File, raw []byte) error {
@@ -1020,20 +1016,6 @@ func writeRawTemporary(temporary *os.File, raw []byte) error {
 		return fmt.Errorf("close raw output: %w", err)
 	}
 	return nil
-}
-
-func safeRawComponent(component string) bool {
-	if len(component) > 64 || !rawComponentPattern.MatchString(component) {
-		return false
-	}
-	upper := strings.ToUpper(component)
-	if upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" {
-		return false
-	}
-	if len(upper) == 4 && (strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT")) {
-		return upper[3] < '1' || upper[3] > '9'
-	}
-	return true
 }
 
 // Close releases this run's repository lock.

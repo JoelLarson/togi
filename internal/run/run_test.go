@@ -526,7 +526,10 @@ func assertPersistedFixtureRuns(t *testing.T, directories ...string) {
 		if decoded.RunID == "" {
 			t.Fatal("persisted report has no run ID")
 		}
-		for _, name := range []string{"lint.go.stdout", "lint.go.stderr", "complexity.go.stdout", "complexity.go.stderr"} {
+		for _, name := range []string{
+			rawOutputName("lint", "go", "stdout"), rawOutputName("lint", "go", "stderr"),
+			rawOutputName("complexity", "go", "stdout"), rawOutputName("complexity", "go", "stderr"),
+		} {
 			if _, err := os.Stat(filepath.Join(dir, "raw", name)); err != nil {
 				t.Fatalf("raw %s: %v", name, err)
 			}
@@ -612,6 +615,55 @@ func TestSelectRequestsRejectsDuplicateManifestsAndMissingGoBinding(t *testing.T
 	rustOnly := gate.Gate{Manifest: gate.Manifest{Name: "rust"}, Bindings: map[string]gate.Binding{"rust": {Language: "rust"}}}
 	if _, err := selectRequests([]gate.Gate{duplicate, rustOnly}, []string{"lint", "rust"}, "/repo"); err == nil || !strings.Contains(err.Error(), "Go binding") {
 		t.Fatalf("missing Go binding error = %v", err)
+	}
+}
+
+func TestSelectRequestsRetainsConfiguredGauntletPositions(t *testing.T) {
+	goGate := func(name string) gate.Gate {
+		return gate.Gate{Manifest: gate.Manifest{Name: name}, Bindings: map[string]gate.Binding{"go": {Language: "go"}}}
+	}
+	loaded := []gate.Gate{
+		goGate("first"),
+		{Manifest: gate.Manifest{Name: "rust-only"}, Bindings: map[string]gate.Binding{"rust": {Language: "rust"}}},
+		goGate("third"),
+	}
+	full, err := selectRequests(loaded, nil, "/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full) != 2 || full[0].Position != 0 || full[1].Position != 2 {
+		t.Fatalf("full positions = %#v", full)
+	}
+	filtered, err := selectRequests(loaded, []string{"third"}, "/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 1 || filtered[0].Position != 2 {
+		t.Fatalf("filtered positions = %#v", filtered)
+	}
+}
+
+func TestServiceRunsGateWithFormerlyUnsafeRawIdentityAlongsideHealthyGate(t *testing.T) {
+	root, paths := fixtureRepository(t)
+	unsafeName := "lint.with space"
+	writeFixtureGate(t, paths.GateOverrides(), unsafeName, fixtureJSON("lint.go", 2, "fixture/unsafe", "unsafe identity ran"), false)
+	writeFixtureGate(t, paths.GateOverrides(), "complexity", fixtureJSON("complex.go", 2, "fixture/complexity", "healthy ran"), false)
+	service := fixtureService(paths, new(bytes.Buffer))
+	report, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{unsafeName, "complexity"}, NoColor: true})
+	var exitErr *ExitError
+	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+		t.Fatalf("Run error = %v, want findings exit", err)
+	}
+	for _, name := range []string{unsafeName, "complexity"} {
+		gateReport := gateByName(t, report, name)
+		if gateReport.Status != GateFindings || len(gateReport.Findings) != 1 {
+			t.Fatalf("gate %q = %#v", name, gateReport)
+		}
+		for _, stream := range []string{"stdout", "stderr"} {
+			if _, err := os.Stat(filepath.Join(report.Ref.Dir, "raw", rawOutputName(name, "go", stream))); err != nil {
+				t.Fatalf("gate %q raw %s: %v", name, stream, err)
+			}
+		}
 	}
 }
 

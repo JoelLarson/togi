@@ -56,6 +56,41 @@ func NewGateReport(g gate.Gate, binding gate.Binding, position int) GateReport {
 	}
 }
 
+func cloneGateReports(reports []GateReport) []GateReport {
+	if reports == nil {
+		return nil
+	}
+	cloned := make([]GateReport, len(reports))
+	for index, report := range reports {
+		cloned[index] = report
+		cloned[index].Blocking = cloneReportSlice(report.Blocking)
+		cloned[index].Warnings = cloneReportSlice(report.Warnings)
+		cloned[index].Findings = cloneReportFindings(report.Findings)
+	}
+	return cloned
+}
+
+func cloneReportFindings(findings []finding.Finding) []finding.Finding {
+	if findings == nil {
+		return nil
+	}
+	cloned := make([]finding.Finding, len(findings))
+	for index, item := range findings {
+		cloned[index] = item
+		cloned[index].Occurrences = cloneReportSlice(item.Occurrences)
+	}
+	return cloned
+}
+
+func cloneReportSlice[T any](values []T) []T {
+	if values == nil {
+		return nil
+	}
+	cloned := make([]T, len(values))
+	copy(cloned, values)
+	return cloned
+}
+
 // RunRef locates a completed report in external state at runtime.
 type RunRef struct {
 	ID  string
