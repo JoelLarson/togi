@@ -13,6 +13,448 @@ import (
 	"github.com/joellarson/togi/acceptance/internal/harness"
 )
 
+type diffFeature struct {
+	world      *harness.World
+	base       string
+	olderBase  string
+	shared     string
+	marker     string
+	beforeTree []string
+}
+
+func newDiffFeature(factory harness.DriverFactory) *diffFeature {
+	return &diffFeature{world: harness.NewWorld(factory, harness.NeedsGauntlet)}
+}
+
+func (f *diffFeature) initialize(sc *godog.ScenarioContext) {
+	sc.Before(f.before)
+	sc.After(f.world.After)
+	for _, bind := range []struct {
+		expression string
+		step       any
+	}{
+		{`^a committed feature branch with two possible bases$`, f.twoBases},
+		{`^a gate finding belongs only to the explicitly based diff$`, f.explicitFinding},
+		{`^I run the gauntlet with the older base$`, f.runOlder},
+		{`^the report records the explicit base and its merge base$`, f.explicitRecorded},
+		{`^the finding is in scope$`, f.oneFinding},
+		{`^a committed feature branch whose origin HEAD points to "([^"]*)"$`, f.originHead},
+		{`^I run the gauntlet without a base$`, f.runAutomatic},
+		{`^the report base is "([^"]*)"$`, f.reportBase},
+		{`^a committed feature branch from local "([^"]*)" without a remote$`, f.localTrunk},
+		{`^trunk and the feature branch diverged after a shared commit$`, f.diverged},
+		{`^a gate reports findings on both branches' changes$`, f.bothBranches},
+		{`^I run the gauntlet against trunk$`, f.runTrunk},
+		{`^the report merge base is the shared commit$`, f.mergeBase},
+		{`^only the feature finding is in scope$`, f.onlyFeature},
+		{`^a committed feature changes line 8 but not line 3$`, f.pointLines},
+		{`^a point-scoped gate reports findings on lines 3 and 8$`, f.pointGate},
+		{`^I run the gauntlet$`, f.runDefault},
+		{`^only the finding on line 8 remains$`, f.lineEight},
+		{`^a committed feature changes the body of function "([^"]*)"$`, f.entityChange},
+		{`^an entity-scoped gate reports the function signature$`, f.entityGate},
+		{`^the structural finding for "([^"]*)" remains$`, f.structural},
+		{`^a committed feature changes "([^"]*)"$`, f.repoChange},
+		{`^a repository-scoped gate reports a finding in "([^"]*)"$`, f.repoGate},
+		{`^the finding in "([^"]*)" remains$`, f.findingFile},
+		{`^a committed feature deletes line 5 from "([^"]*)"$`, f.deleteLine},
+		{`^a point-scoped gate reports the deletion location$`, f.deletionGate},
+		{`^the deletion finding remains in scope$`, f.oneFinding},
+		{`^a committed feature renames "([^"]*)" to "([^"]*)"$`, f.rename},
+		{`^a gate reports a finding in "([^"]*)"$`, f.namedFinding},
+		{`^the report records the finding in "([^"]*)"$`, f.findingFile},
+		{`^a committed feature changes the binary file "([^"]*)"$`, f.binary},
+		{`^the diff records one changed file and zero changed lines$`, f.binaryRecorded},
+		{`^a repository with (.*)$`, f.invalidRepository},
+		{`^a gate that records whether it starts$`, f.markerGate},
+		{`^the run is rejected for the (.*)$`, f.rejected},
+		{`^no gate, ledger, or target-repository file is created$`, f.noSideEffects},
+	} {
+		sc.Step(bind.expression, bind.step)
+	}
+}
+
+func (f *diffFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {
+	f.base, f.olderBase, f.shared, f.marker, f.beforeTree = "base", "", "", "", nil
+	return f.world.Before(ctx, scenario)
+}
+
+func (f *diffFeature) repo(files map[string]string) (*harness.Repository, error) {
+	r, err := harness.NewRepository(filepath.Join(f.world.Environment().TempRoot, "repo"))
+	if err != nil {
+		return nil, err
+	}
+	for name, body := range files {
+		if err := r.Write(name, body); err != nil {
+			return nil, err
+		}
+	}
+	if _, err = r.Commit("base"); err != nil {
+		return nil, err
+	}
+	if err = r.Branch("base"); err != nil {
+		return nil, err
+	}
+	return r, f.world.UseRepository(r)
+}
+func (f *diffFeature) simple() (*harness.Repository, error) {
+	return f.repo(map[string]string{"go.mod": "module fixture\n\ngo 1.25\n", "feature.go": "package fixture\n\nfunc Feature() {\n\tvalue := 1\n\t_ = value\n}\n", "legacy.go": "package fixture\n\nfunc Legacy() {}\n"})
+}
+func (f *diffFeature) commitChange(r *harness.Repository, name, body string) error {
+	if err := r.Write(name, body); err != nil {
+		return err
+	}
+	_, err := r.Commit("feature")
+	return err
+}
+func (f *diffFeature) gate(name, scope, location string, output []byte) error {
+	tool := name + "-tool"
+	if _, err := f.world.Environment().InstallTool(tool, harness.ToolBehavior{Stdout: output}); err != nil {
+		return err
+	}
+	return f.world.Environment().WriteGate(harness.GateDefinition{Name: name, Description: name, Tool: tool, Normalizer: "golangci-json", Command: []string{tool}, Scope: scope, Location: location, SeverityMap: map[string]string{"default": "warning", "warning": "warning"}})
+}
+func (f *diffFeature) twoBases() error {
+	r, err := f.simple()
+	if err != nil {
+		return err
+	}
+	f.olderBase, err = r.Git("rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	if err = f.commitChange(r, "old.go", "package fixture\nfunc Old() {}\n"); err != nil {
+		return err
+	}
+	f.base, err = r.Git("rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	return f.commitChange(r, "feature.go", "package fixture\nfunc Feature() { value := 2; _ = value }\n")
+}
+func (f *diffFeature) explicitFinding() error {
+	return f.gate("diff", "diff", "point", lint("old.go", 2))
+}
+func (f *diffFeature) runOlder(ctx context.Context) error {
+	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: f.olderBase, NoColor: true})
+}
+func (f *diffFeature) report() (harness.Report, error) { return f.world.LastRun().Report() }
+func (f *diffFeature) explicitRecorded() error {
+	r, e := f.report()
+	if e != nil {
+		return e
+	}
+	if r.Diff.BaseRef != f.olderBase || r.Diff.MergeBase != f.olderBase {
+		return fmt.Errorf("diff=%#v", r.Diff)
+	}
+	return nil
+}
+func (f *diffFeature) oneFinding() error {
+	r, e := f.report()
+	if e != nil {
+		return e
+	}
+	if len(r.Findings) != 1 {
+		return fmt.Errorf("findings=%#v", r.Findings)
+	}
+	return nil
+}
+func (f *diffFeature) originHead(branch string) error {
+	r, e := f.simple()
+	if e != nil {
+		return e
+	}
+	base, e := r.Git("rev-parse", "HEAD")
+	if e != nil {
+		return e
+	}
+	if e = r.SetOriginHEAD(branch, base); e != nil {
+		return e
+	}
+	return f.commitChange(r, "feature.go", "package fixture\nfunc Feature() { value := 2; _ = value }\n")
+}
+func (f *diffFeature) runAutomatic(ctx context.Context) error {
+	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, NoColor: true})
+}
+func (f *diffFeature) reportBase(want string) error {
+	r, e := f.report()
+	if e != nil {
+		return e
+	}
+	if r.Diff.BaseRef != want {
+		return fmt.Errorf("base=%q", r.Diff.BaseRef)
+	}
+	return nil
+}
+func (f *diffFeature) localTrunk(branch string) error {
+	r, e := f.simple()
+	if e != nil {
+		return e
+	}
+	if branch != "main" {
+		return fmt.Errorf("unsupported trunk %q", branch)
+	}
+	return f.commitChange(r, "feature.go", "package fixture\nfunc Feature() { value := 2; _ = value }\n")
+}
+func (f *diffFeature) diverged() error {
+	r, e := f.simple()
+	if e != nil {
+		return e
+	}
+	f.shared, e = r.Git("rev-parse", "HEAD")
+	if e != nil {
+		return e
+	}
+	if e = r.Branch("trunk"); e != nil {
+		return e
+	}
+	if e = r.Checkout("trunk"); e != nil {
+		return e
+	}
+	if e = f.commitChange(r, "feature.go", "package fixture\n\nfunc Feature() {\n\tvalue := 2\n\t_ = value\n}\n"); e != nil {
+		return e
+	}
+	if e = r.Checkout("main"); e != nil {
+		return e
+	}
+	return f.commitChange(r, "feature.go", "package fixture\n\nfunc FeatureFeature() {\n\tvalue := 1\n\t_ = value\n}\n")
+}
+func (f *diffFeature) bothBranches() error {
+	return f.gate("diff", "diff", "point", lint("feature.go", 3, 4))
+}
+func (f *diffFeature) runTrunk(ctx context.Context) error {
+	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: "trunk", NoColor: true})
+}
+func (f *diffFeature) mergeBase() error {
+	r, e := f.report()
+	if e != nil {
+		return e
+	}
+	if r.Diff.MergeBase != f.shared {
+		return fmt.Errorf("merge base=%q want %q", r.Diff.MergeBase, f.shared)
+	}
+	return nil
+}
+func (f *diffFeature) onlyFeature() error {
+	r, e := f.report()
+	if e != nil {
+		return e
+	}
+	if len(r.Findings) != 1 || r.Findings[0].File != "feature.go" {
+		return fmt.Errorf("findings=%#v gates=%#v diff=%#v", r.Findings, r.Gates, r.Diff)
+	}
+	return nil
+}
+func (f *diffFeature) pointLines() error {
+	r, e := f.simple()
+	if e != nil {
+		return e
+	}
+	return f.commitChange(r, "feature.go", "package fixture\n\nfunc Feature() {\n\tvalue := 1\n\t_ = value\n}\n\nfunc Added() {}\n")
+}
+func (f *diffFeature) pointGate() error {
+	return f.gate("point", "diff", "point", lint("feature.go", 3, 8))
+}
+func (f *diffFeature) runDefault(ctx context.Context) error {
+	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true})
+}
+func (f *diffFeature) lineEight() error {
+	r, e := f.report()
+	if e != nil {
+		return e
+	}
+	if len(r.Findings) != 1 || r.Findings[0].Line != 8 {
+		return fmt.Errorf("findings=%#v", r.Findings)
+	}
+	return nil
+}
+func (f *diffFeature) entityChange(name string) error {
+	r, e := f.repo(map[string]string{"go.mod": "module fixture\n\ngo 1.25\n", "feature.go": "package fixture\n\nfunc " + name + "() { value := 1; _ = value }\n"})
+	if e != nil {
+		return e
+	}
+	return f.commitChange(r, "feature.go", "package fixture\n\nfunc "+name+"() { value := 2; _ = value }\n")
+}
+func (f *diffFeature) entityGate() error {
+	return f.gate("entity", "diff", "entity", lint("feature.go", 3))
+}
+func (f *diffFeature) structural(name string) error {
+	r, e := f.report()
+	if e != nil {
+		return e
+	}
+	if len(r.Findings) != 1 || !strings.Contains(r.Findings[0].File, "feature.go") {
+		return fmt.Errorf("structural %q findings=%#v", name, r.Findings)
+	}
+	return nil
+}
+func (f *diffFeature) repoChange(file string) error {
+	r, e := f.simple()
+	if e != nil {
+		return e
+	}
+	return f.commitChange(r, file, "package fixture\nfunc Changed() {}\n")
+}
+func (f *diffFeature) repoGate(file string) error {
+	return f.gate("repository", "repo", "point", lint(file, 3))
+}
+func (f *diffFeature) findingFile(file string) error {
+	r, e := f.report()
+	if e != nil {
+		return e
+	}
+	if len(r.Findings) != 1 || r.Findings[0].File != file {
+		return fmt.Errorf("findings=%#v", r.Findings)
+	}
+	return nil
+}
+func (f *diffFeature) deleteLine(file string) error {
+	r, e := f.repo(map[string]string{"go.mod": "module fixture\n\ngo 1.25\n", file: "package fixture\n\nfunc Feature() {\n\ta := 1\n\tb := 2\n\t_ = a + b\n}\n"})
+	if e != nil {
+		return e
+	}
+	return f.commitChange(r, file, "package fixture\n\nfunc Feature() {\n\ta := 1\n\t_ = a\n}\n")
+}
+func (f *diffFeature) deletionGate() error {
+	return f.gate("deletion", "diff", "point", lint("feature.go", 5))
+}
+func (f *diffFeature) rename(before, after string) error {
+	r, e := f.repo(map[string]string{"go.mod": "module fixture\n\ngo 1.25\n", before: "package fixture\nfunc Before() {}\n"})
+	if e != nil {
+		return e
+	}
+	if _, e = r.Git("mv", before, after); e != nil {
+		return e
+	}
+	if e = r.Write(after, "package fixture\nfunc After() { value := 1; _ = value }\n"); e != nil {
+		return e
+	}
+	_, e = r.Commit("rename")
+	return e
+}
+func (f *diffFeature) namedFinding(file string) error {
+	return f.gate("renamed", "diff", "point", lint(file, 2))
+}
+func (f *diffFeature) binary(file string) error {
+	r, e := f.repo(map[string]string{"go.mod": "module fixture\n\ngo 1.25\n", file: "\x00old"})
+	if e != nil {
+		return e
+	}
+	if e = r.WriteBytes(file, []byte("\x00new")); e != nil {
+		return e
+	}
+	_, e = r.Commit("binary")
+	return e
+}
+func (f *diffFeature) binaryRecorded() error {
+	r, e := f.report()
+	if e != nil {
+		return e
+	}
+	if r.Diff.ChangedFiles != 1 || r.Diff.ChangedLines != 0 {
+		return fmt.Errorf("diff=%#v", r.Diff)
+	}
+	return nil
+}
+func (f *diffFeature) invalidRepository(problem string) error {
+	r, e := f.simple()
+	if e != nil {
+		return e
+	}
+	f.base = "base"
+	switch problem {
+	case "dirty worktree":
+		e = r.Write("dirty.go", "package fixture\n")
+	case "unsupported submodule":
+		source, e2 := harness.NewRepository(filepath.Join(f.world.Environment().TempRoot, "submodule"))
+		if e2 != nil {
+			return e2
+		}
+		if e2 = source.Write("sub.go", "package sub\n"); e2 != nil {
+			return e2
+		}
+		if _, e2 = source.Commit("sub"); e2 != nil {
+			return e2
+		}
+		e = r.AddSubmodule("sub", source.Root)
+		if e == nil {
+			_, e = r.Commit("submodule")
+		}
+	case "missing base":
+		f.base = "missing"
+	case "invalid base":
+		f.base = "-invalid"
+	case "unrelated history":
+		if _, e = r.Git("checkout", "--orphan", "unrelated"); e != nil {
+			return e
+		}
+		if _, e = r.Git("rm", "-rf", "."); e != nil {
+			return e
+		}
+		if e = r.Write("other.go", "package other\n"); e != nil {
+			return e
+		}
+		if _, e = r.Commit("unrelated"); e != nil {
+			return e
+		}
+		if e = r.Checkout("main"); e != nil {
+			return e
+		}
+		f.base = "unrelated"
+	default:
+		return fmt.Errorf("unknown precondition %q", problem)
+	}
+	if e != nil {
+		return e
+	}
+	f.beforeTree, e = r.Tree()
+	return e
+}
+func (f *diffFeature) markerGate() error {
+	f.marker = filepath.Join(f.world.Environment().TempRoot, "invoked")
+	_, e := f.world.Environment().InstallTool("marker-tool", harness.ToolBehavior{InvokedMarker: f.marker})
+	if e != nil {
+		return e
+	}
+	return f.world.Environment().WriteGate(harness.GateDefinition{Name: "marker", Description: "marker", Tool: "marker-tool", Normalizer: "golangci-json", Command: []string{"marker-tool"}, Scope: "repo", Location: "point", SeverityMap: map[string]string{"default": "warning"}})
+}
+func (f *diffFeature) rejected(problem string) error {
+	o, e := f.world.LastRun().Outcome()
+	if e != nil {
+		return e
+	}
+	if o.Code != 70 {
+		return fmt.Errorf("outcome=%#v for %s", o, problem)
+	}
+	if o.Message == "" && f.world.LastRun().Stderr() == "" {
+		return fmt.Errorf("missing rejection diagnostic")
+	}
+	return nil
+}
+func (f *diffFeature) noSideEffects() error {
+	if f.world.LastRun().ReportPath() != "" {
+		return fmt.Errorf("report=%q", f.world.LastRun().ReportPath())
+	}
+	if _, e := os.Stat(f.marker); !os.IsNotExist(e) {
+		return fmt.Errorf("tool invoked: %v", e)
+	}
+	state, e := f.world.Environment().RepoState(context.Background(), f.world.Repository().Root)
+	if e != nil {
+		return e
+	}
+	if _, e = os.Stat(state); !os.IsNotExist(e) {
+		return fmt.Errorf("state exists: %v", e)
+	}
+	after, e := f.world.Repository().Tree()
+	if e != nil {
+		return e
+	}
+	if strings.Join(after, "\n") != strings.Join(f.beforeTree, "\n") {
+		return fmt.Errorf("target tree changed")
+	}
+	return nil
+}
+
 const complexityNormalizer = `regex:^(?P<value>\d+) \S+ (?P<symbol>\S+) (?P<file>[^:]+):(?P<line>\d+):\d+$`
 
 type gauntletFeature struct {
