@@ -25,11 +25,11 @@ type Conflict struct {
 	Refs   []Ref
 }
 
-// Resolve maps a rule ID to a principle page using one binding's aliases.
+// resolve maps a rule ID to a principle page using one binding's aliases.
 // An exact key wins over any glob; among globs the longest prefix wins, so
 // "golangci-lint/errcheck" beats "golangci-lint/*". Globs are the trailing-"*"
 // prefix form only, which is the whole of the pattern language.
-func Resolve(aliases map[string]string, ruleID string) (string, bool) {
+func resolve(aliases map[string]string, ruleID string) (string, bool) {
 	if page, ok := aliases[ruleID]; ok {
 		return page, true
 	}

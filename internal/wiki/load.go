@@ -7,7 +7,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -86,81 +85,6 @@ func loadShipped(name string) (Page, error) {
 		return Page{}, fmt.Errorf("%s: %w", filename, err)
 	}
 	return page, nil
-}
-
-// Exists reports whether a page is available under a name. It is the check
-// `togi wiki lint` makes for every alias target.
-func (l Loader) Exists(name string) (bool, error) {
-	if _, err := l.Load(name); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
-}
-
-// LoadAll loads all shipped and override-only pages in name order.
-func (l Loader) LoadAll() ([]Page, error) {
-	names := make(map[string]struct{})
-	entries, err := fs.ReadDir(shipped, shippedRoot)
-	if err != nil {
-		return nil, fmt.Errorf("read shipped pages: %w", err)
-	}
-	for _, entry := range entries {
-		if name, ok := pageName(entry); ok {
-			names[name] = struct{}{}
-		}
-	}
-
-	if l.OverrideDir != "" {
-		exists, err := validateOverrideRoot(l.OverrideDir)
-		if err != nil {
-			return nil, err
-		}
-		if exists {
-			overrides, err := os.ReadDir(l.OverrideDir)
-			if err != nil {
-				return nil, fmt.Errorf("read page override directory %q: %w", l.OverrideDir, err)
-			}
-			for _, entry := range overrides {
-				if entry.Type()&os.ModeSymlink != 0 {
-					return nil, fmt.Errorf("page override %q is a symlink", filepath.Join(l.OverrideDir, entry.Name()))
-				}
-				name, ok := pageName(entry)
-				if !ok {
-					continue
-				}
-				if err := validateName(name); err != nil {
-					return nil, err
-				}
-				names[name] = struct{}{}
-			}
-		}
-	}
-
-	ordered := make([]string, 0, len(names))
-	for name := range names {
-		ordered = append(ordered, name)
-	}
-	sort.Strings(ordered)
-
-	pages := make([]Page, 0, len(ordered))
-	for _, name := range ordered {
-		page, err := l.Load(name)
-		if err != nil {
-			return nil, err
-		}
-		pages = append(pages, page)
-	}
-	return pages, nil
-}
-
-func pageName(entry fs.DirEntry) (string, bool) {
-	if entry.IsDir() || !strings.HasSuffix(entry.Name(), pageSuffix) {
-		return "", false
-	}
-	return strings.TrimSuffix(entry.Name(), pageSuffix), true
 }
 
 func validateOverrideRoot(root string) (bool, error) {

@@ -8,8 +8,17 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/gate"
+	"github.com/joellarson/togi/internal/gate/gatetest"
 )
+
+type gateSource struct {
+	gates []gate.Gate
+	err   error
+}
+
+func (source gateSource) LoadAll() ([]gate.Gate, error) { return source.gates, source.err }
 
 func newService(t *testing.T, overrideDir string) (Service, *bytes.Buffer, *bytes.Buffer) {
 	t.Helper()
@@ -40,6 +49,152 @@ func TestShowPrintsBodyThenReverseIndex(t *testing.T) {
 	}
 	if !strings.Contains(out, "complexity/go\tgocyclo/complexity") {
 		t.Fatalf("output omits the reverse index:\n%s", out)
+	}
+}
+
+func TestForLoadsPageForExactAlias(t *testing.T) {
+	service := Service{
+		Pages: Loader{},
+		Gates: gateSource{gates: []gate.Gate{gatetest.Compile(t, "complexity",
+			gatetest.Aliases(map[string]string{"gocyclo/complexity": "small-composable-functions"}),
+		)}},
+	}
+
+	page, found, err := service.For(finding.Finding{Gate: "complexity", Language: "go", RuleID: "gocyclo/complexity"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || page.Name != "small-composable-functions" {
+		t.Fatalf("page = %#v, found = %v", page, found)
+	}
+}
+
+func TestForAliasPrecedence(t *testing.T) {
+	aliases := map[string]string{
+		"golangci-lint/*":          "broad",
+		"golangci-lint/gosec/*":    "small-composable-functions",
+		"golangci-lint/gosec/G401": "exact",
+	}
+	service := Service{Pages: Loader{}, Gates: gateSource{gates: []gate.Gate{
+		gatetest.Compile(t, "lint", gatetest.Aliases(aliases)),
+	}}}
+
+	tests := []struct {
+		name   string
+		ruleID string
+		found  bool
+	}{
+		{name: "longest glob", ruleID: "golangci-lint/gosec/G402", found: true},
+		{name: "exact beats glob", ruleID: "golangci-lint/gosec/G401", found: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			page, found, err := service.For(finding.Finding{Gate: "lint", Language: "go", RuleID: test.ruleID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if found != test.found {
+				t.Fatalf("found = %v, want %v (page %#v)", found, test.found, page)
+			}
+			if found && page.Name != "small-composable-functions" {
+				t.Fatalf("page = %q", page.Name)
+			}
+		})
+	}
+}
+
+func TestForReturnsNotFoundForMissingMapping(t *testing.T) {
+	known := gatetest.Compile(t, "known", gatetest.Aliases(map[string]string{
+		"tool/dangling": "no-such-page",
+		"tool/mapped":   "small-composable-functions",
+	}))
+	tests := []struct {
+		name    string
+		finding finding.Finding
+	}{
+		{name: "unknown gate", finding: finding.Finding{Gate: "unknown", Language: "go", RuleID: "tool/mapped"}},
+		{name: "unknown language", finding: finding.Finding{Gate: "known", Language: "rust", RuleID: "tool/mapped"}},
+		{name: "missing alias", finding: finding.Finding{Gate: "known", Language: "go", RuleID: "tool/missing"}},
+		{name: "dangling page", finding: finding.Finding{Gate: "known", Language: "go", RuleID: "tool/dangling"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			page, found, err := (Service{Pages: Loader{}, Gates: gateSource{gates: []gate.Gate{known}}}).For(test.finding)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if found || page != (Page{}) {
+				t.Fatalf("page = %#v, found = %v", page, found)
+			}
+		})
+	}
+}
+
+func TestForPropagatesGateSourceError(t *testing.T) {
+	want := errors.New("gate source failed")
+	_, found, err := (Service{Pages: Loader{}, Gates: gateSource{err: want}}).For(finding.Finding{})
+	if !errors.Is(err, want) || found {
+		t.Fatalf("err = %v, found = %v", err, found)
+	}
+}
+
+func TestForPropagatesPageLoadError(t *testing.T) {
+	dir := t.TempDir()
+	writePage(t, dir, "broken", "not a heading\n")
+	service := Service{
+		Pages: Loader{OverrideDir: dir},
+		Gates: gateSource{gates: []gate.Gate{gatetest.Compile(t, "lint",
+			gatetest.Aliases(map[string]string{"tool/rule": "broken"}),
+		)}},
+	}
+
+	_, found, err := service.For(finding.Finding{Gate: "lint", Language: "go", RuleID: "tool/rule"})
+	if err == nil || !strings.Contains(err.Error(), "heading") || found {
+		t.Fatalf("err = %v, found = %v", err, found)
+	}
+}
+
+func TestForPropagatesPageIOError(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target.md")
+	if err := os.WriteFile(target, []byte("# Target\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "linked.md")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	service := Service{
+		Pages: Loader{OverrideDir: dir},
+		Gates: gateSource{gates: []gate.Gate{gatetest.Compile(t, "lint",
+			gatetest.Aliases(map[string]string{"tool/rule": "linked"}),
+		)}},
+	}
+
+	_, found, err := service.For(finding.Finding{Gate: "lint", Language: "go", RuleID: "tool/rule"})
+	if err == nil || !strings.Contains(err.Error(), "symlink") || found {
+		t.Fatalf("err = %v, found = %v", err, found)
+	}
+}
+
+func TestForRejectsDuplicateLoadedGateIdentity(t *testing.T) {
+	first := gatetest.Compile(t, "lint", gatetest.Aliases(map[string]string{"tool/rule": "small-composable-functions"}))
+	second := gatetest.Compile(t, "lint", gatetest.Aliases(map[string]string{"tool/rule": "other"}))
+
+	_, found, err := (Service{Pages: Loader{}, Gates: gateSource{gates: []gate.Gate{first, second}}}).For(
+		finding.Finding{Gate: "lint", Language: "go", RuleID: "tool/rule"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "duplicate gate") || found {
+		t.Fatalf("err = %v, found = %v", err, found)
+	}
+}
+
+func TestForRejectsInvalidLoadedGate(t *testing.T) {
+	invalid := gate.Gate{Manifest: gate.Manifest{Name: "lint"}}
+	_, found, err := (Service{Pages: Loader{}, Gates: gateSource{gates: []gate.Gate{invalid}}}).For(
+		finding.Finding{Gate: "lint", Language: "go", RuleID: "tool/rule"},
+	)
+	if err == nil || !strings.Contains(err.Error(), "invalid gate") || found {
+		t.Fatalf("err = %v, found = %v", err, found)
 	}
 }
 
@@ -81,13 +236,13 @@ func TestLintWarnsOnDanglingWithoutFailing(t *testing.T) {
 }
 
 func TestLintFailsOnConflictingAliases(t *testing.T) {
-	dir := t.TempDir()
-	writeConflictingGates(t, dir)
-
 	var stdout, stderr bytes.Buffer
 	service := Service{
-		Pages:  Loader{OverrideDir: t.TempDir()},
-		Gates:  gate.Loader{OverrideDir: dir},
+		Pages: Loader{OverrideDir: t.TempDir()},
+		Gates: gateSource{gates: []gate.Gate{
+			gatetest.Compile(t, "complexity", gatetest.Aliases(map[string]string{"gocyclo/complexity": "small-composable-functions"})),
+			gatetest.Compile(t, "lint", gatetest.Aliases(map[string]string{"gocyclo/complexity": "a-different-page"})),
+		}},
 		Stdout: &stdout,
 		Stderr: &stderr,
 	}
@@ -140,43 +295,6 @@ func TestEjectUnknownPageFails(t *testing.T) {
 	service, _, _ := newService(t, t.TempDir())
 	if err := service.Eject("no-such-page"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
-	}
-}
-
-// writeConflictingGates lays down a gate override whose alias sends a rule ID
-// already claimed by the shipped complexity gate to a different page.
-func writeConflictingGates(t *testing.T, dir string) {
-	t.Helper()
-	gateDir := filepath.Join(dir, "lint", "go")
-	if err := os.MkdirAll(gateDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	manifest := `name = "lint"
-description = "Static analysis and correctness checks"
-cost_class = "fast"
-fix_policy = "autofix-then-llm"
-scope = "diff"
-blocking = ["error", "warning"]
-timeout = "60s"
-`
-	if err := os.WriteFile(filepath.Join(dir, "lint", "gate.toml"), []byte(manifest), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	binding := `language = "go"
-tool = "golangci-lint"
-command = ["golangci-lint", "run"]
-success_exit_codes = [0]
-finding_exit_codes = [1]
-normalizer = "golangci-json"
-
-[severity_map]
-default = "warning"
-
-[aliases]
-"gocyclo/complexity" = "a-different-page"
-`
-	if err := os.WriteFile(filepath.Join(gateDir, "binding.toml"), []byte(binding), 0o644); err != nil {
-		t.Fatal(err)
 	}
 }
 

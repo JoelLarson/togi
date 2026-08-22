@@ -68,7 +68,7 @@ func TestManifestLocation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			writeGateFixture(t, root, "custom", validManifest("custom", test.location), validBinding(""))
+			writeRawGateFixture(t, root, "custom", validManifest("custom", test.location), validBinding(""))
 			got, err := (Loader{OverrideDir: root}).Load("custom")
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(strings.ToLower(err.Error()), test.wantErr) {
@@ -89,7 +89,7 @@ func TestManifestLocation(t *testing.T) {
 func TestConfigDirectoryOverridesEmbeddedGateWholesale(t *testing.T) {
 	overrides := t.TempDir()
 	binding := strings.Replace(validBinding(""), `tool = "tool"`, `tool = "fake-lint"`, 1)
-	writeGateFixture(t, overrides, "lint", validManifest("lint", `timeout = "7s"`), binding)
+	writeRawGateFixture(t, overrides, "lint", validManifest("lint", `timeout = "7s"`), binding)
 
 	got, err := (Loader{OverrideDir: overrides}).Load("lint")
 	if err != nil {
@@ -160,7 +160,7 @@ func TestStrictTOMLRejectsUnknownFieldsWithFileContext(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			writeGateFixture(t, root, "custom", test.gate, test.binding)
+			writeRawGateFixture(t, root, "custom", test.gate, test.binding)
 			_, err := (Loader{OverrideDir: root}).Load("custom")
 			if err == nil || !strings.Contains(err.Error(), test.file) || !strings.Contains(strings.ToLower(err.Error()), "unknown") {
 				t.Fatalf("error = %v, want unknown field with %s context", err, test.file)
@@ -192,7 +192,7 @@ func TestManifestValidation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			writeGateFixture(t, root, test.gateName, test.manifest, validBinding(""))
+			writeRawGateFixture(t, root, test.gateName, test.manifest, validBinding(""))
 			_, err := (Loader{OverrideDir: root}).Load(test.gateName)
 			if err == nil || !strings.Contains(strings.ToLower(err.Error()), test.want) {
 				t.Fatalf("error = %v, want containing %q", err, test.want)
@@ -215,7 +215,7 @@ func TestBlockingDefaultsOnlyWhenOmitted(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			manifest := strings.Replace(validManifest("custom", ""), `blocking = ["error", "warning"]`, test.blocking, 1)
-			writeGateFixture(t, root, "custom", manifest, validBinding(""))
+			writeRawGateFixture(t, root, "custom", manifest, validBinding(""))
 			got, err := (Loader{OverrideDir: root}).Load("custom")
 			if err != nil {
 				t.Fatal(err)
@@ -245,7 +245,7 @@ func TestCostClassDeterminesDefaultTimeout(t *testing.T) {
 		t.Run(string(test.cost), func(t *testing.T) {
 			root := t.TempDir()
 			manifest := strings.Replace(validManifest("custom", ""), `cost_class = "fast"`, fmt.Sprintf(`cost_class = %q`, test.cost), 1)
-			writeGateFixture(t, root, "custom", manifest, validBinding(""))
+			writeRawGateFixture(t, root, "custom", manifest, validBinding(""))
 			got, err := (Loader{OverrideDir: root}).Load("custom")
 			if err != nil {
 				t.Fatal(err)
@@ -288,7 +288,7 @@ func TestBindingValidation(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			writeGateFixture(t, root, "custom", validManifest("custom", ""), test.binding)
+			writeRawGateFixture(t, root, "custom", validManifest("custom", ""), test.binding)
 			_, err := (Loader{OverrideDir: root}).Load("custom")
 			if err == nil || !strings.Contains(strings.ToLower(err.Error()), test.want) {
 				t.Fatalf("error = %v, want containing %q", err, test.want)
@@ -710,7 +710,7 @@ func TestExitCodeDefaultsAndOptionalFindingExits(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
-			writeGateFixture(t, root, "custom", validManifest("custom", ""), test.binding)
+			writeRawGateFixture(t, root, "custom", validManifest("custom", ""), test.binding)
 			got, err := (Loader{OverrideDir: root}).Load("custom")
 			if err != nil {
 				t.Fatal(err)
@@ -750,7 +750,7 @@ func TestOverrideRejectsSymlinkedGateDirectories(t *testing.T) {
 		{
 			name: "same root",
 			target: func(t *testing.T, root string) string {
-				writeGateFixture(t, root, "zreal", validManifest("zreal", ""), validBinding(""))
+				writeRawGateFixture(t, root, "zreal", validManifest("zreal", ""), validBinding(""))
 				return "zreal"
 			},
 		},
@@ -758,7 +758,7 @@ func TestOverrideRejectsSymlinkedGateDirectories(t *testing.T) {
 			name: "outside root",
 			target: func(t *testing.T, _ string) string {
 				outside := t.TempDir()
-				writeGateFixture(t, outside, "gate", validManifest("linked", ""), validBinding(""))
+				writeRawGateFixture(t, outside, "gate", validManifest("linked", ""), validBinding(""))
 				return filepath.Join(outside, "gate")
 			},
 		},
@@ -785,9 +785,9 @@ func TestOverrideRejectsSymlinkedGateDirectories(t *testing.T) {
 
 func TestLoadAllIncludesSortedOverrideOnlyGatesAndBindings(t *testing.T) {
 	root := t.TempDir()
-	writeGateFixture(t, root, "zeta", validManifest("zeta", ""), validBinding(""))
+	writeRawGateFixture(t, root, "zeta", validManifest("zeta", ""), validBinding(""))
 	writeFile(t, filepath.Join(root, "zeta", "rust", "binding.toml"), strings.Replace(validBinding(""), `language = "go"`, `language = "rust"`, 1))
-	writeGateFixture(t, root, "alpha", validManifest("alpha", ""), validBinding(""))
+	writeRawGateFixture(t, root, "alpha", validManifest("alpha", ""), validBinding(""))
 
 	gates, err := (Loader{OverrideDir: root}).LoadAll()
 	if err != nil {
@@ -968,7 +968,9 @@ default = "warning"
 `, extra)
 }
 
-func writeGateFixture(t *testing.T, root, name, manifest, binding string) {
+// writeRawGateFixture supports parser tests that intentionally need malformed
+// or omitted TOML fields and therefore cannot use validity-preserving gatetest.
+func writeRawGateFixture(t *testing.T, root, name, manifest, binding string) {
 	t.Helper()
 	writeFile(t, filepath.Join(root, name, "gate.toml"), manifest)
 	writeFile(t, filepath.Join(root, name, "go", "binding.toml"), binding)

@@ -22,6 +22,7 @@ import (
 	"github.com/joellarson/togi/internal/enricher"
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/gate"
+	"github.com/joellarson/togi/internal/gate/gatetest"
 	"github.com/joellarson/togi/internal/gitcmd/gitcmdtest"
 	"github.com/joellarson/togi/internal/repoid"
 )
@@ -228,7 +229,7 @@ func TestServiceRejectsUnsafeWiringBeforeRepositoryResolution(t *testing.T) {
 
 func TestServiceResolvesExplicitAndDefaultBase(t *testing.T) {
 	root, paths := fixtureRepository(t)
-	writeFixtureGate(t, paths.GateOverrides(), "lint", fixtureJSON("lint.go", 2, "golangci-lint/errcheck", "unchecked"), false)
+	gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(fixtureCommand(t, fixtureJSON("lint.go", 2, "golangci-lint/errcheck", "unchecked"), false)...))
 	base := gitFixture(t, root, "rev-parse", "refs/remotes/origin/main")
 
 	defaultReport, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}})
@@ -251,7 +252,7 @@ func TestServiceResolvesLocalTrunkWithoutRemote(t *testing.T) {
 	root, paths := localTrunkFixtureRepository(t)
 	base := gitFixture(t, root, "rev-parse", "main")
 	head := gitFixture(t, root, "rev-parse", "HEAD")
-	writeFixtureGate(t, paths.GateOverrides(), "lint", fixtureJSON("feature.go", 1, "golangci-lint/errcheck", "unchecked"), false)
+	gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(fixtureCommand(t, fixtureJSON("feature.go", 1, "golangci-lint/errcheck", "unchecked"), false)...))
 
 	report, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}})
 	assertVerdictError(t, err)
@@ -299,7 +300,7 @@ func TestServiceRejectsInvalidDiffInputsBeforeLedgerOrGates(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root, paths := fixtureRepository(t)
 			marker := filepath.Join(t.TempDir(), "executed")
-			writeFixtureGateCommand(t, paths.GateOverrides(), "lint", []string{helperBinary(t), "active", marker, "1ms", marker + ".done"})
+			gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(helperBinary(t), "active", marker, "1ms", marker+".done"))
 			if test.prepare != nil {
 				test.prepare(t, root)
 			}
@@ -326,9 +327,9 @@ func TestServiceRejectsInvalidDiffInputsBeforeLedgerOrGates(t *testing.T) {
 
 func TestServiceScopesCommittedFindingsAndProducesStableMetadata(t *testing.T) {
 	root, paths, base, head := scopedFixtureRepository(t)
-	writeScopedFixtureGate(t, paths.GateOverrides(), "entity", gate.Diff, gate.EntityLocation, fixtureJSON("scope.go", 3, "fixture/entity", "entity finding"))
-	writeScopedFixtureGate(t, paths.GateOverrides(), "point", gate.Diff, gate.PointLocation, fixtureJSON("scope.go", 3, "fixture/point", "point finding"))
-	writeScopedFixtureGate(t, paths.GateOverrides(), "repository", gate.Repo, gate.PointLocation, fixtureJSON("scope.go", 3, "fixture/repository", "repository finding"))
+	gatetest.Write(t, paths.GateOverrides(), "entity", gatetest.Command(fixtureCommand(t, fixtureJSON("scope.go", 3, "fixture/entity", "entity finding"), false)...), gatetest.Scope(gate.Diff), gatetest.Location(gate.EntityLocation))
+	gatetest.Write(t, paths.GateOverrides(), "point", gatetest.Command(fixtureCommand(t, fixtureJSON("scope.go", 3, "fixture/point", "point finding"), false)...), gatetest.Scope(gate.Diff), gatetest.Location(gate.PointLocation))
+	gatetest.Write(t, paths.GateOverrides(), "repository", gatetest.Command(fixtureCommand(t, fixtureJSON("scope.go", 3, "fixture/repository", "repository finding"), false)...), gatetest.Scope(gate.Repo), gatetest.Location(gate.PointLocation))
 	baseline := targetTree(t, root)
 
 	runOnce := func() Report {
@@ -389,7 +390,7 @@ func TestServiceRejectsZeroRepositoryIdentityBeforeStateUse(t *testing.T) {
 
 func TestServiceAcceptsCanonicalizedSymlinkRepositoryRoot(t *testing.T) {
 	root, paths := fixtureRepository(t)
-	writeFixtureGate(t, paths.GateOverrides(), "lint", fixtureJSON("lint.go", 2, "golangci-lint/errcheck", "unchecked"), false)
+	gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(fixtureCommand(t, fixtureJSON("lint.go", 2, "golangci-lint/errcheck", "unchecked"), false)...))
 	link := filepath.Join(t.TempDir(), "repository-link")
 	if err := os.Symlink(root, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
@@ -470,8 +471,8 @@ func TestExternalRepositoryStateAllowsNonexistentSuffixWithoutCreatingIt(t *test
 func TestReportOnlyRunIsStableAndKeepsErroredGateSeparate(t *testing.T) {
 	root, paths := fixtureRepository(t)
 	baselineTree := targetTree(t, root)
-	writeFixtureGate(t, paths.GateOverrides(), "lint", fixtureJSON("lint.go", 2, "golangci-lint/errcheck", "unchecked"), false)
-	writeFixtureGate(t, paths.GateOverrides(), "complexity", fixtureJSON("complex.go", 2, "fixture/complexity", "too complex"), false)
+	gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(fixtureCommand(t, fixtureJSON("lint.go", 2, "golangci-lint/errcheck", "unchecked"), false)...))
+	gatetest.Write(t, paths.GateOverrides(), "complexity", gatetest.Command(fixtureCommand(t, fixtureJSON("complex.go", 2, "fixture/complexity", "too complex"), false)...))
 
 	first, firstOutput, firstDir, firstTree := runFixtureService(t, root, paths)
 	for _, name := range []string{"lint", "complexity"} {
@@ -498,7 +499,7 @@ func TestReportOnlyRunIsStableAndKeepsErroredGateSeparate(t *testing.T) {
 	}
 	assertPersistedFixtureRuns(t, firstDir, secondDir)
 
-	writeFixtureGate(t, paths.GateOverrides(), "lint", "", true)
+	gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(fixtureCommand(t, "", true)...))
 	broken, _, _, _ := runFixtureService(t, root, paths)
 	if broken.Verdict != VerdictErrored {
 		t.Fatalf("verdict = %s", broken.Verdict)
@@ -540,8 +541,8 @@ func assertPersistedFixtureRuns(t *testing.T, directories ...string) {
 func TestServiceGateFilteringAndStatusDoesNotExecute(t *testing.T) {
 	root, paths := fixtureRepository(t)
 	marker := filepath.Join(t.TempDir(), "executed")
-	writeFixtureGateCommand(t, paths.GateOverrides(), "lint", []string{helperBinary(t), "active", marker, "1ms", marker + ".done"})
-	writeFixtureGate(t, paths.GateOverrides(), "complexity", fixtureJSON("complex.go", 2, "fixture/complexity", "too complex"), false)
+	gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(helperBinary(t), "active", marker, "1ms", marker+".done"))
+	gatetest.Write(t, paths.GateOverrides(), "complexity", gatetest.Command(fixtureCommand(t, fixtureJSON("complex.go", 2, "fixture/complexity", "too complex"), false)...))
 	service := fixtureService(paths, new(bytes.Buffer))
 	report, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"complexity", "complexity"}, NoColor: true})
 	var exitErr *ExitError
@@ -594,7 +595,7 @@ func TestServiceGateFilteringAndStatusDoesNotExecute(t *testing.T) {
 func TestPrepareRunRejectsSelectedBindingWithoutEnricher(t *testing.T) {
 	root, paths := fixtureRepository(t)
 	marker := filepath.Join(t.TempDir(), "executed")
-	writeFixtureGateCommand(t, paths.GateOverrides(), "lint", []string{helperBinary(t), "mark", marker})
+	gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(helperBinary(t), "mark", marker))
 	service := fixtureService(paths, new(bytes.Buffer))
 	service.Executor.Enrichers = enricher.Registry{"rust": enricher.Noop{}}
 
@@ -646,8 +647,8 @@ func TestSelectRequestsRetainsConfiguredGauntletPositions(t *testing.T) {
 func TestServiceRunsGateWithFormerlyUnsafeRawIdentityAlongsideHealthyGate(t *testing.T) {
 	root, paths := fixtureRepository(t)
 	unsafeName := "lint.with space"
-	writeFixtureGate(t, paths.GateOverrides(), unsafeName, fixtureJSON("lint.go", 2, "fixture/unsafe", "unsafe identity ran"), false)
-	writeFixtureGate(t, paths.GateOverrides(), "complexity", fixtureJSON("complex.go", 2, "fixture/complexity", "healthy ran"), false)
+	gatetest.Write(t, paths.GateOverrides(), unsafeName, gatetest.Command(fixtureCommand(t, fixtureJSON("lint.go", 2, "fixture/unsafe", "unsafe identity ran"), false)...))
+	gatetest.Write(t, paths.GateOverrides(), "complexity", gatetest.Command(fixtureCommand(t, fixtureJSON("complex.go", 2, "fixture/complexity", "healthy ran"), false)...))
 	service := fixtureService(paths, new(bytes.Buffer))
 	report, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{unsafeName, "complexity"}, NoColor: true})
 	var exitErr *ExitError
@@ -670,7 +671,7 @@ func TestServiceRunsGateWithFormerlyUnsafeRawIdentityAlongsideHealthyGate(t *tes
 func TestServicePersistsPassingRunBeforeReturningUnverified(t *testing.T) {
 	root, paths := fixtureRepository(t)
 	for _, name := range []string{"lint", "complexity"} {
-		writeFixtureGateCommand(t, paths.GateOverrides(), name, []string{helperBinary(t), "emit", fmt.Sprintf("%q", `{"Issues":[]}`), fmt.Sprintf("%q", ""), "0"})
+		gatetest.Write(t, paths.GateOverrides(), name, gatetest.Command(helperBinary(t), "emit", fmt.Sprintf("%q", `{"Issues":[]}`), fmt.Sprintf("%q", ""), "0"))
 	}
 	output := new(bytes.Buffer)
 	service := fixtureService(paths, output)
@@ -837,54 +838,13 @@ func fixtureJSON(file string, line int, rule, message string) string {
 	return fmt.Sprintf(`{"Issues":[{"FromLinter":"%s","Text":"%s","Severity":"warning","Pos":{"Filename":"%s","Line":%d}}]}`, strings.Split(rule, "/")[1], message, file, line)
 }
 
-func writeFixtureGate(t *testing.T, override, name, output string, broken bool) {
+func fixtureCommand(t *testing.T, output string, broken bool) []string {
 	t.Helper()
 	command := []string{helperBinary(t), "emit", fmt.Sprintf("%q", output), fmt.Sprintf("%q", ""), "1"}
 	if broken {
 		command = []string{helperBinary(t), "emit", fmt.Sprintf("%q", ""), fmt.Sprintf("%q", "failed"), "2"}
 	}
-	writeFixtureGateCommand(t, override, name, command)
-}
-
-func writeFixtureGateCommand(t *testing.T, override, name string, command []string) {
-	t.Helper()
-	dir := filepath.Join(override, name, "go")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	manifest := fmt.Sprintf("name = %q\ndescription = %q\ncost_class = \"fast\"\nfix_policy = \"report-only\"\nscope = \"repo\"\nblocking = [\"error\", \"warning\"]\ntimeout = \"5s\"\n", name, name)
-	if err := os.WriteFile(filepath.Join(override, name, "gate.toml"), []byte(manifest), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	encoded, err := json.Marshal(command)
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding := fmt.Sprintf("language = \"go\"\ntool = \"fixture\"\ncommand = %s\nsuccess_exit_codes = [0]\nfinding_exit_codes = [1]\nnormalizer = \"golangci-json\"\n[severity_map]\nwarning = \"warning\"\ndefault = \"warning\"\n", encoded)
-	if err := os.WriteFile(filepath.Join(dir, "binding.toml"), []byte(binding), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func writeScopedFixtureGate(t *testing.T, override, name string, scope gate.Scope, location gate.Location, output string) {
-	t.Helper()
-	command := []string{helperBinary(t), "emit", fmt.Sprintf("%q", output), fmt.Sprintf("%q", ""), "1"}
-	dir := filepath.Join(override, name, "go")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	manifest := fmt.Sprintf("name = %q\ndescription = %q\ncost_class = \"fast\"\nfix_policy = \"report-only\"\nscope = %q\nlocation = %q\nblocking = [\"error\", \"warning\"]\ntimeout = \"5s\"\n", name, name, scope, location)
-	if err := os.WriteFile(filepath.Join(override, name, "gate.toml"), []byte(manifest), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	encoded, err := json.Marshal(command)
-	if err != nil {
-		t.Fatal(err)
-	}
-	binding := fmt.Sprintf("language = \"go\"\ntool = \"fixture\"\ncommand = %s\nsuccess_exit_codes = [0]\nfinding_exit_codes = [1]\nnormalizer = \"golangci-json\"\n[severity_map]\nwarning = \"warning\"\ndefault = \"warning\"\n", encoded)
-	if err := os.WriteFile(filepath.Join(dir, "binding.toml"), []byte(binding), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	return command
 }
 
 func findingKeys(items []finding.Finding) []string {
