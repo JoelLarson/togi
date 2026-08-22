@@ -128,7 +128,7 @@ togi run [--report-only] [--base <ref>] [--gate <name>] [--verbose] [--no-color]
 togi status
 togi version
 togi gate list | eject <name>
-togi wiki lint | show <page>          # phase 4
+togi wiki show <page> | lint | eject <page>
 togi waive <fingerprint> --reason ""  # phase 3
 ```
 
