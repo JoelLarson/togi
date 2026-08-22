@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -107,23 +108,19 @@ func cloneSettings(settings map[string]any) (map[string]any, error) {
 	if settings == nil {
 		return nil, nil
 	}
-	cloned := make(map[string]any, len(settings))
-	keys := make([]string, 0, len(settings))
-	for key := range settings {
-		keys = append(keys, key)
+	cloned, err := cloneSettingValue("", settings, make(map[settingContainer]struct{}))
+	if err != nil {
+		return nil, err
 	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		value, err := cloneSettingValue(key, settings[key])
-		if err != nil {
-			return nil, err
-		}
-		cloned[key] = value
-	}
-	return cloned, nil
+	return cloned.(map[string]any), nil
 }
 
-func cloneSettingValue(path string, value any) (any, error) {
+type settingContainer struct {
+	kind    byte
+	pointer uintptr
+}
+
+func cloneSettingValue(path string, value any, active map[settingContainer]struct{}) (any, error) {
 	switch value := value.(type) {
 	case string, bool, int64, time.Time, toml.LocalDate, toml.LocalTime, toml.LocalDateTime:
 		return value, nil
@@ -131,11 +128,21 @@ func cloneSettingValue(path string, value any) (any, error) {
 		if math.IsNaN(value) {
 			return nil, fmt.Errorf("settings %s: NaN is not supported", path)
 		}
+		if value == 0 && math.Signbit(value) {
+			return nil, fmt.Errorf("settings %s: negative zero is not supported", path)
+		}
 		return value, nil
 	case map[string]any:
 		if value == nil {
 			return nil, fmt.Errorf("settings %s: null is not a TOML value", path)
 		}
+		container := settingContainer{kind: 'm', pointer: reflect.ValueOf(value).Pointer()}
+		if _, exists := active[container]; exists {
+			return nil, fmt.Errorf("settings %s: cyclic TOML container", path)
+		}
+		active[container] = struct{}{}
+		defer delete(active, container)
+
 		cloned := make(map[string]any, len(value))
 		keys := make([]string, 0, len(value))
 		for key := range value {
@@ -143,7 +150,7 @@ func cloneSettingValue(path string, value any) (any, error) {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			item, err := cloneSettingValue(path+"."+key, value[key])
+			item, err := cloneSettingValue(settingKeyPath(path, key), value[key], active)
 			if err != nil {
 				return nil, err
 			}
@@ -154,9 +161,16 @@ func cloneSettingValue(path string, value any) (any, error) {
 		if value == nil {
 			return nil, fmt.Errorf("settings %s: null is not a TOML value", path)
 		}
+		container := settingContainer{kind: 's', pointer: reflect.ValueOf(value).Pointer()}
+		if _, exists := active[container]; exists {
+			return nil, fmt.Errorf("settings %s: cyclic TOML container", path)
+		}
+		active[container] = struct{}{}
+		defer delete(active, container)
+
 		cloned := make([]any, len(value))
 		for index, item := range value {
-			item, err := cloneSettingValue(fmt.Sprintf("%s[%d]", path, index), item)
+			item, err := cloneSettingValue(fmt.Sprintf("%s[%d]", path, index), item, active)
 			if err != nil {
 				return nil, err
 			}
@@ -166,6 +180,13 @@ func cloneSettingValue(path string, value any) (any, error) {
 	default:
 		return nil, fmt.Errorf("settings %s: unsupported TOML value type %T", path, value)
 	}
+}
+
+func settingKeyPath(parent, key string) string {
+	if parent == "" {
+		return key
+	}
+	return parent + "." + key
 }
 
 func cloneSeverityMap(severities map[string]finding.Severity) map[string]finding.Severity {

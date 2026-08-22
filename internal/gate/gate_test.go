@@ -424,6 +424,7 @@ func TestCompileRejectsUnsupportedSettings(t *testing.T) {
 	}{
 		{name: "struct with mutable slice", value: settingWithSlice{Values: []string{"original"}}, want: "unsupported TOML value type"},
 		{name: "non-reflexive NaN", value: math.NaN(), want: "NaN is not supported"},
+		{name: "negative zero", value: math.Copysign(0, -1), want: "negative zero is not supported"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			manifest := Manifest{
@@ -444,6 +445,108 @@ func TestCompileRejectsUnsupportedSettings(t *testing.T) {
 	}
 }
 
+func TestCompileRejectsCyclicSettings(t *testing.T) {
+	mapCycle := map[string]any{}
+	mapCycle["self"] = mapCycle
+	sliceCycle := make([]any, 1)
+	sliceCycle[0] = sliceCycle
+
+	for _, test := range []struct {
+		name     string
+		settings map[string]any
+		path     string
+	}{
+		{name: "map", settings: mapCycle, path: "self"},
+		{name: "slice", settings: map[string]any{"items": sliceCycle}, path: "items[0]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := Manifest{
+				Name: "fixture", Description: "fixture", CostClass: Fast, FixPolicy: ReportOnly,
+				Scope: Repo, Location: PointLocation, Blocking: []finding.Severity{}, Timeout: time.Second,
+			}
+			binding := Binding{
+				Language: "go", Tool: "fixture", Command: []string{"fixture"}, SuccessExitCodes: []int{0},
+				Normalizer: "golangci-json", Settings: test.settings,
+				SeverityMap: map[string]finding.Severity{"default": finding.Warning},
+			}
+
+			_, err := Compile(manifest, map[string]Binding{"go": binding})
+			want := "binding go: settings " + test.path + ": cyclic TOML container"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("Compile() error = %v, want containing %q", err, want)
+			}
+		})
+	}
+}
+
+func TestCompiledValidityRejectsNegativeZeroMutation(t *testing.T) {
+	manifest := Manifest{
+		Name: "fixture", Description: "fixture", CostClass: Fast, FixPolicy: ReportOnly,
+		Scope: Repo, Location: PointLocation, Blocking: []finding.Severity{}, Timeout: time.Second,
+	}
+	binding := Binding{
+		Language: "go", Tool: "fixture", Command: []string{"fixture", "{{.value}}"}, SuccessExitCodes: []int{0},
+		Normalizer: "golangci-json", Settings: map[string]any{"value": 0.0},
+		SeverityMap: map[string]finding.Severity{"default": finding.Warning},
+	}
+	compiled, err := Compile(manifest, map[string]Binding{"go": binding})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := compiled.Bindings["go"]
+	before, err := got.RenderCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.Settings["value"] = math.Copysign(0, -1)
+	after, err := got.RenderCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before[1] != "0" || after[1] != "-0" {
+		t.Fatalf("rendered value changed %q -> %q, want 0 -> -0", before[1], after[1])
+	}
+	if got.Valid() || compiled.Valid() {
+		t.Fatalf("negative-zero mutation validity = %v/%v, want false/false", got.Valid(), compiled.Valid())
+	}
+}
+
+func TestCompiledValidityRejectsCyclicSettingsMutation(t *testing.T) {
+	mapCycle := map[string]any{}
+	mapCycle["self"] = mapCycle
+	sliceCycle := make([]any, 1)
+	sliceCycle[0] = sliceCycle
+
+	for _, test := range []struct {
+		name  string
+		cycle any
+	}{
+		{name: "map", cycle: mapCycle},
+		{name: "slice", cycle: sliceCycle},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := Manifest{
+				Name: "fixture", Description: "fixture", CostClass: Fast, FixPolicy: ReportOnly,
+				Scope: Repo, Location: PointLocation, Blocking: []finding.Severity{}, Timeout: time.Second,
+			}
+			binding := Binding{
+				Language: "go", Tool: "fixture", Command: []string{"fixture"}, SuccessExitCodes: []int{0},
+				Normalizer: "golangci-json", Settings: map[string]any{"value": "original"},
+				SeverityMap: map[string]finding.Severity{"default": finding.Warning},
+			}
+			compiled, err := Compile(manifest, map[string]Binding{"go": binding})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := compiled.Bindings["go"]
+			got.Settings["value"] = test.cycle
+			if got.Valid() || compiled.Valid() {
+				t.Fatalf("cyclic settings mutation validity = %v/%v, want false/false", got.Valid(), compiled.Valid())
+			}
+		})
+	}
+}
+
 func TestCompileAcceptsTOMLSettingValues(t *testing.T) {
 	localDate := toml.LocalDate{Year: 2026, Month: 8, Day: 22}
 	localTime := toml.LocalTime{Hour: 14, Minute: 30}
@@ -458,6 +561,7 @@ func TestCompileAcceptsTOMLSettingValues(t *testing.T) {
 		"local_datetime":  toml.LocalDateTime{LocalDate: localDate, LocalTime: localTime},
 		"nested":          map[string]any{"array": []any{"original", int64(1)}},
 	}
+	settings["shared"] = settings["nested"]
 	manifest := Manifest{
 		Name: "fixture", Description: "fixture", CostClass: Fast, FixPolicy: ReportOnly,
 		Scope: Repo, Location: PointLocation, Blocking: []finding.Severity{}, Timeout: time.Second,
