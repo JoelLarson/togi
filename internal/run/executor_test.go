@@ -21,6 +21,7 @@ import (
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/gate"
 	"github.com/joellarson/togi/internal/normalizer"
+	"github.com/joellarson/togi/internal/runner"
 )
 
 const helperSource = `package main
@@ -373,9 +374,9 @@ func TestExecuteRejectsInvalidChangedLinesForDiffScopeBeforeVersionOrGate(t *tes
 			}
 			report := (Executor{
 				Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{},
-				runCommand: func(context.Context, string, []string) commandResult {
+				runCommand: func(context.Context, string, []string) runner.Result {
 					runnerCalled = true
-					return commandResult{stdout: newBoundedBuffer(rawOutputLimit, rawTruncationMarker), stderr: newBoundedBuffer(rawOutputLimit, rawTruncationMarker)}
+					return runner.Result{Stdout: runner.NewBuffer(rawOutputLimit, rawTruncationMarker), Stderr: runner.NewBuffer(rawOutputLimit, rawTruncationMarker)}
 				},
 			}).Execute(context.Background(), Request{
 				Gate:         gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff}},
@@ -618,9 +619,9 @@ func TestExecuteCleanupFailureOverridesValidFindingExit(t *testing.T) {
 		Normalizer: `regex:^(?P<value>\d+) \S+ (?P<symbol>\S+) (?P<file>[^:]+):(?P<line>\d+):\d+$`, RuleID: "gocyclo/complexity", Message: "complexity {{.value}} in {{.symbol}}", SeverityMap: map[string]finding.Severity{"default": finding.Warning},
 	}
 	executor := Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}
-	executor.runCommand = func(ctx context.Context, root string, command []string) commandResult {
-		result := runCommand(ctx, root, command)
-		result.cleanupErr = errors.New("injected process-tree cleanup failure")
+	executor.runCommand = func(ctx context.Context, root string, command []string) runner.Result {
+		result := gateCommand(ctx, root, command)
+		result.CleanupErr = errors.New("injected process-tree cleanup failure")
 		return result
 	}
 	report := executor.Execute(context.Background(), Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "complexity", Timeout: time.Second}}, Binding: binding, Root: root, RawStore: store})

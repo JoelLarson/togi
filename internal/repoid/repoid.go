@@ -1,7 +1,6 @@
 package repoid
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,11 +8,12 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/joellarson/togi/internal/gitcmd"
 )
 
 // ID identifies a target repository and its external state directory. Directory
@@ -207,42 +207,16 @@ func defaultPort(scheme string) string {
 	}
 }
 
+// gitOutputLimit bounds identity queries; rev-list of root commits is the
+// largest and still far below this.
+const gitOutputLimit = 8 << 20
+
 func gitOutput(ctx context.Context, directory string, args ...string) (string, error) {
-	if err := ctx.Err(); err != nil {
+	output, err := gitcmd.Output(ctx, directory, gitcmd.HonourGlobal, gitOutputLimit, args...)
+	if err != nil {
 		return "", err
 	}
-
-	command := append([]string{"-C", directory}, args...)
-	cmd := exec.CommandContext(ctx, "git", command...)
-	cmd.Env = gitEnvironment()
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return "", ctxErr
-		}
-		return "", &gitCommandError{args: args, err: err, output: strings.TrimSpace(stderr.String())}
-	}
-	return strings.TrimSpace(stdout.String()), nil
-}
-
-type gitCommandError struct {
-	args   []string
-	err    error
-	output string
-}
-
-func (err *gitCommandError) Error() string {
-	if err.output == "" {
-		return fmt.Sprintf("git %s: %v", strings.Join(err.args, " "), err.err)
-	}
-	return fmt.Sprintf("git %s: %v: %s", strings.Join(err.args, " "), err.err, err.output)
-}
-
-func (err *gitCommandError) Unwrap() error {
-	return err.err
+	return strings.TrimSpace(string(output)), nil
 }
 
 func gitExitCode(err error) int {
@@ -251,18 +225,6 @@ func gitExitCode(err error) int {
 		return exitErr.ExitCode()
 	}
 	return -1
-}
-
-func gitEnvironment() []string {
-	var env []string
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(strings.ToUpper(name), "GIT_") {
-			continue
-		}
-		env = append(env, entry)
-	}
-	return append(env, "GIT_NO_REPLACE_OBJECTS=1")
 }
 
 func hash(value string) string {

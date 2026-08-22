@@ -166,7 +166,7 @@ This is what "minimal code context" resolves to.
 
 ## Phasing
 
-1. Runner, findings schema, two report-only Go gates, XDG state, repo-id
+1. Run engine, findings schema, two report-only Go gates, XDG state, repo-id
 2. Diff scoping and Go range enrichment
 3. The fix loop — worktree, adapter, integrity gates, rails
 4. Triage, the flywheel, and the wiki

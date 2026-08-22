@@ -1,6 +1,6 @@
 //go:build !linux
 
-package run
+package runner
 
 import (
 	"errors"
@@ -13,7 +13,7 @@ import (
 type processTree struct{}
 
 func prepareProcessTree(_ *exec.Cmd) (*processTree, error) {
-	return nil, fmt.Errorf("%w: gate execution on %s", ErrUnsupportedPlatform, runtime.GOOS)
+	return nil, fmt.Errorf("%w: process execution on %s", ErrUnsupportedPlatform, runtime.GOOS)
 }
 
 func (*processTree) afterStart(process *os.Process) error {

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -23,6 +22,7 @@ import (
 	"github.com/joellarson/togi/internal/enricher"
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/gate"
+	"github.com/joellarson/togi/internal/gitcmd/gitcmdtest"
 	"github.com/joellarson/togi/internal/normalizer"
 	"github.com/joellarson/togi/internal/repoid"
 )
@@ -642,11 +642,7 @@ func fixtureRepository(t *testing.T) (string, config.Paths) {
 		}
 	}
 	for _, args := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-qm", "fixture"}} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = root
-		if output, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, output)
-		}
+		gitFixture(t, root, args...)
 	}
 	baseCommit := gitFixture(t, root, "rev-parse", "HEAD")
 	gitFixture(t, root, "update-ref", "refs/remotes/origin/main", baseCommit)
@@ -708,14 +704,7 @@ func fixtureService(paths config.Paths, output *bytes.Buffer) Service {
 
 func gitFixture(t *testing.T, root string, args ...string) string {
 	t.Helper()
-	command := exec.Command("git", args...)
-	command.Dir = root
-	command.Env = diffTestGitEnvironment()
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v: %s", args, err, output)
-	}
-	return strings.TrimSpace(string(output))
+	return gitcmdtest.Git(t, root, args...)
 }
 
 func assertVerdictError(t *testing.T, err error) {

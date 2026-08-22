@@ -136,6 +136,25 @@ kimi): brief in on stdin, results read back as the worktree diff.
 Squash-applying the togi branch's finished result onto the feature branch
 as one commit; refused if the feature branch moved during the run.
 
+### Execution
+
+**Runner**:
+The single bounded-execution primitive beneath every external process togi
+starts: one command, a context deadline, whole-process-group kill on
+cancellation, and stdout/stderr captured into fixed-size buffers with an
+explicit truncation marker. Gates, version probes, and git all go through
+it; nothing else in togi spawns a process.
+_Avoid_: executor (that names the gate-level orchestration in `run`)
+
+**Gitcmd**:
+togi's one doorway to the git CLI. Every invocation declares an isolation
+policy as data: *hermetic* (user, system, and global config ignored;
+deterministic locale; used for diff scoping) or *config-honouring* (global
+URL rewrites and includes respected, because they are part of a repo's
+identity; used for repo-id resolution). The divergence lives in one policy
+value, not in hand-maintained environment builders.
+_Avoid_: raw `exec.Command("git", ...)` anywhere else
+
 ### Verdicts, rails, and state
 
 **Merge-ready**:

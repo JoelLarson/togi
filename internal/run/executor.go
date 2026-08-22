@@ -1,7 +1,6 @@
 package run
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +15,7 @@ import (
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/gate"
 	"github.com/joellarson/togi/internal/normalizer"
+	"github.com/joellarson/togi/internal/runner"
 )
 
 // RawStore persists captured output from one gate execution.
@@ -41,13 +41,16 @@ type Executor struct {
 	runCommand commandRunner
 }
 
-type commandRunner func(context.Context, string, []string) commandResult
+type commandRunner func(context.Context, string, []string) runner.Result
 
-type commandResult struct {
-	stdout     *boundedBuffer
-	stderr     *boundedBuffer
-	runErr     error
-	cleanupErr error
+// gateCommand is the production runner for gate and version commands: raw
+// output limits match what the ledger will persist.
+func gateCommand(ctx context.Context, root string, command []string) runner.Result {
+	return runner.Run(ctx, root, command, runner.Options{
+		StdoutLimit:      rawOutputLimit,
+		StderrLimit:      rawOutputLimit,
+		TruncationMarker: rawTruncationMarker,
+	})
 }
 
 // Execute runs a gate and always returns a report, including infrastructure errors.
@@ -79,21 +82,21 @@ func (e Executor) Execute(parent context.Context, req Request) (report GateRepor
 
 	ctx, cancel := context.WithTimeout(parent, req.Gate.Manifest.Timeout)
 	defer cancel()
+	run := e.runCommand
+	if run == nil {
+		run = gateCommand
+	}
 	if len(req.Binding.Version.Command) > 0 {
-		if versionErr := observeVersion(ctx, req, &report); versionErr != nil {
+		if versionErr := observeVersion(ctx, run, req, &report); versionErr != nil {
 			return errored(report, versionErr)
 		}
 	}
-	runner := e.runCommand
-	if runner == nil {
-		runner = runCommand
-	}
-	result := runner(ctx, req.Root, command)
+	result := run(ctx, req.Root, command)
 	return e.finishExecution(ctx, req, report, result)
 }
 
-func (e Executor) finishExecution(ctx context.Context, req Request, report GateReport, result commandResult) GateReport {
-	stdout, stderr := result.stdout, result.stderr
+func (e Executor) finishExecution(ctx context.Context, req Request, report GateReport, result runner.Result) GateReport {
+	stdout, stderr := result.Stdout, result.Stderr
 	persistErr := persistRaw(req, stdout.Bytes(), stderr.Bytes())
 	if persistErr != nil {
 		return errored(report, errors.New("persist raw output: storage failure"))
@@ -107,7 +110,7 @@ func (e Executor) finishExecution(ctx context.Context, req Request, report GateR
 	if err != nil {
 		return errored(report, errors.New("normalize gate output: invalid tool output; inspect persisted raw output"))
 	}
-	_, findingExit := commandExitClassification(req.Binding, result.runErr)
+	_, findingExit := commandExitClassification(req.Binding, result.RunErr)
 	if findingExit && len(normalized) == 0 {
 		return errored(report, errors.New("finding exit produced no valid findings"))
 	}
@@ -138,20 +141,20 @@ func (e Executor) finishExecution(ctx context.Context, req Request, report GateR
 	return report
 }
 
-func validateCommandResult(ctx context.Context, binding gate.Binding, result commandResult) error {
-	stdout, stderr := result.stdout, result.stderr
+func validateCommandResult(ctx context.Context, binding gate.Binding, result runner.Result) error {
+	stdout, stderr := result.Stdout, result.Stderr
 	if ctx.Err() != nil {
 		return contextExecutionError(ctx.Err())
 	}
-	if result.cleanupErr != nil {
-		return fmt.Errorf("clean up gate process tree: %w", result.cleanupErr)
+	if result.CleanupErr != nil {
+		return fmt.Errorf("clean up gate process tree: %w", result.CleanupErr)
 	}
 	if stdout.Truncated() || stderr.Truncated() {
 		return errors.New("gate output exceeded the 1 MiB capture limit")
 	}
-	exitCode, exited := commandExitCode(result.runErr)
+	exitCode, exited := commandExitCode(result.RunErr)
 	if !exited {
-		return fmt.Errorf("run gate command: %w", result.runErr)
+		return fmt.Errorf("run gate command: %w", result.RunErr)
 	}
 	successExit := slices.Contains(binding.SuccessExitCodes, exitCode)
 	findingExit := slices.Contains(binding.FindingExitCodes, exitCode)
@@ -169,25 +172,25 @@ func commandExitClassification(binding gate.Binding, runErr error) (bool, bool) 
 	return slices.Contains(binding.SuccessExitCodes, exitCode), slices.Contains(binding.FindingExitCodes, exitCode)
 }
 
-func observeVersion(ctx context.Context, req Request, report *GateReport) error {
+func observeVersion(ctx context.Context, run commandRunner, req Request, report *GateReport) error {
 	command := req.Binding.Version.Command
 	if err := validateCommand(command); err != nil {
 		report.Warnings = append(report.Warnings, "version command is invalid")
 		return nil
 	}
-	result := runCommand(ctx, req.Root, command)
-	stdout, stderr := result.stdout, result.stderr
+	result := run(ctx, req.Root, command)
+	stdout, stderr := result.Stdout, result.Stderr
 	if ctx.Err() != nil {
 		return contextExecutionError(ctx.Err())
 	}
-	if result.cleanupErr != nil {
-		return fmt.Errorf("clean up version process tree: %w", result.cleanupErr)
+	if result.CleanupErr != nil {
+		return fmt.Errorf("clean up version process tree: %w", result.CleanupErr)
 	}
 	if stdout.Truncated() || stderr.Truncated() {
 		report.Warnings = append(report.Warnings, "version command output exceeded the capture limit")
 		return nil
 	}
-	exitCode, exited := commandExitCode(result.runErr)
+	exitCode, exited := commandExitCode(result.RunErr)
 	if !exited || exitCode != 0 {
 		report.Warnings = append(report.Warnings, "version command failed")
 		return nil
@@ -308,40 +311,6 @@ func validateCommand(command []string) error {
 	return nil
 }
 
-func runCommand(ctx context.Context, root string, command []string) commandResult {
-	stdout := newBoundedBuffer(rawOutputLimit, rawTruncationMarker)
-	stderr := newBoundedBuffer(rawOutputLimit, rawTruncationMarker)
-	result := commandResult{stdout: stdout, stderr: stderr}
-	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
-	cmd.Dir = root
-	cmd.WaitDelay = 100 * time.Millisecond
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	tree, err := prepareProcessTree(cmd)
-	if err != nil {
-		result.runErr = fmt.Errorf("prepare process tree: %w", err)
-		return result
-	}
-	cmd.Cancel = func() error {
-		return tree.terminate(cmd.Process)
-	}
-	if err := cmd.Start(); err != nil {
-		result.runErr = err
-		result.cleanupErr = tree.close(nil)
-		return result
-	}
-	if err := tree.afterStart(cmd.Process); err != nil {
-		terminateErr := tree.terminate(cmd.Process)
-		waitErr := cmd.Wait()
-		result.runErr = errors.Join(err, terminateErr, waitErr)
-		result.cleanupErr = tree.close(cmd.Process)
-		return result
-	}
-	result.runErr = cmd.Wait()
-	result.cleanupErr = tree.close(cmd.Process)
-	return result
-}
-
 func persistRaw(req Request, stdout, stderr []byte) error {
 	stdoutErr := req.RawStore.WriteRaw(req.Gate.Manifest.Name, req.Binding.Language, "stdout", stdout)
 	stderrErr := req.RawStore.WriteRaw(req.Gate.Manifest.Name, req.Binding.Language, "stderr", stderr)
@@ -389,40 +358,3 @@ func errored(report GateReport, err error) GateReport {
 	}
 	return report
 }
-
-type boundedBuffer struct {
-	buffer    bytes.Buffer
-	limit     int
-	marker    []byte
-	truncated bool
-}
-
-func newBoundedBuffer(limit int, marker []byte) *boundedBuffer {
-	return &boundedBuffer{limit: limit, marker: append([]byte(nil), marker...)}
-}
-
-func (b *boundedBuffer) Write(input []byte) (int, error) {
-	inputLength := len(input)
-	if b.truncated {
-		return inputLength, nil
-	}
-	remaining := b.limit - b.buffer.Len()
-	if len(input) <= remaining {
-		_, _ = b.buffer.Write(input)
-		return inputLength, nil
-	}
-	dataLimit := b.limit - len(b.marker)
-	if b.buffer.Len() > dataLimit {
-		b.buffer.Truncate(dataLimit)
-	} else if b.buffer.Len() < dataLimit {
-		needed := dataLimit - b.buffer.Len()
-		_, _ = b.buffer.Write(input[:min(needed, len(input))])
-	}
-	_, _ = b.buffer.Write(b.marker)
-	b.truncated = true
-	return inputLength, nil
-}
-
-func (b *boundedBuffer) Bytes() []byte   { return b.buffer.Bytes() }
-func (b *boundedBuffer) Len() int        { return b.buffer.Len() }
-func (b *boundedBuffer) Truncated() bool { return b.truncated }

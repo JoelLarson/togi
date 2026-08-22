@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/gitcmd/gitcmdtest"
 )
 
 func TestResolveDiffDetectsOriginHeadAndChangedLines(t *testing.T) {
@@ -327,12 +327,8 @@ func TestResolveDiffUsesMergeBaseAcrossDivergedHistory(t *testing.T) {
 
 func TestResolveDiffSupportsSHA256ObjectIDs(t *testing.T) {
 	repo := t.TempDir()
-	cmd := exec.Command("git", "init", "--object-format=sha256")
-	cmd.Dir = repo
-	cmd.Env = diffTestGitEnvironment()
-	if output, err := cmd.CombinedOutput(); err != nil {
-		message := string(output)
-		if strings.Contains(message, "unknown option") || strings.Contains(message, "unknown value") || strings.Contains(message, "unsupported") || strings.Contains(message, "invalid object format") {
+	if output, err := gitcmdtest.GitErr(repo, "init", "--object-format=sha256"); err != nil {
+		if strings.Contains(output, "unknown option") || strings.Contains(output, "unknown value") || strings.Contains(output, "unsupported") || strings.Contains(output, "invalid object format") {
 			t.Skipf("Git SHA-256 repositories unsupported: %s", output)
 		}
 		t.Fatalf("initialize SHA-256 repository: %v: %s", err, output)
@@ -849,28 +845,14 @@ func commitDiffTestRepo(t *testing.T, repo, message string) string {
 
 func gitDiffTest(t *testing.T, repo string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = repo
-	cmd.Env = diffTestGitEnvironment()
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v: %s", args, err, output)
-	}
-	return strings.TrimSpace(string(output))
+	return gitcmdtest.Git(t, repo, args...)
 }
 
 func gitDiffTestWantError(t *testing.T, repo string, args ...string) {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = repo
-	cmd.Env = diffTestGitEnvironment()
-	if output, err := cmd.CombinedOutput(); err == nil {
+	if output, err := gitcmdtest.GitErr(repo, args...); err == nil {
 		t.Fatalf("git %v succeeded, want failure: %s", args, output)
 	}
-}
-
-func diffTestGitEnvironment() []string {
-	return append(os.Environ(), "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
 }
 
 func assertFullObjectID(t *testing.T, value string) {

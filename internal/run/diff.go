@@ -12,10 +12,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/gitcmd"
 )
 
 const (
@@ -725,81 +725,18 @@ func countBlobLines(blob []byte) int {
 }
 
 func diffGitOutput(ctx context.Context, root string, limit int, args ...string) ([]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	gitArgs := []string{"-c", "core.fsmonitor=false", "-c", "core.attributesFile=" + os.DevNull}
-	gitArgs = append(gitArgs, args...)
-	output, err := boundedCommandOutput(ctx, root, "git", gitArgs, diffGitEnvironment(), limit)
+	output, err := gitcmd.Output(ctx, root, gitcmd.Hermetic, limit, args...)
 	if err != nil {
+		// Diff errors land in run reports: strip arguments and stderr so ref
+		// names and repository contents never leak into them.
+		var cmdErr *gitcmd.CommandError
+		if errors.As(err, &cmdErr) {
+			if errors.Is(err, gitcmd.ErrOutputLimit) {
+				return nil, errors.New("command output exceeded its limit")
+			}
+			return nil, fmt.Errorf("command failed: %w", cmdErr.Err)
+		}
 		return nil, err
 	}
 	return output, nil
-}
-
-func boundedCommandOutput(ctx context.Context, root, executable string, args, environment []string, limit int) ([]byte, error) {
-	if ctx == nil {
-		return nil, errors.New("command context is required")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	cmd := exec.CommandContext(ctx, executable, args...)
-	cmd.Dir = root
-	cmd.Env = environment
-	cmd.WaitDelay = 100 * time.Millisecond
-	stdout := newBoundedBuffer(limit, []byte("[output truncated]"))
-	stderr := newBoundedBuffer(gitReferenceOutputLimit, []byte("[output truncated]"))
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	tree, err := prepareProcessTree(cmd)
-	if err != nil {
-		return nil, fmt.Errorf("prepare command process tree: %w", err)
-	}
-	cmd.Cancel = func() error {
-		return tree.terminate(cmd.Process)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, errors.Join(fmt.Errorf("command start failed: %w", err), tree.close(nil))
-	}
-	if err := tree.afterStart(cmd.Process); err != nil {
-		terminateErr := tree.terminate(cmd.Process)
-		waitErr := cmd.Wait()
-		return nil, errors.Join(err, terminateErr, waitErr, tree.close(cmd.Process))
-	}
-	waitErr := cmd.Wait()
-	cleanupErr := tree.close(cmd.Process)
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, errors.Join(ctxErr, cleanupErr)
-	}
-	if waitErr != nil || cleanupErr != nil {
-		if waitErr != nil {
-			waitErr = fmt.Errorf("command failed: %w", waitErr)
-		}
-		return nil, errors.Join(waitErr, cleanupErr)
-	}
-	if stdout.Truncated() || stderr.Truncated() {
-		return nil, errors.New("command output exceeded its limit")
-	}
-	return append([]byte(nil), stdout.Bytes()...), nil
-}
-
-func diffGitEnvironment() []string {
-	environment := make([]string, 0, len(os.Environ())+5)
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(strings.ToUpper(name), "GIT_") {
-			continue
-		}
-		environment = append(environment, entry)
-	}
-	return append(environment,
-		"LC_ALL=C",
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL="+os.DevNull,
-		"GIT_ATTR_NOSYSTEM=1",
-		"GIT_NO_LAZY_FETCH=1",
-		"GIT_NO_REPLACE_OBJECTS=1",
-		"GIT_OPTIONAL_LOCKS=0",
-	)
 }

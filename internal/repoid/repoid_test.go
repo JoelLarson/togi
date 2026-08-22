@@ -1,19 +1,18 @@
 package repoid
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/joellarson/togi/internal/config"
+	"github.com/joellarson/togi/internal/gitcmd/gitcmdtest"
 )
 
 func TestResolveUsesRootCommit(t *testing.T) {
@@ -183,18 +182,6 @@ func TestResolveUsesOrdinaryGlobalURLRewrite(t *testing.T) {
 	}
 	if want := sha256Hex("github.com/JoelLarson/togi"); got.Key != want {
 		t.Fatalf("Key = %q, want rewritten origin key %q", got.Key, want)
-	}
-}
-
-func TestGitEnvironmentFiltersMixedCaseGitVariables(t *testing.T) {
-	t.Setenv("git_dir", "/tmp/other-repository")
-	t.Setenv("Git_Config_Count", "1")
-
-	for _, entry := range gitEnvironment() {
-		name, _, _ := strings.Cut(entry, "=")
-		if strings.EqualFold(name, "GIT_DIR") || strings.EqualFold(name, "GIT_CONFIG_COUNT") {
-			t.Fatalf("Git environment includes %q", entry)
-		}
 	}
 }
 
@@ -392,44 +379,12 @@ func writeFile(t *testing.T, path, contents string) {
 
 func gitRun(t *testing.T, repo string, args ...string) {
 	t.Helper()
-	if output, err := gitTestOutputErr(repo, args...); err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
-	}
+	gitcmdtest.Git(t, repo, args...)
 }
 
 func gitTestOutput(t *testing.T, repo string, args ...string) string {
 	t.Helper()
-	output, err := gitTestOutputErr(repo, args...)
-	if err != nil {
-		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
-	}
-	return strings.TrimSpace(output)
-}
-
-func gitTestOutputErr(repo string, args ...string) (string, error) {
-	command := append([]string{"-c", "commit.gpgSign=false", "-c", "core.hooksPath=" + os.DevNull, "-C", repo}, args...)
-	cmd := exec.Command("git", command...)
-	cmd.Env = fixtureGitEnv()
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		return stderr.String(), err
-	}
-	return stdout.String(), nil
-}
-
-func fixtureGitEnv() []string {
-	var env []string
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(name, "GIT_") {
-			continue
-		}
-		env = append(env, entry)
-	}
-	return append(env, "GIT_NO_REPLACE_OBJECTS=1", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+	return gitcmdtest.Git(t, repo, args...)
 }
 
 func sha256Hex(value string) string {

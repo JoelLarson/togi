@@ -10,7 +10,7 @@ immediately rather than at the end.
 
 ---
 
-## Phase 1 — Runner, findings, and two report-only Go gates
+## Phase 1 — Run engine, findings, and two report-only Go gates
 
 **Goal:** `togi run` on a Go repo on Linux produces a normalized, persisted
 findings report. No diff scoping, no fixing. Other operating systems retain

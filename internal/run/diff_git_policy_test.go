@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/runner"
 )
 
 func TestResolveDiffNeutralizesExecutableGitConfiguration(t *testing.T) {
@@ -377,19 +378,23 @@ func TestBoundedCommandCancellationTerminatesDescendants(t *testing.T) {
 	survived := filepath.Join(root, "descendant-survived")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	result := make(chan error, 1)
+	done := make(chan error, 1)
 	helper := helperBinary(t)
 	go func() {
-		_, err := boundedCommandOutput(ctx, root, helper, []string{"spawn-survivor", started, survived}, diffGitEnvironment(), 1024)
-		result <- err
+		result := runner.Run(ctx, root, []string{helper, "spawn-survivor", started, survived}, runner.Options{StdoutLimit: 1024, StderrLimit: 1024})
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			done <- errors.Join(ctxErr, result.CleanupErr)
+			return
+		}
+		done <- result.RunErr
 	}()
 
 	waitForDiffTestFile(t, started, time.Second)
 	cancel()
 	select {
-	case err := <-result:
+	case err := <-done:
 		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("boundedCommandOutput() error = %v, want context.Canceled", err)
+			t.Fatalf("runner.Run() error = %v, want context.Canceled", err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("bounded command did not return promptly after cancellation")
