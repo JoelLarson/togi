@@ -9,6 +9,7 @@ need to see how application language maps to a driver action.
 - [Judging a feature diff](gauntlet/judging_a_feature_diff.feature)
 - [Keeping run history](runledger/keeping_run_history.feature)
 - [Customizing gates](gate/customizing_gates.feature)
+- [Using principle pages](wiki/using_principle_pages.feature)
 <!-- feature-index:end -->
 
 Read **Running the gauntlet** first for the core report contract, then
