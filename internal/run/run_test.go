@@ -77,6 +77,74 @@ func TestBuildReportRecordsDiffScopeWithoutLineRanges(t *testing.T) {
 	}
 }
 
+func TestBuildReportRejectsInvalidDiffBeforeProjection(t *testing.T) {
+	diff := fixtureDiff()
+	diff.ChangedLines = 1
+	if _, err := buildReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime, diff, []GateReport{{
+		Gate: "lint", Language: "go", Status: GatePassed,
+	}}); err == nil {
+		t.Fatal("buildReport accepted a diff whose changed-line count cannot be verified")
+	}
+}
+
+func TestValidateDiffRejectsUnverifiableScope(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*Diff)
+	}{
+		{name: "missing lines", mutate: func(diff *Diff) { diff.Lines = nil }},
+		{name: "too many files", mutate: func(diff *Diff) {
+			diff.ChangedFiles = 1
+			diff.Lines = finding.ChangedLines{"first.go": {{Start: 1, End: 1}}, "second.go": {{Start: 3, End: 3}}}
+			diff.ChangedLines = 2
+		}},
+		{name: "false changed-line count", mutate: func(diff *Diff) {
+			diff.ChangedFiles = 1
+			diff.Lines = finding.ChangedLines{"first.go": {{Start: 1, End: 2}}}
+			diff.ChangedLines = 1
+		}},
+		{name: "overlapping ranges", mutate: func(diff *Diff) {
+			diff.ChangedFiles = 1
+			diff.Lines = finding.ChangedLines{"first.go": {{Start: 1, End: 2}, {Start: 2, End: 3}}}
+			diff.ChangedLines = 4
+		}},
+		{name: "unsorted ranges", mutate: func(diff *Diff) {
+			diff.ChangedFiles = 1
+			diff.Lines = finding.ChangedLines{"first.go": {{Start: 3, End: 3}, {Start: 1, End: 1}}}
+			diff.ChangedLines = 2
+		}},
+		{name: "adjacent ranges", mutate: func(diff *Diff) {
+			diff.ChangedFiles = 1
+			diff.Lines = finding.ChangedLines{"first.go": {{Start: 1, End: 1}, {Start: 2, End: 2}}}
+			diff.ChangedLines = 2
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			diff := fixtureDiff()
+			test.mutate(&diff)
+			if err := validateDiff(diff); err == nil {
+				t.Fatal("validateDiff accepted an unverifiable diff")
+			}
+		})
+	}
+}
+
+func TestValidateDiffAcceptsBinaryAndZeroLineFiles(t *testing.T) {
+	for _, diff := range []Diff{
+		fixtureDiff(),
+		func() Diff {
+			diff := fixtureDiff()
+			diff.ChangedFiles = 1
+			diff.Lines = finding.ChangedLines{"image.png": {}}
+			return diff
+		}(),
+	} {
+		if err := validateDiff(diff); err != nil {
+			t.Fatalf("validateDiff(%#v): %v", diff, err)
+		}
+	}
+}
+
 func TestRenderUsesCompilerStyleAndOccurrences(t *testing.T) {
 	report := Report{
 		Verdict: VerdictFindings,
@@ -134,12 +202,12 @@ func TestServiceRejectsUnsafeWiringBeforeRepositoryResolution(t *testing.T) {
 		name    string
 		service Service
 	}{
-		{name: "empty paths", service: Service{Executor: validExecutor, Stdout: io.Discard}},
-		{name: "relative config", service: Service{Paths: config.Paths{Config: "config", State: validPaths.State}, Executor: validExecutor, Stdout: io.Discard}},
-		{name: "relative state", service: Service{Paths: config.Paths{Config: validPaths.Config, State: "state"}, Executor: validExecutor, Stdout: io.Discard}},
-		{name: "empty registry", service: Service{Paths: validPaths, Executor: Executor{Enricher: enricher.Noop{}}, Stdout: io.Discard}},
-		{name: "empty enricher", service: Service{Paths: validPaths, Executor: Executor{Registry: normalizer.NewRegistry()}, Stdout: io.Discard}},
-		{name: "empty output", service: Service{Paths: validPaths, Executor: validExecutor}},
+		{name: "empty paths", service: Service{Executor: validExecutor, Stdout: io.Discard, Diff: fixtureDiff()}},
+		{name: "relative config", service: Service{Paths: config.Paths{Config: "config", State: validPaths.State}, Executor: validExecutor, Stdout: io.Discard, Diff: fixtureDiff()}},
+		{name: "relative state", service: Service{Paths: config.Paths{Config: validPaths.Config, State: "state"}, Executor: validExecutor, Stdout: io.Discard, Diff: fixtureDiff()}},
+		{name: "empty registry", service: Service{Paths: validPaths, Executor: Executor{Enricher: enricher.Noop{}}, Stdout: io.Discard, Diff: fixtureDiff()}},
+		{name: "empty enricher", service: Service{Paths: validPaths, Executor: Executor{Registry: normalizer.NewRegistry()}, Stdout: io.Discard, Diff: fixtureDiff()}},
+		{name: "empty output", service: Service{Paths: validPaths, Executor: validExecutor, Diff: fixtureDiff()}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
@@ -158,6 +226,42 @@ func TestServiceRejectsUnsafeWiringBeforeRepositoryResolution(t *testing.T) {
 	}
 }
 
+func TestServiceRejectsInvalidDiffBeforeRepositoryResolutionOrSideEffects(t *testing.T) {
+	root, paths := fixtureRepository(t)
+	marker := filepath.Join(t.TempDir(), "executed")
+	writeFixtureGateCommand(t, paths.GateOverrides(), "lint", []string{helperBinary(t), "active", marker, "1ms", marker + ".done"})
+	for _, test := range []struct {
+		name string
+		diff Diff
+	}{
+		{name: "zero diff", diff: Diff{}},
+		{name: "missing lines", diff: func() Diff { diff := fixtureDiff(); diff.Lines = nil; return diff }()},
+		{name: "false counts", diff: func() Diff { diff := fixtureDiff(); diff.ChangedLines = 1; return diff }()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resolved := false
+			service := fixtureService(paths, new(bytes.Buffer))
+			service.Diff = test.diff
+			service.ResolveRepo = func(context.Context, string) (repoid.ID, error) {
+				resolved = true
+				return repoid.ID{}, nil
+			}
+			if _, err := service.Run(context.Background(), Options{Root: root}); err == nil {
+				t.Fatal("Run accepted invalid diff")
+			}
+			if resolved {
+				t.Fatal("Run resolved the repository before rejecting its diff")
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("gate command ran: %v", err)
+			}
+			if _, err := os.Stat(paths.State); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("state or raw output was created: %v", err)
+			}
+		})
+	}
+}
+
 func TestServiceRejectsUnsafeInjectedRepositoryIdentityBeforeStateUse(t *testing.T) {
 	root := t.TempDir()
 	paths := config.Paths{Config: filepath.Join(t.TempDir(), "config"), State: filepath.Join(t.TempDir(), "state")}
@@ -168,7 +272,7 @@ func TestServiceRejectsUnsafeInjectedRepositoryIdentityBeforeStateUse(t *testing
 		{Key: "key", Directory: " ", Root: root},
 		{Key: "key", Directory: "bad:name", Root: root},
 	} {
-		service := Service{Paths: paths, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: io.Discard, ResolveRepo: func(context.Context, string) (repoid.ID, error) { return id, nil }}
+		service := Service{Paths: paths, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: io.Discard, Diff: fixtureDiff(), ResolveRepo: func(context.Context, string) (repoid.ID, error) { return id, nil }}
 		if _, err := service.Run(context.Background(), Options{}); err == nil {
 			t.Fatalf("Run accepted identity %#v", id)
 		}
@@ -224,7 +328,7 @@ func TestServiceRejectsRepositoryStateInsideTargetWithoutSideEffects(t *testing.
 				t.Fatal(err)
 			}
 			paths := config.Paths{Config: filepath.Join(t.TempDir(), "config"), State: tc.state(t, root)}
-			service := Service{Paths: paths, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: io.Discard}
+			service := Service{Paths: paths, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: io.Discard, Diff: fixtureDiff()}
 			if _, err := service.Run(context.Background(), Options{Root: root}); err == nil || !strings.Contains(err.Error(), "target repository") {
 				t.Fatalf("Run error = %v", err)
 			}
@@ -441,12 +545,17 @@ func fixtureService(paths config.Paths, output *bytes.Buffer) Service {
 		Loader:   gate.Loader{OverrideDir: paths.GateOverrides()},
 		Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}},
 		Stdout:   output,
-		Diff: Diff{
-			BaseRef:    "origin/main",
-			BaseCommit: strings.Repeat("a", 40),
-			MergeBase:  strings.Repeat("b", 40),
-			Head:       strings.Repeat("c", 40),
-		},
+		Diff:     fixtureDiff(),
+	}
+}
+
+func fixtureDiff() Diff {
+	return Diff{
+		BaseRef:    "origin/main",
+		BaseCommit: strings.Repeat("a", 40),
+		MergeBase:  strings.Repeat("b", 40),
+		Head:       strings.Repeat("c", 40),
+		Lines:      finding.ChangedLines{},
 	}
 }
 

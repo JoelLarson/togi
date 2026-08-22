@@ -125,6 +125,9 @@ func (service Service) writeVerbose(enabled bool, requests []Request) error {
 }
 
 func buildReport(runID, repoID string, startedAt, finishedAt time.Time, diff Diff, gateReports []GateReport) (Report, error) {
+	if err := validateDiff(diff); err != nil {
+		return Report{}, fmt.Errorf("validate report diff: %w", err)
+	}
 	findings := make([]finding.Finding, 0)
 	for _, gateReport := range gateReports {
 		findings = append(findings, gateReport.Findings...)
@@ -138,18 +141,11 @@ func buildReport(runID, repoID string, startedAt, finishedAt time.Time, diff Dif
 		SchemaVersion: 2,
 		RunID:         runID,
 		RepoID:        repoID,
-		Diff: DiffReport{
-			BaseRef:      diff.BaseRef,
-			BaseCommit:   diff.BaseCommit,
-			MergeBase:    diff.MergeBase,
-			Head:         diff.Head,
-			ChangedFiles: diff.ChangedFiles,
-			ChangedLines: diff.ChangedLines,
-		},
-		StartedAt:  startedAt,
-		FinishedAt: finishedAt,
-		Gates:      gateReports,
-		Findings:   grouped,
+		Diff:          diffReport(diff),
+		StartedAt:     startedAt,
+		FinishedAt:    finishedAt,
+		Gates:         gateReports,
+		Findings:      grouped,
 	}
 	if report.FinishedAt.Before(report.StartedAt) {
 		report.FinishedAt = report.StartedAt
@@ -157,6 +153,53 @@ func buildReport(runID, repoID string, startedAt, finishedAt time.Time, diff Dif
 	report.Counts = countFindings(grouped)
 	report.Verdict = verdictFor(gateReports, grouped)
 	return report, nil
+}
+
+func validateDiff(diff Diff) error {
+	if err := validateDiffReport(diffReport(diff)); err != nil {
+		return err
+	}
+	if diff.Lines == nil {
+		return errors.New("diff changed lines are required")
+	}
+	if len(diff.Lines) > diff.ChangedFiles {
+		return errors.New("diff changed-line files exceed changed file count")
+	}
+	if err := finding.ValidateChangedLines(diff.Lines); err != nil {
+		return fmt.Errorf("diff changed lines are invalid: %w", err)
+	}
+	lineCount := 0
+	maximumInt := int(^uint(0) >> 1)
+	for path, ranges := range diff.Lines {
+		for index, lineRange := range ranges {
+			if index > 0 {
+				previous := ranges[index-1]
+				if lineRange.Start <= previous.End || (previous.End < maximumInt && lineRange.Start == previous.End+1) {
+					return fmt.Errorf("diff changed ranges for %q are overlapping, adjacent, or out of order", path)
+				}
+			}
+			cardinality := lineRange.End - lineRange.Start + 1
+			if lineCount > maximumInt-cardinality {
+				return errors.New("diff changed-line count overflows int")
+			}
+			lineCount += cardinality
+		}
+	}
+	if lineCount != diff.ChangedLines {
+		return fmt.Errorf("diff changed-line count %d does not match ranges %d", diff.ChangedLines, lineCount)
+	}
+	return nil
+}
+
+func diffReport(diff Diff) DiffReport {
+	return DiffReport{
+		BaseRef:      diff.BaseRef,
+		BaseCommit:   diff.BaseCommit,
+		MergeBase:    diff.MergeBase,
+		Head:         diff.Head,
+		ChangedFiles: diff.ChangedFiles,
+		ChangedLines: diff.ChangedLines,
+	}
 }
 
 func (service Service) prepareRun(ctx context.Context, opts Options) (repoid.ID, string, []Request, error) {
@@ -252,6 +295,9 @@ func (service Service) validateRun() error {
 	}
 	if isNilInterface(service.Stdout) {
 		return errors.New("report output is required")
+	}
+	if err := validateDiff(service.Diff); err != nil {
+		return fmt.Errorf("service diff is invalid: %w", err)
 	}
 	return nil
 }

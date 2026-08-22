@@ -1095,7 +1095,7 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 	wanted := Report{
 		SchemaVersion: 2,
 		RunID:         "20260821T120200.000000000Z-0002",
-		RepoID:        "repo-id",
+		RepoID:        strings.Repeat("d", 40),
 		Diff:          completeReportFixture("").Diff,
 		StartedAt:     time.Date(2026, time.August, 21, 12, 2, 0, 0, time.UTC),
 		FinishedAt:    time.Date(2026, time.August, 21, 12, 2, 5, 0, time.UTC),
@@ -1200,10 +1200,7 @@ func TestLatestReadRemainsAnchoredAfterRunsDirectoryReplacement(t *testing.T) {
 	if err := os.Mkdir(externalRuns, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writeReportFixture(t, externalRuns, Report{
-		SchemaVersion: 1,
-		RunID:         "20260821T120000.900000000Z-ffff",
-	})
+	writeReportFixture(t, externalRuns, completeReportFixture("20260821T120000.900000000Z-ffff"))
 	if err := os.Symlink(externalRuns, runsPath); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
@@ -1227,7 +1224,7 @@ func TestLatestRejectsSymlinkedRepoState(t *testing.T) {
 	if err := os.MkdirAll(runsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	report := Report{SchemaVersion: 1, RunID: "20260821T120000.000000000Z-0000"}
+	report := completeReportFixture("20260821T120000.000000000Z-0000")
 	writeReportFixture(t, runsDir, report)
 	reportPath := filepath.Join(runsDir, report.RunID, "report.json")
 	before, err := os.ReadFile(reportPath)
@@ -1264,7 +1261,7 @@ func TestLatestRejectsSymlinkedRunsDirectory(t *testing.T) {
 	if err := os.Mkdir(externalRuns, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	report := Report{SchemaVersion: 1, RunID: "20260821T120000.000000000Z-0000"}
+	report := completeReportFixture("20260821T120000.000000000Z-0000")
 	writeReportFixture(t, externalRuns, report)
 	reportPath := filepath.Join(externalRuns, report.RunID, "report.json")
 	before, err := os.ReadFile(reportPath)
@@ -1519,6 +1516,21 @@ func TestValidateReportRejectsMissingAndMalformedDiffMetadata(t *testing.T) {
 	}
 }
 
+func TestValidateReportRequiresFullRepositoryObjectID(t *testing.T) {
+	for _, repositoryID := range []string{
+		"",
+		"repo-id",
+		"repo\x00id",
+		strings.ToUpper(strings.Repeat("d", 40)),
+	} {
+		report := completeReportFixture("20260821T120000.000000000Z-0000")
+		report.RepoID = repositoryID
+		if err := validateReport(report, report.RunID); err == nil {
+			t.Fatalf("validateReport accepted repository ID %q", repositoryID)
+		}
+	}
+}
+
 func TestValidateDiffReportRejectsObjectIDWhitespaceAtMatchingLengths(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -1686,9 +1698,13 @@ func TestWriteReportCleansTemporaryFileAfterEncodingError(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = run.Close() })
-	report := Report{SchemaVersion: 1, StartedAt: time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)}
+	report := completeReportFixture("")
+	report.StartedAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	report.FinishedAt = report.StartedAt.Add(time.Second)
 	if err := run.WriteReport(report); err == nil {
 		t.Fatal("WriteReport succeeded with a non-JSON timestamp")
+	} else if !strings.Contains(err.Error(), "encode report") {
+		t.Fatalf("WriteReport error = %v, want encoding failure", err)
 	}
 	if _, err := os.Stat(filepath.Join(run.Dir, "report.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("partial report exists: %v", err)
@@ -1752,7 +1768,7 @@ func completeReportFixture(runID string) Report {
 	return Report{
 		SchemaVersion: 2,
 		RunID:         runID,
-		RepoID:        "repo-id",
+		RepoID:        strings.Repeat("d", 40),
 		Diff: DiffReport{
 			BaseRef:    "origin/main",
 			BaseCommit: strings.Repeat("a", 40),

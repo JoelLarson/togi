@@ -548,8 +548,8 @@ func validateReportHeader(report Report, runID string) error {
 	if report.RunID != runID {
 		return fmt.Errorf("report run ID %q does not match ledger run ID %q", report.RunID, runID)
 	}
-	if strings.TrimSpace(report.RepoID) == "" {
-		return errors.New("report repository ID is required")
+	if !validRepositoryKey(report.RepoID) {
+		return errors.New("report repository ID must be a full lowercase hexadecimal Git or SHA-256 identity")
 	}
 	if report.StartedAt.IsZero() || report.FinishedAt.IsZero() {
 		return errors.New("report timestamps are required")
