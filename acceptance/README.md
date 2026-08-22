@@ -5,6 +5,7 @@ Start with the feature links below. Open the adjacent `_test.go` only when you
 need to see how application language maps to a driver action.
 
 <!-- feature-index:start -->
+- [Running the gauntlet](gauntlet/running_the_gauntlet.feature)
 <!-- feature-index:end -->
 
 Read **Running the gauntlet** first for the core report contract, then

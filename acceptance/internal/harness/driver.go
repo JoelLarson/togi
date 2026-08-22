@@ -289,18 +289,72 @@ type World struct {
 func NewWorld(factory DriverFactory, capabilities Capabilities) *World {
 	return &World{factory: factory, capabilities: capabilities}
 }
-func (w *World) Before(context.Context, *godog.Scenario) (context.Context, error) {
-	return nil, errors.New("world setup is not implemented")
+func (w *World) Before(ctx context.Context, _ *godog.Scenario) (context.Context, error) {
+	if w.factory == nil {
+		return ctx, errors.New("scenario driver factory is required")
+	}
+	environment, err := NewEnvironment()
+	if err != nil {
+		return ctx, err
+	}
+	if err := environment.Activate(); err != nil {
+		_ = environment.Close()
+		return ctx, err
+	}
+	w.environment = environment
+	w.repository = nil
+	w.lastRun = RunObservation{}
+	w.lastCommand = CommandObservation{}
+
+	if w.capabilities&NeedsGauntlet != 0 {
+		w.gauntlet, err = w.factory.NewGauntlet(environment)
+	}
+	if err == nil && w.capabilities&NeedsHistory != 0 {
+		w.history, err = w.factory.NewHistory(environment)
+	}
+	if err == nil && w.capabilities&NeedsWiki != 0 {
+		w.wiki, err = w.factory.NewWiki(environment)
+	}
+	if err != nil {
+		_, cleanupErr := w.After(ctx, nil, err)
+		return ctx, errors.Join(err, cleanupErr)
+	}
+	return ctx, nil
 }
-func (w *World) After(context.Context, *godog.Scenario, error) (context.Context, error) {
-	return nil, errors.New("world cleanup is not implemented")
+func (w *World) After(ctx context.Context, _ *godog.Scenario, scenarioErr error) (context.Context, error) {
+	var result error
+	if w.wiki != nil {
+		result = errors.Join(result, w.wiki.Close())
+		w.wiki = nil
+	}
+	if w.history != nil {
+		result = errors.Join(result, w.history.Close())
+		w.history = nil
+	}
+	if w.gauntlet != nil {
+		result = errors.Join(result, w.gauntlet.Close())
+		w.gauntlet = nil
+	}
+	if w.environment != nil {
+		result = errors.Join(result, w.environment.Close())
+		w.environment = nil
+	}
+	if scenarioErr != nil {
+		result = errors.Join(scenarioErr, result)
+	}
+	return ctx, result
 }
-func (w *World) BindRepositories(*godog.ScenarioContext)    {}
-func (w *World) BindGates(*godog.ScenarioContext)           {}
-func (w *World) BindReports(*godog.ScenarioContext)         {}
-func (w *World) Environment() *Environment                  { return w.environment }
-func (w *World) Repository() *Repository                    { return w.repository }
-func (w *World) UseRepository(repository *Repository) error { w.repository = repository; return nil }
+func (w *World) BindRepositories(*godog.ScenarioContext) {}
+func (w *World) BindGates(*godog.ScenarioContext)        {}
+func (w *World) Environment() *Environment               { return w.environment }
+func (w *World) Repository() *Repository                 { return w.repository }
+func (w *World) UseRepository(repository *Repository) error {
+	if repository == nil || repository.Root == "" {
+		return errors.New("scenario repository is required")
+	}
+	w.repository = repository
+	return nil
+}
 func (w *World) Gauntlet() (GauntletDriver, error) {
 	if w.gauntlet == nil {
 		return nil, ErrUnsupportedCapability
@@ -319,10 +373,65 @@ func (w *World) Wiki() (WikiDriver, error) {
 	}
 	return w.wiki, nil
 }
-func (w *World) Run(context.Context, RunRequest) error       { return ErrUnsupportedCapability }
-func (w *World) Status(context.Context, StatusRequest) error { return ErrUnsupportedCapability }
-func (w *World) Show(context.Context, string) error          { return ErrUnsupportedCapability }
-func (w *World) Lint(context.Context) error                  { return ErrUnsupportedCapability }
-func (w *World) Eject(context.Context, string) error         { return ErrUnsupportedCapability }
-func (w *World) LastRun() RunObservation                     { return w.lastRun }
-func (w *World) LastCommand() CommandObservation             { return w.lastCommand }
+func (w *World) Run(ctx context.Context, request RunRequest) error {
+	driver, err := w.Gauntlet()
+	if err != nil {
+		return err
+	}
+	observation, err := driver.Run(ctx, request)
+	if err != nil {
+		return err
+	}
+	w.lastRun = observation
+	return nil
+}
+func (w *World) Status(ctx context.Context, request StatusRequest) error {
+	driver, err := w.History()
+	if err != nil {
+		return err
+	}
+	observation, err := driver.Status(ctx, request)
+	if err != nil {
+		return err
+	}
+	w.lastCommand = observation
+	return nil
+}
+func (w *World) Show(ctx context.Context, name string) error {
+	driver, err := w.Wiki()
+	if err != nil {
+		return err
+	}
+	observation, err := driver.Show(ctx, name)
+	if err != nil {
+		return err
+	}
+	w.lastCommand = observation
+	return nil
+}
+func (w *World) Lint(ctx context.Context) error {
+	driver, err := w.Wiki()
+	if err != nil {
+		return err
+	}
+	observation, err := driver.Lint(ctx)
+	if err != nil {
+		return err
+	}
+	w.lastCommand = observation
+	return nil
+}
+func (w *World) Eject(ctx context.Context, name string) error {
+	driver, err := w.Wiki()
+	if err != nil {
+		return err
+	}
+	observation, err := driver.Eject(ctx, name)
+	if err != nil {
+		return err
+	}
+	w.lastCommand = observation
+	return nil
+}
+func (w *World) LastRun() RunObservation         { return w.lastRun }
+func (w *World) LastCommand() CommandObservation { return w.lastCommand }
