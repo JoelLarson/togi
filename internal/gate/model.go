@@ -35,6 +35,14 @@ const (
 	Repo Scope = "repo"
 )
 
+// Location describes whether a gate finding identifies a point or structural entity.
+type Location string
+
+const (
+	PointLocation  Location = "point"
+	EntityLocation Location = "entity"
+)
+
 // Manifest is the language-independent definition of a gate.
 type Manifest struct {
 	Name        string
@@ -42,6 +50,7 @@ type Manifest struct {
 	CostClass   CostClass
 	FixPolicy   FixPolicy
 	Scope       Scope
+	Location    Location
 	Blocking    []finding.Severity
 	Timeout     time.Duration
 }

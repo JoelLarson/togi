@@ -33,12 +33,52 @@ func TestLoadAllReadsEmbeddedGoBindings(t *testing.T) {
 	}
 
 	complexity := gates[0]
+	if complexity.Manifest.Location != EntityLocation {
+		t.Fatalf("complexity location = %q, want %q", complexity.Manifest.Location, EntityLocation)
+	}
 	if got := complexity.Bindings["go"].Command; !slices.Equal(got, []string{"gocyclo", "-over", "{{.threshold}}", "."}) {
 		t.Fatalf("complexity command = %q", got)
 	}
 	lint := gates[1]
+	if lint.Manifest.Location != PointLocation {
+		t.Fatalf("lint location = %q, want %q", lint.Manifest.Location, PointLocation)
+	}
 	if got := lint.Bindings["go"].Version.Constraint; got != ">=2.12.2 <3.0.0" {
 		t.Fatalf("lint version constraint = %q", got)
+	}
+}
+
+func TestManifestLocation(t *testing.T) {
+	tests := []struct {
+		name     string
+		location string
+		want     Location
+		wantErr  string
+	}{
+		{name: "omitted", want: PointLocation},
+		{name: "point", location: `location = "point"`, want: PointLocation},
+		{name: "entity", location: `location = "entity"`, want: EntityLocation},
+		{name: "invalid", location: `location = "file"`, wantErr: "invalid location"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeGateFixture(t, root, "custom", validManifest("custom", test.location), validBinding(""))
+			got, err := (Loader{OverrideDir: root}).Load("custom")
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(strings.ToLower(err.Error()), test.wantErr) {
+					t.Fatalf("error = %v, want containing %q", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Manifest.Location != test.want {
+				t.Fatalf("location = %q, want %q", got.Manifest.Location, test.want)
+			}
+		})
 	}
 }
 

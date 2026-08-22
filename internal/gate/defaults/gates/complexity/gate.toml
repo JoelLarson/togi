@@ -3,5 +3,6 @@ description = "Function-level complexity limits"
 cost_class = "fast"
 fix_policy = "llm-fix"
 scope = "diff"
+location = "entity"
 blocking = ["error", "warning"]
 timeout = "60s"

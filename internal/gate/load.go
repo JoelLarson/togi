@@ -132,6 +132,7 @@ type manifestWire struct {
 	CostClass   string    `toml:"cost_class"`
 	FixPolicy   string    `toml:"fix_policy"`
 	Scope       string    `toml:"scope"`
+	Location    string    `toml:"location"`
 	Blocking    *[]string `toml:"blocking"`
 	Timeout     *string   `toml:"timeout"`
 }
@@ -240,6 +241,15 @@ func (wire manifestWire) toManifest(requestedName string) (Manifest, error) {
 	default:
 		return Manifest{}, fmt.Errorf("invalid scope %q", wire.Scope)
 	}
+	location := PointLocation
+	if wire.Location != "" {
+		location = Location(wire.Location)
+		switch location {
+		case PointLocation, EntityLocation:
+		default:
+			return Manifest{}, fmt.Errorf("invalid location %q", wire.Location)
+		}
+	}
 
 	blockingValues := []string{"error", "warning"}
 	if wire.Blocking != nil {
@@ -277,6 +287,7 @@ func (wire manifestWire) toManifest(requestedName string) (Manifest, error) {
 		CostClass:   costClass,
 		FixPolicy:   fixPolicy,
 		Scope:       scope,
+		Location:    location,
 		Blocking:    blocking,
 		Timeout:     timeout,
 	}, nil
