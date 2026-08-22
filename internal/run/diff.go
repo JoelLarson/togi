@@ -23,7 +23,6 @@ const (
 	gitStatusOutputLimit    = 1 << 20
 	gitPathsOutputLimit     = 8 << 20
 	gitDiffOutputLimit      = 32 << 20
-	maxSubmoduleDepth       = 32
 )
 
 var diffHunkHeader = regexp.MustCompile(`^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@[^\r\n]*\r?$`)
@@ -53,7 +52,7 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 	if err != nil {
 		return Diff{}, err
 	}
-	if err := checkRepositoryTreeClean(ctx, canonicalRoot); err != nil {
+	if err := checkRepositoryClean(ctx, canonicalRoot); err != nil {
 		return Diff{}, err
 	}
 
@@ -133,7 +132,7 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 			changedLineCount += lineRange.End - lineRange.Start + 1
 		}
 	}
-	if err := checkRepositoryTreeClean(ctx, canonicalRoot); err != nil {
+	if err := checkRepositoryClean(ctx, canonicalRoot); err != nil {
 		return Diff{}, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -161,32 +160,24 @@ type localAttributesPath struct {
 	commonDir string
 }
 
-func checkRepositoryTreeClean(ctx context.Context, root string) error {
-	return checkRepositoryClean(ctx, root, root, make(map[string]struct{}), 0)
-}
-
-func checkRepositoryClean(ctx context.Context, scopeRoot, root string, visited map[string]struct{}, depth int) error {
-	if depth > maxSubmoduleDepth {
-		return errors.New("submodule nesting exceeds the supported depth")
-	}
+func checkRepositoryClean(ctx context.Context, root string) error {
 	canonicalRoot, err := canonicalDiffRoot(root)
 	if err != nil {
-		return errors.New("submodule path cannot be resolved safely")
+		return err
 	}
-	if depth > 0 && !pathWithinRoot(scopeRoot, canonicalRoot) {
-		return errors.New("submodule path escapes the repository root")
-	}
-	if _, exists := visited[canonicalRoot]; exists {
-		return errors.New("submodule recursion cycle detected")
-	}
-	visited[canonicalRoot] = struct{}{}
-
 	localAttributes, err := resolveLocalAttributesPath(ctx, canonicalRoot)
 	if err != nil {
 		return err
 	}
 	if err := checkLocalAttributes(localAttributes); err != nil {
 		return err
+	}
+	gitlinks, err := trackedGitlinks(ctx, canonicalRoot)
+	if err != nil {
+		return err
+	}
+	if len(gitlinks) != 0 {
+		return errors.New("repositories containing submodules are unsupported")
 	}
 	if err := rejectGitConversionFilters(ctx, canonicalRoot); err != nil {
 		return err
@@ -201,29 +192,6 @@ func checkRepositoryClean(ctx context.Context, scopeRoot, root string, visited m
 	}
 	if err := rejectHiddenIndexEntries(ctx, canonicalRoot); err != nil {
 		return err
-	}
-	gitlinks, err := trackedGitlinks(ctx, canonicalRoot)
-	if err != nil {
-		return err
-	}
-	for _, path := range gitlinks {
-		child, initialized, err := initializedSubmoduleRoot(canonicalRoot, path.path)
-		if err != nil {
-			return err
-		}
-		if !initialized {
-			continue
-		}
-		childHead, err := resolveDiffCommit(ctx, child, "HEAD")
-		if err != nil {
-			return errors.New("initialized submodule HEAD is invalid")
-		}
-		if childHead != path.commit {
-			return errors.New("worktree must be clean before resolving diff scope")
-		}
-		if err := checkRepositoryClean(ctx, scopeRoot, child, visited, depth+1); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -438,23 +406,18 @@ func rejectHiddenIndexEntries(ctx context.Context, root string) error {
 	return nil
 }
 
-type trackedGitlink struct {
-	path   string
-	commit string
-}
-
-func trackedGitlinks(ctx context.Context, root string) ([]trackedGitlink, error) {
+func trackedGitlinks(ctx context.Context, root string) ([]string, error) {
 	output, err := diffGitOutput(ctx, root, gitPathsOutputLimit, "ls-files", "--stage", "-z")
 	if err != nil {
 		return nil, fmt.Errorf("inspect repository gitlinks: %w", err)
 	}
 	if len(output) == 0 {
-		return []trackedGitlink{}, nil
+		return []string{}, nil
 	}
 	if output[len(output)-1] != 0 {
 		return nil, errors.New("inspect repository gitlinks: Git returned malformed output")
 	}
-	var gitlinks []trackedGitlink
+	var gitlinks []string
 	seen := make(map[string]struct{})
 	for _, record := range bytes.Split(output[:len(output)-1], []byte{0}) {
 		metadata, pathBytes, found := bytes.Cut(record, []byte{'\t'})
@@ -473,54 +436,16 @@ func trackedGitlinks(ctx context.Context, root string) ([]trackedGitlink, error)
 		if string(fields[2]) != "0" {
 			return nil, errors.New("repository contains a conflicted submodule gitlink")
 		}
-		commit, err := parseObjectID(fields[1])
-		if err != nil {
+		if _, err := parseObjectID(fields[1]); err != nil {
 			return nil, errors.New("inspect repository gitlinks: Git returned malformed output")
 		}
 		if _, exists := seen[path]; exists {
 			return nil, errors.New("inspect repository gitlinks: Git returned a duplicate submodule path")
 		}
 		seen[path] = struct{}{}
-		gitlinks = append(gitlinks, trackedGitlink{path: path, commit: commit})
+		gitlinks = append(gitlinks, path)
 	}
 	return gitlinks, nil
-}
-
-func initializedSubmoduleRoot(root, path string) (string, bool, error) {
-	if err := validateDiffPath(root, path); err != nil {
-		return "", false, errors.New("Git returned an unsafe submodule path")
-	}
-	candidate := filepath.Join(root, filepath.FromSlash(path))
-	info, err := os.Lstat(candidate)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, errors.New("submodule path cannot be inspected")
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return "", false, errors.New("submodule path must be a directory without symlinks")
-	}
-	gitMarker := filepath.Join(candidate, ".git")
-	markerInfo, err := os.Lstat(gitMarker)
-	if errors.Is(err, os.ErrNotExist) {
-		entries, readErr := os.ReadDir(candidate)
-		if readErr != nil {
-			return "", false, errors.New("uninitialized submodule path cannot be inspected")
-		}
-		if len(entries) != 0 {
-			return "", false, errors.New("uninitialized submodule path must be absent or empty")
-		}
-		return "", false, nil
-	}
-	if err != nil || markerInfo.Mode()&os.ModeSymlink != 0 || (!markerInfo.IsDir() && !markerInfo.Mode().IsRegular()) {
-		return "", false, errors.New("submodule Git metadata path is unsafe")
-	}
-	canonical, err := filepath.EvalSymlinks(candidate)
-	if err != nil || !pathWithinRoot(root, canonical) {
-		return "", false, errors.New("submodule path escapes the repository root")
-	}
-	return canonical, true, nil
 }
 
 func parseChangedPaths(root string, output []byte) ([]changedPath, error) {

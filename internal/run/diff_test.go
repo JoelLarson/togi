@@ -508,8 +508,12 @@ func TestResolveDiffRejectsDirtyWorktreeWithoutEchoingStatus(t *testing.T) {
 			test.dirty(t, repo)
 
 			_, err := resolveDiff(context.Background(), repo, "main")
-			if err == nil || !strings.Contains(err.Error(), "clean") {
-				t.Fatalf("resolveDiff() error = %v, want clean-worktree diagnostic", err)
+			want := "clean"
+			if test.name == "submodule" {
+				want = "submodules are unsupported"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("resolveDiff() error = %v, want %q diagnostic", err, want)
 			}
 			if strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), ".go") {
 				t.Fatalf("resolveDiff() exposed raw status: %v", err)
@@ -518,7 +522,7 @@ func TestResolveDiffRejectsDirtyWorktreeWithoutEchoingStatus(t *testing.T) {
 	}
 }
 
-func TestResolveDiffRejectsDirtyNestedSubmodule(t *testing.T) {
+func TestResolveDiffRejectsNestedSubmoduleAtTopLevel(t *testing.T) {
 	nestedSource := newDiffTestRepo(t)
 	writeDiffTestFile(t, nestedSource, "deep.go", "clean\n")
 	commitDiffTestRepo(t, nestedSource, "nested base")
@@ -528,16 +532,14 @@ func TestResolveDiffRejectsDirtyNestedSubmodule(t *testing.T) {
 	parent := newDiffTestRepo(t)
 	gitDiffTest(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", subSource, "nested")
 	commitDiffTestRepo(t, parent, "add submodule")
-	gitDiffTest(t, filepath.Join(parent, "nested"), "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive")
-	writeDiffTestFile(t, filepath.Join(parent, "nested", "deep"), "deep.go", "dirty\n")
 
 	_, err := resolveDiff(context.Background(), parent, "main")
-	if err == nil || !strings.Contains(err.Error(), "clean") {
-		t.Fatalf("resolveDiff() error = %v, want clean-worktree diagnostic", err)
+	if err == nil || !strings.Contains(err.Error(), "submodules are unsupported") {
+		t.Fatalf("resolveDiff() error = %v, want unsupported-submodule diagnostic", err)
 	}
 }
 
-func TestResolveDiffAllowsUninitializedSubmodule(t *testing.T) {
+func TestResolveDiffRejectsUninitializedSubmodule(t *testing.T) {
 	source := newDiffTestRepo(t)
 	writeDiffTestFile(t, source, "nested.go", "clean\n")
 	commitDiffTestRepo(t, source, "submodule base")
@@ -546,16 +548,13 @@ func TestResolveDiffAllowsUninitializedSubmodule(t *testing.T) {
 	commitDiffTestRepo(t, parent, "add submodule")
 	gitDiffTest(t, parent, "submodule", "deinit", "-f", "--", "nested")
 
-	got, err := resolveDiff(context.Background(), parent, "main")
-	if err != nil {
-		t.Fatalf("resolveDiff() error = %v", err)
-	}
-	if got.ChangedFiles != 0 || got.ChangedLines != 0 {
-		t.Fatalf("resolveDiff() = %#v, want empty scope", got)
+	_, err := resolveDiff(context.Background(), parent, "main")
+	if err == nil || !strings.Contains(err.Error(), "submodules are unsupported") {
+		t.Fatalf("resolveDiff() error = %v, want unsupported-submodule diagnostic", err)
 	}
 }
 
-func TestResolveDiffAllowsCleanInitializedSubmodule(t *testing.T) {
+func TestResolveDiffRejectsCleanInitializedSubmodule(t *testing.T) {
 	source := newDiffTestRepo(t)
 	writeDiffTestFile(t, source, "nested.go", "clean\n")
 	commitDiffTestRepo(t, source, "submodule base")
@@ -563,49 +562,9 @@ func TestResolveDiffAllowsCleanInitializedSubmodule(t *testing.T) {
 	gitDiffTest(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", source, "nested")
 	commitDiffTestRepo(t, parent, "add submodule")
 
-	got, err := resolveDiff(context.Background(), parent, "main")
-	if err != nil {
-		t.Fatalf("resolveDiff() error = %v", err)
-	}
-	if got.ChangedFiles != 0 || got.ChangedLines != 0 {
-		t.Fatalf("resolveDiff() = %#v, want empty scope", got)
-	}
-}
-
-func TestResolveDiffRejectsSubmoduleAtDifferentCommit(t *testing.T) {
-	source := newDiffTestRepo(t)
-	writeDiffTestFile(t, source, "nested.go", "first\n")
-	first := commitDiffTestRepo(t, source, "first")
-	writeDiffTestFile(t, source, "nested.go", "second\n")
-	commitDiffTestRepo(t, source, "second")
-	parent := newDiffTestRepo(t)
-	gitDiffTest(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", source, "nested")
-	commitDiffTestRepo(t, parent, "add submodule")
-	gitDiffTest(t, filepath.Join(parent, "nested"), "checkout", "--detach", first)
-
 	_, err := resolveDiff(context.Background(), parent, "main")
-	if err == nil || !strings.Contains(err.Error(), "clean") {
-		t.Fatalf("resolveDiff() error = %v, want clean-worktree diagnostic", err)
-	}
-}
-
-func TestResolveDiffRejectsSubmoduleSymlinkEscape(t *testing.T) {
-	source := newDiffTestRepo(t)
-	writeDiffTestFile(t, source, "nested.go", "clean\n")
-	commitDiffTestRepo(t, source, "submodule base")
-	parent := newDiffTestRepo(t)
-	gitDiffTest(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", source, "nested")
-	commitDiffTestRepo(t, parent, "add submodule")
-	if err := os.RemoveAll(filepath.Join(parent, "nested")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(source, filepath.Join(parent, "nested")); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := resolveDiff(context.Background(), parent, "main")
-	if err == nil || !strings.Contains(err.Error(), "submodule path") {
-		t.Fatalf("resolveDiff() error = %v, want unsafe submodule-path diagnostic", err)
+	if err == nil || !strings.Contains(err.Error(), "submodules are unsupported") {
+		t.Fatalf("resolveDiff() error = %v, want unsupported-submodule diagnostic", err)
 	}
 }
 

@@ -128,8 +128,8 @@ func TestResolveDiffRejectsSubmoduleConversionFiltersBeforeExecution(t *testing.
 			writeDiffTestFile(t, filepath.Join(parent, "nested"), "nested.go", "clean\n")
 
 			_, err := resolveDiff(context.Background(), parent, "main")
-			if err == nil || !strings.Contains(err.Error(), "Git conversion filters") {
-				t.Fatalf("resolveDiff() error = %v, want conversion-filter diagnostic", err)
+			if err == nil || !strings.Contains(err.Error(), "submodules are unsupported") {
+				t.Fatalf("resolveDiff() error = %v, want unsupported-submodule diagnostic", err)
 			}
 			if strings.Contains(err.Error(), "submodule-filter-secret") || strings.Contains(err.Error(), command) {
 				t.Fatalf("resolveDiff() exposed submodule conversion command: %v", err)
@@ -138,31 +138,6 @@ func TestResolveDiffRejectsSubmoduleConversionFiltersBeforeExecution(t *testing.
 				t.Fatalf("submodule conversion filter executed: %v", err)
 			}
 		})
-	}
-}
-
-func TestResolveDiffRejectsSubmoduleLocalAttributes(t *testing.T) {
-	parent := newDiffTestRepo(t)
-	source := newDiffTestRepo(t)
-	writeDiffTestFile(t, source, "nested.go", "clean\n")
-	commitDiffTestRepo(t, source, "submodule base")
-	gitDiffTest(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", source, "nested")
-	commitDiffTestRepo(t, parent, "add submodule")
-	submodule := filepath.Join(parent, "nested")
-	attributes := gitDiffTest(t, submodule, "rev-parse", "--git-path", "info/attributes")
-	if !filepath.IsAbs(attributes) {
-		attributes = filepath.Join(submodule, attributes)
-	}
-	if err := os.MkdirAll(filepath.Dir(attributes), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(attributes, []byte("*.go binary\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := resolveDiff(context.Background(), parent, "main")
-	if err == nil || !strings.Contains(err.Error(), "local Git attributes") {
-		t.Fatalf("resolveDiff() error = %v, want local-attributes diagnostic", err)
 	}
 }
 
