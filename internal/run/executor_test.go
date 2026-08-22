@@ -271,7 +271,7 @@ func TestExecuteNormalizesRegexAndAcceptsCleanSuccess(t *testing.T) {
 	}
 }
 
-func TestExecuteDiffScopeFiltersEnrichedFindingsBeforeGrouping(t *testing.T) {
+func TestExecuteGroupsBeforeEnrichThenFiltersDiffScope(t *testing.T) {
 	root := t.TempDir()
 	writeSource(t, root, "source.go", "package source\nvar same = 1\nvar same = 1\nvar same = 1\n")
 	raw := `{"Issues":[{"FromLinter":"check","Text":"same","Severity":"warning","Pos":{"Filename":"source.go","Line":2}},{"FromLinter":"check","Text":"same","Severity":"error","Pos":{"Filename":"source.go","Line":3}},{"FromLinter":"check","Text":"same","Severity":"info","Pos":{"Filename":"source.go","Line":4}}]}`
@@ -280,12 +280,11 @@ func TestExecuteDiffScopeFiltersEnrichedFindingsBeforeGrouping(t *testing.T) {
 		SuccessExitCodes: []int{0}, Normalizer: "golangci-json",
 		SeverityMap: map[string]finding.Severity{"warning": finding.Warning, "error": finding.Error, "info": finding.Info},
 	}
+	var enrichInput []finding.Finding
 	enrich := &recordingEnricher{mutate: func(in []finding.Finding) []finding.Finding {
-		in[0].EndLine = 6
-		in[1].Line = 8
-		in[1].EndLine = 8
-		in[2].Line = 2
-		in[2].Occurrences = []finding.Occurrence{{Line: 4, EndLine: 6}}
+		enrichInput = append([]finding.Finding(nil), in...)
+		in[0].EndLine = 2
+		in[0].Occurrences = []finding.Occurrence{{Line: 3, EndLine: 3}, {Line: 4, EndLine: 6}}
 		return in
 	}}
 	report := (Executor{Registry: normalizer.NewRegistry(), Enricher: enrich}).Execute(context.Background(), Request{
@@ -294,12 +293,19 @@ func TestExecuteDiffScopeFiltersEnrichedFindingsBeforeGrouping(t *testing.T) {
 		ChangedLines: finding.ChangedLines{"source.go": {{Start: 6, End: 6}}},
 	})
 
+	if len(enrichInput) != 1 {
+		t.Fatalf("enricher received %d findings, want the identical hits grouped into one", len(enrichInput))
+	}
+	if enrichInput[0].Severity != finding.Error || enrichInput[0].Line != 2 ||
+		!reflect.DeepEqual(enrichInput[0].Occurrences, []finding.Occurrence{{Line: 3}, {Line: 4}}) {
+		t.Fatalf("grouped enricher input = %#v", enrichInput[0])
+	}
 	if report.Status != GateFindings || len(report.Findings) != 1 {
 		t.Fatalf("report = %#v", report)
 	}
 	got := report.Findings[0]
-	if got.Severity != finding.Warning || got.Line != 2 || got.EndLine != 6 || !reflect.DeepEqual(got.Occurrences, []finding.Occurrence{{Line: 4, EndLine: 6}}) {
-		t.Fatalf("scoped grouped finding = %#v", got)
+	if got.Severity != finding.Error || got.Line != 4 || got.EndLine != 6 || len(got.Occurrences) != 0 {
+		t.Fatalf("scoped finding = %#v", got)
 	}
 	if !reflect.DeepEqual(enrich.contexts, []enricher.Context{{Root: root, Language: "go", Location: gate.EntityLocation}}) {
 		t.Fatalf("enricher contexts = %#v", enrich.contexts)

@@ -114,11 +114,15 @@ func (e Executor) finishExecution(ctx context.Context, req Request, report GateR
 	if findingExit && len(normalized) == 0 {
 		return errored(report, errors.New("finding exit produced no valid findings"))
 	}
+	grouped, err := finding.Group(normalized)
+	if err != nil {
+		return errored(report, errors.New("group findings: invalid normalized findings"))
+	}
 	enriched, err := e.Enricher.Enrich(ctx, enricher.Context{
 		Root:     req.Root,
 		Language: req.Binding.Language,
 		Location: executionLocation(req.Gate.Manifest.Location),
-	}, normalized)
+	}, grouped)
 	if err != nil {
 		return errored(report, errors.New("enrich findings: enrichment failed"))
 	}
@@ -128,7 +132,10 @@ func (e Executor) finishExecution(ctx context.Context, req Request, report GateR
 			return errored(report, errors.New("filter findings by scope: invalid changed-line scope"))
 		}
 	}
-	grouped, err := finding.Group(enriched)
+	// FilterTouched re-anchors a group's primary line to its first surviving
+	// occurrence, which can break canonical order; the terminal Group restores
+	// it and is identity-safe because fingerprints are line-independent.
+	grouped, err = finding.Group(enriched)
 	if err != nil {
 		return errored(report, errors.New("group findings: invalid enriched findings"))
 	}
