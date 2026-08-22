@@ -107,4 +107,7 @@ func TestPathsDerivedDirectories(t *testing.T) {
 	if got, want := p.GateOverrides(), filepath.Join(root, "config", "togi", "gates"); got != want {
 		t.Fatalf("GateOverrides = %q, want %q", got, want)
 	}
+	if got, want := p.Wiki(), filepath.Join(root, "config", "togi", "wiki"); got != want {
+		t.Fatalf("Wiki = %q, want %q", got, want)
+	}
 }

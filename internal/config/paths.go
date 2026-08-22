@@ -48,3 +48,8 @@ func (p Paths) RepoState(directory string) string {
 func (p Paths) GateOverrides() string {
 	return filepath.Join(p.Config, "gates")
 }
+
+// Wiki returns the directory containing user-supplied principle pages.
+func (p Paths) Wiki() string {
+	return filepath.Join(p.Config, "wiki")
+}
