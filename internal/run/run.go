@@ -162,8 +162,8 @@ func validateDiff(diff Diff) error {
 	if diff.Lines == nil {
 		return errors.New("diff changed lines are required")
 	}
-	if len(diff.Lines) > diff.ChangedFiles {
-		return errors.New("diff changed-line files exceed changed file count")
+	if len(diff.Lines) != diff.ChangedFiles {
+		return errors.New("diff changed-line files do not match changed file count")
 	}
 	if err := finding.ValidateChangedLines(diff.Lines); err != nil {
 		return fmt.Errorf("diff changed lines are invalid: %w", err)

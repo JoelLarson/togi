@@ -98,6 +98,10 @@ func TestValidateDiffRejectsUnverifiableScope(t *testing.T) {
 			diff.Lines = finding.ChangedLines{"first.go": {{Start: 1, End: 1}}, "second.go": {{Start: 3, End: 3}}}
 			diff.ChangedLines = 2
 		}},
+		{name: "too few files", mutate: func(diff *Diff) {
+			diff.ChangedFiles = 2
+			diff.Lines = finding.ChangedLines{"image.png": {}}
+		}},
 		{name: "false changed-line count", mutate: func(diff *Diff) {
 			diff.ChangedFiles = 1
 			diff.Lines = finding.ChangedLines{"first.go": {{Start: 1, End: 2}}}
