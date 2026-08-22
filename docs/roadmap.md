@@ -89,7 +89,8 @@ build returns unsupported before launching gates or accessing ledger state.
 
 - **Merge-base and changed-line sets** — `git merge-base HEAD <base>`, then
   per-file changed-line sets from the diff. Base branch from `--base`, falling
-  back to auto-detected `origin/HEAD`.
+  back to `origin/HEAD`, conventional remote-tracking `main` or `master`, then
+  local `main` or `master`, without network access.
 - **Go range enricher** — `go/ast`-based, filling phase 1's seam: given
   file:line, the enclosing declaration's extent.
 - **Touched-entity filter** — a finding is in scope if its range intersects

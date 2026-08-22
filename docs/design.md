@@ -10,8 +10,10 @@ decisions are in [docs/adr/](./adr/); Go-level build choices are in
 - **TOML** for gate manifests and bindings (Go-idiomatic, comments allowed).
 - **Markdown** for wiki principle pages, addenda, and assembled briefs.
 - **JSON** for machine artifacts: findings, `plan.json`, `report.json`.
-- **Base branch** for merge-base: explicit `--base`, falling back to
-  auto-detected `origin/HEAD`.
+- **Base branch** for merge-base: explicit `--base`, then auto-detected
+  `origin/HEAD`, conventional `origin/main` or `origin/master`, and finally
+  local `main` or `master`. Remote-tracking refs are local data; discovery
+  performs no network access.
 
 ## Phase 1 platform support
 

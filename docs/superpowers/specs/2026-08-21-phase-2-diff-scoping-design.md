@@ -33,11 +33,16 @@ The base ref resolves in this order:
 
 1. `togi run --base <ref>`
 2. the symbolic ref at `refs/remotes/origin/HEAD`
+3. `origin/main`
+4. `origin/master`
+5. local `main`
+6. local `master`
 
-If neither is available, the run fails and asks for `--base`; it does not
-guess conventional branch names or use `HEAD^`. The selected ref is verified
-as a commit before `git merge-base HEAD <base>` runs. Git commands receive
-argument arrays directly and never pass through a shell.
+If none is available, the run fails and asks for `--base`; it does not use
+`HEAD^`. Remote-tracking refs are read locally and discovery never contacts
+the network. The selected ref is verified as a commit before `git merge-base
+HEAD <base>` runs. Git commands receive argument arrays directly and never
+pass through a shell.
 
 Changed paths come from Git's NUL-delimited diff output so unusual filenames
 remain unambiguous. Zero-context diffs provide changed line ranges on the new
@@ -48,9 +53,9 @@ touched. Deleted files do not produce current-tree findings. Renamed files use
 their new path.
 
 Scope resolution happens before ledger creation or gate execution. A missing
-Git binary, dirty worktree, invalid base, absent `origin/HEAD`, unrelated
-history, cancellation, or malformed Git output returns a clear internal error
-without publishing a report.
+Git binary, dirty worktree, invalid base, absence of every automatic base
+candidate, unrelated history, cancellation, or malformed Git output returns a
+clear internal error without publishing a report.
 
 ## Finding Location Semantics
 
@@ -116,9 +121,10 @@ entire diff in the ledger.
 ## CLI Contract
 
 `togi run --base <ref>` becomes active. Without it, the run uses
-`origin/HEAD`. Existing `--gate`, `--report-only`, `--verbose`, and
-`--no-color` behavior remains unchanged. `togi config init` and
-`togi config show` are not added in this phase.
+`origin/HEAD`, conventional `origin/main` or `origin/master` refs, then local
+`main` or `master`. Existing `--gate`, `--report-only`, `--verbose`, and
+`--no-color` behavior remains unchanged. `togi config init` and `togi config
+show` are not added in this phase.
 
 ## Testing and Verification
 
@@ -126,8 +132,9 @@ All automated tests remain network-free and require no external gate tools.
 Git behavior is exercised with real repositories under `t.TempDir`; gate
 execution uses fixture commands.
 
-Coverage includes branch divergence, explicit and detected bases, missing
-`origin/HEAD`, unrelated histories, additions, pure deletions, renames,
+Coverage includes branch divergence, explicit and detected bases, remote-free
+local trunks, missing automatic candidates, unrelated histories, additions,
+pure deletions, renames,
 unusual paths, dirty staged/unstaged/untracked states, structural versus point
 findings, smallest-declaration selection, findings outside declarations,
 occurrence promotion, repo-scoped bypass, Go syntax failures, deterministic
