@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/cucumber/godog"
 	"github.com/joellarson/togi/internal/repoid"
@@ -74,6 +75,8 @@ type Environment struct {
 	closed    bool
 	path      string
 	resolves  atomic.Int64
+	clock     *scenarioClock
+	random    *scenarioRandom
 }
 
 type environmentValue struct {
@@ -97,6 +100,8 @@ func NewEnvironment() (*Environment, error) {
 		GOOS:       runtime.GOOS,
 		variables:  make(map[string]string),
 		path:       os.Getenv("PATH"),
+		clock:      newScenarioClock(),
+		random:     &scenarioRandom{},
 	}
 	for _, path := range []string{e.Home, e.ConfigRoot, e.StateRoot, e.CacheRoot, e.BinRoot} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
@@ -105,6 +110,11 @@ func NewEnvironment() (*Environment, error) {
 		}
 	}
 	return e, nil
+}
+
+func (e *Environment) resolveRepo(ctx context.Context, root string) (repoid.ID, error) {
+	e.resolves.Add(1)
+	return repoid.Resolve(ctx, root)
 }
 
 func (e *Environment) Setenv(key, value string) error {
@@ -186,12 +196,37 @@ func (e *Environment) Environ() []string {
 }
 
 func (e *Environment) RepoState(ctx context.Context, root string) (string, error) {
-	e.resolves.Add(1)
-	id, err := repoid.Resolve(ctx, root)
+	id, err := e.resolveRepo(ctx, root)
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(e.StateRoot, id.Directory), nil
+}
+
+type scenarioClock struct {
+	mu   sync.Mutex
+	next time.Time
+}
+
+func newScenarioClock() *scenarioClock {
+	return &scenarioClock{next: time.Date(2026, time.August, 22, 0, 0, 0, 0, time.UTC)}
+}
+
+func (c *scenarioClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.next
+	c.next = c.next.Add(time.Nanosecond)
+	return now
+}
+
+type scenarioRandom struct{ next atomic.Uint64 }
+
+func (r *scenarioRandom) Read(buffer []byte) (int, error) {
+	for index := range buffer {
+		buffer[index] = byte(r.next.Add(1))
+	}
+	return len(buffer), nil
 }
 
 func (e *Environment) RepoResolutions() int64 {
