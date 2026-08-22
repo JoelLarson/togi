@@ -1494,10 +1494,16 @@ func TestValidateReportRejectsMissingAndMalformedDiffMetadata(t *testing.T) {
 		{name: "unicode control base ref", mutate: func(report *Report) { report.Diff.BaseRef = "main\u0085branch" }},
 		{name: "missing base commit", mutate: func(report *Report) { report.Diff.BaseCommit = "" }},
 		{name: "malformed base commit", mutate: func(report *Report) { report.Diff.BaseCommit = strings.Repeat("a", 39) }},
+		{name: "base commit trailing newline", mutate: func(report *Report) { report.Diff.BaseCommit += "\n" }},
+		{name: "base commit surrounding whitespace", mutate: func(report *Report) { report.Diff.BaseCommit = " " + report.Diff.BaseCommit + " " }},
 		{name: "missing merge base", mutate: func(report *Report) { report.Diff.MergeBase = "" }},
 		{name: "malformed merge base", mutate: func(report *Report) { report.Diff.MergeBase = strings.ToUpper(report.Diff.MergeBase) }},
+		{name: "merge base trailing newline", mutate: func(report *Report) { report.Diff.MergeBase += "\n" }},
+		{name: "merge base surrounding whitespace", mutate: func(report *Report) { report.Diff.MergeBase = " " + report.Diff.MergeBase + " " }},
 		{name: "missing head", mutate: func(report *Report) { report.Diff.Head = "" }},
 		{name: "malformed head", mutate: func(report *Report) { report.Diff.Head = strings.Repeat("g", 40) }},
+		{name: "head trailing newline", mutate: func(report *Report) { report.Diff.Head += "\n" }},
+		{name: "head surrounding whitespace", mutate: func(report *Report) { report.Diff.Head = " " + report.Diff.Head + " " }},
 		{name: "mixed object ID lengths", mutate: func(report *Report) { report.Diff.Head = strings.Repeat("c", 64) }},
 		{name: "negative file count", mutate: func(report *Report) { report.Diff.ChangedFiles = -1 }},
 		{name: "negative line count", mutate: func(report *Report) { report.Diff.ChangedLines = -1 }},
@@ -1508,6 +1514,57 @@ func TestValidateReportRejectsMissingAndMalformedDiffMetadata(t *testing.T) {
 			test.mutate(&report)
 			if err := validateReport(report, report.RunID); err == nil {
 				t.Fatal("validateReport accepted invalid diff metadata")
+			}
+		})
+	}
+}
+
+func TestValidateDiffReportRejectsObjectIDWhitespaceAtMatchingLengths(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*DiffReport)
+	}{
+		{name: "trailing newline", mutate: func(diff *DiffReport) {
+			diff.BaseCommit += "\n"
+			diff.MergeBase += "\n"
+			diff.Head += "\n"
+		}},
+		{name: "surrounding whitespace", mutate: func(diff *DiffReport) {
+			diff.BaseCommit = " " + diff.BaseCommit + " "
+			diff.MergeBase = " " + diff.MergeBase + " "
+			diff.Head = " " + diff.Head + " "
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			report := completeReportFixture("20260821T120000.000000000Z-0000")
+			test.mutate(&report.Diff)
+			if err := validateReport(report, report.RunID); err == nil {
+				t.Fatal("validateReport accepted object ID whitespace")
+			}
+		})
+	}
+}
+
+func TestValidObjectIDStringRejectsDelimitedObjectIDs(t *testing.T) {
+	sha1 := strings.Repeat("a", 40)
+	sha256 := strings.Repeat("b", 64)
+	for _, test := range []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "SHA-1", value: sha1, want: true},
+		{name: "SHA-256", value: sha256, want: true},
+		{name: "base commit trailing newline", value: sha1 + "\n"},
+		{name: "merge base trailing newline", value: sha1 + "\n"},
+		{name: "head trailing newline", value: sha1 + "\n"},
+		{name: "base commit surrounding whitespace", value: " " + sha1 + " "},
+		{name: "merge base surrounding whitespace", value: " " + sha1 + " "},
+		{name: "head surrounding whitespace", value: " " + sha1 + " "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validObjectIDString(test.value); got != test.want {
+				t.Fatalf("validObjectIDString(%q) = %t, want %t", test.value, got, test.want)
 			}
 		})
 	}

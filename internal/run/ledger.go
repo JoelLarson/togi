@@ -587,7 +587,7 @@ func validateDiffReport(diff DiffReport) error {
 		{name: "head", value: diff.Head},
 	}
 	for _, objectID := range objectIDs {
-		if _, err := parseObjectID([]byte(objectID.value)); err != nil {
+		if !validObjectIDString(objectID.value) {
 			return fmt.Errorf("report diff %s is invalid", objectID.name)
 		}
 	}
@@ -601,6 +601,19 @@ func validateDiffReport(diff DiffReport) error {
 		return errors.New("report diff with no changed files cannot contain changed lines")
 	}
 	return nil
+}
+
+func validObjectIDString(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for index := range len(value) {
+		character := value[index]
+		if character < '0' || (character > '9' && character < 'a') || character > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateReportSummary(report Report, flattened []finding.Finding) error {
