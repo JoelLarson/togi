@@ -7,6 +7,7 @@ need to see how application language maps to a driver action.
 <!-- feature-index:start -->
 - [Running the gauntlet](gauntlet/running_the_gauntlet.feature)
 - [Judging a feature diff](gauntlet/judging_a_feature_diff.feature)
+- [Keeping run history](runledger/keeping_run_history.feature)
 <!-- feature-index:end -->
 
 Read **Running the gauntlet** first for the core report contract, then

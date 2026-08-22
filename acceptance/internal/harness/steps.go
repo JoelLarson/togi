@@ -36,3 +36,13 @@ func (w *World) BindReports(sc *godog.ScenarioContext) {
 		return nil
 	})
 }
+
+// BindHistory supplies the common status action used by history specifications.
+func (w *World) BindHistory(sc *godog.ScenarioContext) {
+	sc.Step(`^I inspect repository status$`, func(ctx context.Context) error {
+		if w.repository == nil {
+			return fmt.Errorf("scenario repository is required")
+		}
+		return w.Status(ctx, StatusRequest{Root: w.repository.Root, NoColor: true})
+	})
+}
