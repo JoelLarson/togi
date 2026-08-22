@@ -100,11 +100,15 @@ build returns unsupported before launching gates or accessing ledger state.
 - **Clean-worktree precondition** — staged, unstaged, and untracked changes
   stop the run before ledger creation or gate execution, keeping gate input
   aligned with the committed `HEAD` diff.
+- **Submodule limit** — any tracked gitlink is unsupported in Phase 2 and is
+  rejected before status, ledger creation, or gate execution. Recursive
+  submodule support is deferred.
 
 **Exit criteria:** on a branch with one small change, only findings touching
 that change are reported, and a structural finding on a touched function
 appears even though its reported line is unchanged; dirty worktrees are
-rejected without creating run state.
+rejected without creating run state, and repositories with initialized or
+uninitialized tracked submodules are rejected before status or run state.
 
 ---
 

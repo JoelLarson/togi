@@ -19,6 +19,11 @@ is created or gates execute. Staged, unstaged, and untracked files all cause a
 clear error. This protects pending work and ensures gates inspect the same
 committed tree used to compute diff scope.
 
+Any tracked Git submodule (gitlink) is unsupported in Phase 2, whether it is
+initialized or uninitialized, clean or dirty. Gitlinks are detected from the
+index and rejected before `git status`, ledger creation, or gate execution;
+recursive submodule scope and cleanliness handling is deferred.
+
 Phase 2 continues to inspect the caller's worktree in place and never writes
 to it. The isolated worktree lifecycle remains Phase 3 work.
 
@@ -126,7 +131,8 @@ Coverage includes branch divergence, explicit and detected bases, missing
 unusual paths, dirty staged/unstaged/untracked states, structural versus point
 findings, smallest-declaration selection, findings outside declarations,
 occurrence promotion, repo-scoped bypass, Go syntax failures, deterministic
-reports, and sibling-gate survival after enrichment failure.
+reports, sibling-gate survival after enrichment failure, and pre-status
+rejection of clean, dirty, initialized, and uninitialized gitlinks.
 
 Completion verification remains:
 
