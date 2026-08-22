@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/joellarson/togi/internal/config"
@@ -47,11 +48,23 @@ func validPublishedExitCode(code int) bool {
 	return code >= 1 && code <= 5
 }
 
-func main() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "resolve home directory: %v\n", err)
-		os.Exit(70)
+func mainEnvironment(getenv func(string) string) config.Environment {
+	if getenv == nil {
+		return config.Environment{}
 	}
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, config.Environment{Home: home, Getenv: os.Getenv}))
+	values := make(map[string]string, 3)
+	needsHome := false
+	for _, key := range []string{"XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"} {
+		values[key] = getenv(key)
+		needsHome = needsHome || !filepath.IsAbs(values[key])
+	}
+	home := ""
+	if needsHome {
+		home = getenv("HOME")
+	}
+	return config.Environment{Home: home, Getenv: func(key string) string { return values[key] }}
+}
+
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, mainEnvironment(os.Getenv)))
 }

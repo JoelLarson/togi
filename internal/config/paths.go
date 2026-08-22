@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/joellarson/togi/internal/repoid"
 )
@@ -71,10 +72,16 @@ func (p Paths) RunsDir(id repoid.ID) string {
 
 // RunDir returns one run ledger directory.
 func (p Paths) RunDir(id repoid.ID, runID string) string {
-	if p.IsZero() || id.IsZero() || runID == "" {
+	if p.IsZero() || id.IsZero() || !validPathComponent(runID) {
 		return ""
 	}
 	return filepath.Join(p.RunsDir(id), runID)
+}
+
+func validPathComponent(value string) bool {
+	return value != "" && value != "." && value != ".." &&
+		filepath.Clean(value) == value && !filepath.IsAbs(value) &&
+		!strings.ContainsAny(value, `/\:`)
 }
 
 // GateOverrides returns the directory containing user-supplied gate definitions.

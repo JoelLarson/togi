@@ -64,7 +64,7 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 		now = time.Now
 	}
 	startedAt := now().UTC()
-	ledger := Ledger{RepoState: prepared.repoState, RunsDir: prepared.runsDir, Now: func() time.Time { return startedAt }, Random: service.Random}
+	ledger := Ledger{RepoID: prepared.repository.Key(), RepoState: prepared.repoState, RunsDir: prepared.runsDir, Now: func() time.Time { return startedAt }, Random: service.Random}
 	active, err := ledger.Start()
 	if err != nil {
 		return Report{}, fmt.Errorf("start run ledger: %w", err)
@@ -284,7 +284,7 @@ func (service Service) Status(ctx context.Context, root string, noColor bool) (R
 	if err := validateExternalRepoState(repository.Root(), repoState); err != nil {
 		return Report{}, err
 	}
-	report, err := (Ledger{RepoState: repoState, RunsDir: service.Paths.RunsDir(repository)}).Latest()
+	report, err := (Ledger{RepoID: repository.Key(), RepoState: repoState, RunsDir: service.Paths.RunsDir(repository)}).Latest()
 	if err != nil {
 		return Report{}, fmt.Errorf("read latest report: %w", err)
 	}

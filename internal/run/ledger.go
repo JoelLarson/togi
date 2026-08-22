@@ -52,6 +52,7 @@ var rawComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
 // Ledger manages run artifacts below one repository's external state path.
 type Ledger struct {
+	RepoID    string
 	RepoState string
 	RunsDir   string
 	Keep      int
@@ -63,6 +64,7 @@ type Ledger struct {
 type RunLedger struct {
 	Dir      string
 	runID    string
+	repoID   string
 	lock     *stateLock
 	repoRoot *os.Root
 	runsRoot *os.Root
@@ -81,6 +83,9 @@ type directoryBoundary struct {
 
 // Start acquires the repository lock and creates a new run directory.
 func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
+	if !repoid.ValidKey(ledger.RepoID) {
+		return nil, errors.New("repository ID must be a full lowercase hexadecimal Git or SHA-256 identity")
+	}
 	if ledger.RepoState == "" {
 		return nil, errors.New("repository state path is required")
 	}
@@ -148,6 +153,7 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 	run := &RunLedger{
 		Dir:      runDir,
 		runID:    runID,
+		repoID:   ledger.RepoID,
 		lock:     lock,
 		repoRoot: repoRoot,
 		runsRoot: runsRoot,
@@ -424,6 +430,9 @@ func openExistingChildRoot(parent *os.Root, name string) (*os.Root, error) {
 
 // Latest returns the newest complete, parseable report in the ledger.
 func (ledger Ledger) Latest() (Report, error) {
+	if !repoid.ValidKey(ledger.RepoID) {
+		return Report{}, errors.New("repository ID must be a full lowercase hexadecimal Git or SHA-256 identity")
+	}
 	if ledger.RepoState == "" {
 		return Report{}, errors.New("repository state path is required")
 	}
@@ -459,10 +468,10 @@ func (ledger Ledger) Latest() (Report, error) {
 		return Report{}, err
 	}
 	defer func() { _ = runsRoot.Close() }()
-	return latestFromRunsRoot(runsRoot)
+	return latestFromRunsRoot(runsRoot, ledger.RepoID)
 }
 
-func latestFromRunsRoot(runsRoot *os.Root) (Report, error) {
+func latestFromRunsRoot(runsRoot *os.Root, repoID string) (Report, error) {
 	entries, err := fs.ReadDir(runsRoot.FS(), ".")
 	if err != nil {
 		return Report{}, fmt.Errorf("read runs directory: %w", err)
@@ -482,7 +491,7 @@ func latestFromRunsRoot(runsRoot *os.Root) (Report, error) {
 		if err != nil {
 			return Report{}, err
 		}
-		report, err := readCompleteReport(runRoot, runID)
+		report, err := readCompleteReport(runRoot, runID, repoID)
 		closeErr := runRoot.Close()
 		if err == nil && closeErr != nil {
 			return Report{}, closeErr
@@ -498,7 +507,7 @@ func latestFromRunsRoot(runsRoot *os.Root) (Report, error) {
 	return Report{}, ErrNoCompleteRuns
 }
 
-func readCompleteReport(runRoot *os.Root, runID string) (Report, error) {
+func readCompleteReport(runRoot *os.Root, runID, repoID string) (Report, error) {
 	const reportName = "report.json"
 	before, err := runRoot.Lstat(reportName)
 	if errors.Is(err, os.ErrNotExist) {
@@ -533,6 +542,9 @@ func readCompleteReport(runRoot *os.Root, runID string) (Report, error) {
 		return Report{}, errIncompleteRun
 	}
 	if err := validateReport(report, runID); err != nil {
+		return Report{}, errIncompleteRun
+	}
+	if report.RepoID != repoID {
 		return Report{}, errIncompleteRun
 	}
 	return report, nil
@@ -801,7 +813,7 @@ func (run *RunLedger) WriteReport(report Report) error {
 		return ErrClosed
 	}
 	var err error
-	report, err = prepareReport(report, run.runID)
+	report, err = prepareReport(report, run.runID, run.repoID)
 	if err != nil {
 		return err
 	}
@@ -838,7 +850,7 @@ func (run *RunLedger) WriteReport(report Report) error {
 	return nil
 }
 
-func prepareReport(report Report, runID string) (Report, error) {
+func prepareReport(report Report, runID, repoID string) (Report, error) {
 	if report.SchemaVersion != 2 {
 		return report, fmt.Errorf("unsupported report schema version %d", report.SchemaVersion)
 	}
@@ -849,6 +861,9 @@ func prepareReport(report Report, runID string) (Report, error) {
 	}
 	if err := validateReport(report, runID); err != nil {
 		return report, fmt.Errorf("validate report: %w", err)
+	}
+	if report.RepoID != repoID {
+		return report, fmt.Errorf("report repository ID %q does not match ledger repository ID %q", report.RepoID, repoID)
 	}
 	return report, nil
 }

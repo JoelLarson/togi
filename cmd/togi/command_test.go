@@ -195,3 +195,42 @@ func commandEnvironment(t *testing.T) config.Environment {
 	}
 	return config.Environment{Getenv: func(key string) string { return values[key] }}
 }
+
+func TestMainEnvironmentSkipsHomeForAbsoluteXDGPaths(t *testing.T) {
+	root := t.TempDir()
+	values := map[string]string{
+		"HOME":            "",
+		"XDG_CONFIG_HOME": root + "/config",
+		"XDG_STATE_HOME":  root + "/state",
+		"XDG_CACHE_HOME":  root + "/cache",
+	}
+	homeLookups := 0
+	environment := mainEnvironment(func(key string) string {
+		if key == "HOME" {
+			homeLookups++
+		}
+		return values[key]
+	})
+	if homeLookups != 0 {
+		t.Fatalf("HOME lookups = %d, want 0", homeLookups)
+	}
+	if _, err := config.Resolve(environment); err != nil {
+		t.Fatalf("resolve all-absolute XDG environment: %v", err)
+	}
+}
+
+func TestMainEnvironmentReportsMissingFallbackHome(t *testing.T) {
+	values := map[string]string{
+		"XDG_CONFIG_HOME": "",
+		"XDG_STATE_HOME":  "/state",
+		"XDG_CACHE_HOME":  "/cache",
+	}
+	environment := mainEnvironment(func(key string) string { return values[key] })
+	if _, err := config.Resolve(environment); err == nil || !strings.Contains(err.Error(), "home directory") {
+		t.Fatalf("Resolve error = %v, want contextual home error", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if got := run([]string{"version"}, &stdout, &stderr, environment); got != 0 || stdout.String() != "togi dev\n" {
+		t.Fatalf("version status = %d stdout = %q stderr = %q", got, stdout.String(), stderr.String())
+	}
+}

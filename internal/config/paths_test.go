@@ -146,3 +146,24 @@ func TestPathsZeroValueIsUnusable(t *testing.T) {
 		}
 	}
 }
+
+func TestRunDirRejectsUnsafeComponents(t *testing.T) {
+	root := t.TempDir()
+	paths, err := Resolve(testEnvironment("", map[string]string{"XDG_CONFIG_HOME": filepath.Join(root, "config"), "XDG_STATE_HOME": filepath.Join(root, "state"), "XDG_CACHE_HOME": filepath.Join(root, "cache")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := repoid.New(strings.Repeat("a", 40), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runID := range []string{"", ".", "..", "../escape", "nested/run", `nested\run`, "/absolute", `C:\absolute`, `\\server\share`} {
+		if got := paths.RunDir(id, runID); got != "" {
+			t.Fatalf("RunDir(%q) = %q, want empty", runID, got)
+		}
+	}
+	valid := "20260821T151230.123456789Z-a3f1"
+	if got, want := paths.RunDir(id, valid), filepath.Join(paths.RunsDir(id), valid); got != want {
+		t.Fatalf("RunDir(%q) = %q, want %q", valid, got, want)
+	}
+}

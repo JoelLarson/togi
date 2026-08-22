@@ -634,7 +634,7 @@ func TestServicePersistsPassingRunBeforeReturningUnverified(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	persisted, err := (Ledger{RepoState: paths.RepoState(id), RunsDir: paths.RunsDir(id)}).Latest()
+	persisted, err := (Ledger{RepoID: id.Key(), RepoState: paths.RepoState(id), RunsDir: paths.RunsDir(id)}).Latest()
 	if err != nil {
 		t.Fatalf("Latest: %v", err)
 	}
