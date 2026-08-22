@@ -15,7 +15,7 @@ const errorSharingViolation syscall.Errno = 32
 func TestWindowsRootHandlesDenyRepoStateReplacement(t *testing.T) {
 	root := t.TempDir()
 	repoState := filepath.Join(root, "repo-state")
-	run, err := (Ledger{RepoState: repoState}).Start()
+	run, err := (testLedger(repoState)).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestWindowsRootHandlesDenyRepoStateReplacement(t *testing.T) {
 
 func TestWindowsLockHandleDeniesUnlink(t *testing.T) {
 	repoState := t.TempDir()
-	run, err := (Ledger{RepoState: repoState}).Start()
+	run, err := (testLedger(repoState)).Start()
 	if err != nil {
 		t.Fatal(err)
 	}

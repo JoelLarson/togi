@@ -9,13 +9,14 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/joellarson/togi/internal/config"
 	runpkg "github.com/joellarson/togi/internal/run"
 )
 
-func run(args []string, out, errOut io.Writer) int {
+func run(args []string, out, errOut io.Writer, environment config.Environment) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return executeCommand(ctx, args, errOut, newRootCommand(streams{out: out, err: errOut}))
+	return executeCommand(ctx, args, errOut, newRootCommand(streams{out: out, err: errOut}, environment))
 }
 
 func runWithService(args []string, out, errOut io.Writer, service commandService) int {
@@ -47,5 +48,10 @@ func validPublishedExitCode(code int) bool {
 }
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	home, err := os.UserHomeDir()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "resolve home directory: %v\n", err)
+		os.Exit(70)
+	}
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, config.Environment{Home: home, Getenv: os.Getenv}))
 }

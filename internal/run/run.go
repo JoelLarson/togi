@@ -64,7 +64,7 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 		now = time.Now
 	}
 	startedAt := now().UTC()
-	ledger := Ledger{RepoState: prepared.repoState, Now: func() time.Time { return startedAt }, Random: service.Random}
+	ledger := Ledger{RepoState: prepared.repoState, RunsDir: prepared.runsDir, Now: func() time.Time { return startedAt }, Random: service.Random}
 	active, err := ledger.Start()
 	if err != nil {
 		return Report{}, fmt.Errorf("start run ledger: %w", err)
@@ -82,7 +82,7 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 		return Report{}, err
 	}
 	gateReports := Collect(ctx, service.Executor, prepared.requests, min(runtime.NumCPU(), defaultMaximumWorkers))
-	report, err = buildReport(active.runID, prepared.repository.Key, startedAt, now().UTC(), prepared.diff, gateReports)
+	report, err = buildReport(active.runID, prepared.repository.Key(), startedAt, now().UTC(), prepared.diff, gateReports)
 	if err != nil {
 		return Report{}, err
 	}
@@ -203,6 +203,7 @@ func diffReport(diff Diff) DiffReport {
 type preparedRun struct {
 	repository repoid.ID
 	repoState  string
+	runsDir    string
 	diff       Diff
 	requests   []Request
 }
@@ -220,29 +221,26 @@ func (service Service) prepareRun(ctx context.Context, opts Options) (preparedRu
 	if err != nil {
 		return preparedRun{}, fmt.Errorf("resolve repository identity: %w", err)
 	}
-	if err := validateRepositoryID(repository); err != nil {
-		return preparedRun{}, fmt.Errorf("validate repository identity: %w", err)
+	if repository.IsZero() {
+		return preparedRun{}, errors.New("repository identity is required")
 	}
-	repoState := service.Paths.RepoState(repository.Directory)
-	if err := validateExternalRepoState(repository.Root, repoState); err != nil {
+	repoState := service.Paths.RepoState(repository)
+	runsDir := service.Paths.RunsDir(repository)
+	if err := validateExternalRepoState(repository.Root(), repoState); err != nil {
 		return preparedRun{}, err
 	}
-	diff, err := resolveDiff(ctx, repository.Root, opts.Base)
+	diff, err := resolveDiff(ctx, repository.Root(), opts.Base)
 	if err != nil {
 		return preparedRun{}, fmt.Errorf("resolve diff scope: %w", err)
 	}
 	if err := validateDiff(diff); err != nil {
 		return preparedRun{}, fmt.Errorf("validate diff scope: %w", err)
 	}
-	loader := service.Loader
-	if loader.OverrideDir == "" {
-		loader.OverrideDir = service.Paths.GateOverrides()
-	}
-	loaded, err := loader.LoadAll()
+	loaded, err := service.Loader.LoadAll()
 	if err != nil {
 		return preparedRun{}, fmt.Errorf("load gates: %w", err)
 	}
-	requests, err := selectRequests(loaded, opts.GateNames, repository.Root)
+	requests, err := selectRequests(loaded, opts.GateNames, repository.Root())
 	if err != nil {
 		return preparedRun{}, err
 	}
@@ -254,7 +252,7 @@ func (service Service) prepareRun(ctx context.Context, opts Options) (preparedRu
 			requests[index].ChangedLines = diff.Lines
 		}
 	}
-	return preparedRun{repository: repository, repoState: repoState, diff: diff, requests: requests}, nil
+	return preparedRun{repository: repository, repoState: repoState, runsDir: runsDir, diff: diff, requests: requests}, nil
 }
 
 // Status renders the newest complete report without loading or executing gates.
@@ -279,14 +277,14 @@ func (service Service) Status(ctx context.Context, root string, noColor bool) (R
 	if err != nil {
 		return Report{}, fmt.Errorf("resolve repository identity: %w", err)
 	}
-	if err := validateRepositoryID(repository); err != nil {
-		return Report{}, fmt.Errorf("validate repository identity: %w", err)
+	if repository.IsZero() {
+		return Report{}, errors.New("repository identity is required")
 	}
-	repoState := service.Paths.RepoState(repository.Directory)
-	if err := validateExternalRepoState(repository.Root, repoState); err != nil {
+	repoState := service.Paths.RepoState(repository)
+	if err := validateExternalRepoState(repository.Root(), repoState); err != nil {
 		return Report{}, err
 	}
-	report, err := (Ledger{RepoState: repoState}).Latest()
+	report, err := (Ledger{RepoState: repoState, RunsDir: service.Paths.RunsDir(repository)}).Latest()
 	if err != nil {
 		return Report{}, fmt.Errorf("read latest report: %w", err)
 	}
@@ -301,11 +299,8 @@ func (service Service) Status(ctx context.Context, root string, noColor bool) (R
 }
 
 func (service Service) validateRun() error {
-	if service.Paths.Config == "" || !filepath.IsAbs(service.Paths.Config) {
-		return errors.New("configuration root must be absolute")
-	}
-	if service.Paths.State == "" || !filepath.IsAbs(service.Paths.State) {
-		return errors.New("state root must be absolute")
+	if service.Paths.IsZero() {
+		return errors.New("storage paths are required")
 	}
 	if service.Loader.OverrideDir != "" && !filepath.IsAbs(service.Loader.OverrideDir) {
 		return errors.New("gate override root must be absolute")
@@ -320,35 +315,11 @@ func (service Service) validateRun() error {
 }
 
 func (service Service) validateStatus() error {
-	if service.Paths.State == "" || !filepath.IsAbs(service.Paths.State) {
-		return errors.New("state root must be absolute")
+	if service.Paths.IsZero() {
+		return errors.New("storage paths are required")
 	}
 	if isNilInterface(service.Stdout) {
 		return errors.New("report output is required")
-	}
-	return nil
-}
-
-func validateRepositoryID(repository repoid.ID) error {
-	if !validRepositoryKey(repository.Key) {
-		return errors.New("repository key must be a full lowercase hexadecimal Git or SHA-256 identity")
-	}
-	if repository.Directory != repository.Key {
-		return errors.New("repository state directory must equal the full repository key")
-	}
-	if !filepath.IsAbs(repository.Root) {
-		return errors.New("repository root must be absolute")
-	}
-	canonical, err := filepath.EvalSymlinks(repository.Root)
-	if err != nil {
-		return errors.New("repository root cannot be resolved")
-	}
-	if filepath.Clean(repository.Root) != canonical {
-		return errors.New("repository root must be canonical")
-	}
-	info, err := os.Stat(canonical)
-	if err != nil || !info.IsDir() {
-		return errors.New("repository root must be a directory")
 	}
 	return nil
 }
@@ -403,22 +374,6 @@ func resolveProspectiveDirectory(destination string) (string, error) {
 		}
 		current = parent
 	}
-}
-
-func validRepositoryKey(key string) bool {
-	if len(key) != 40 && len(key) != 64 {
-		return false
-	}
-	for _, character := range key {
-		if character >= '0' && character <= '9' {
-			continue
-		}
-		if character >= 'a' && character <= 'f' {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 func (service Service) checkPlatform() error {

@@ -9,13 +9,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/enricher"
 	runpkg "github.com/joellarson/togi/internal/run"
 )
 
 func TestVersionCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	cmd := newRootCommand(streams{out: &stdout, err: &stderr})
+	cmd := newRootCommand(streams{out: &stdout, err: &stderr}, commandEnvironment(t))
 	cmd.SetArgs([]string{"version"})
 
 	if err := cmd.Execute(); err != nil {
@@ -75,8 +76,7 @@ func TestRunCommandRejectsArguments(t *testing.T) {
 }
 
 func TestDefaultServiceUsesGoEnricher(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	service, err := defaultService(streams{out: io.Discard, err: io.Discard})
+	service, _, err := defaultServices(streams{out: io.Discard, err: io.Discard}, commandEnvironment(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestMainRunMapsTypedAndInternalErrors(t *testing.T) {
 
 func TestVersionCommandRejectsArguments(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	cmd := newRootCommand(streams{out: &stdout, err: &stderr})
+	cmd := newRootCommand(streams{out: &stdout, err: &stderr}, commandEnvironment(t))
 	cmd.SetArgs([]string{"version", "extra"})
 
 	if err := cmd.Execute(); err == nil {
@@ -158,10 +158,40 @@ func TestVersionCommandRejectsArguments(t *testing.T) {
 func TestRunReportsCommandErrors(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
-	if got := run([]string{"unknown"}, &stdout, &stderr); got == 0 {
+	if got := run([]string{"unknown"}, &stdout, &stderr, commandEnvironment(t)); got == 0 {
 		t.Fatal("run status = 0, want nonzero")
 	}
 	if !strings.Contains(stderr.String(), "unknown command") {
 		t.Fatalf("stderr = %q, want unknown-command diagnostic", stderr.String())
 	}
+}
+
+func TestRootCommandResolvesStorageOnce(t *testing.T) {
+	lookups := make(map[string]int)
+	root := t.TempDir()
+	environment := config.Environment{Getenv: func(key string) string {
+		lookups[key]++
+		return map[string]string{
+			"XDG_CONFIG_HOME": root + "/config",
+			"XDG_STATE_HOME":  root + "/state",
+			"XDG_CACHE_HOME":  root + "/cache",
+		}[key]
+	}}
+	_ = newRootCommand(streams{out: io.Discard, err: io.Discard}, environment)
+	for _, key := range []string{"XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"} {
+		if lookups[key] != 1 {
+			t.Fatalf("%s lookups = %d, want 1", key, lookups[key])
+		}
+	}
+}
+
+func commandEnvironment(t *testing.T) config.Environment {
+	t.Helper()
+	root := t.TempDir()
+	values := map[string]string{
+		"XDG_CONFIG_HOME": root + "/config",
+		"XDG_STATE_HOME":  root + "/state",
+		"XDG_CACHE_HOME":  root + "/cache",
+	}
+	return config.Environment{Getenv: func(key string) string { return values[key] }}
 }

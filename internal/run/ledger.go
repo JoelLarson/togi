@@ -20,6 +20,7 @@ import (
 	"unicode"
 
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/repoid"
 )
 
 var (
@@ -52,6 +53,7 @@ var rawComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 // Ledger manages run artifacts below one repository's external state path.
 type Ledger struct {
 	RepoState string
+	RunsDir   string
 	Keep      int
 	Now       func() time.Time
 	Random    io.Reader
@@ -82,6 +84,13 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 	if ledger.RepoState == "" {
 		return nil, errors.New("repository state path is required")
 	}
+	if ledger.RunsDir == "" {
+		return nil, errors.New("runs directory path is required")
+	}
+	runsName, err := ledger.runsName()
+	if err != nil {
+		return nil, err
+	}
 	if err := ensureLockPlatform(); err != nil {
 		return nil, err
 	}
@@ -93,12 +102,11 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("open repository state root: %w", err)
 	}
-	runsDir := filepath.Join(ledger.RepoState, "runs")
-	runsDirectory, err := ensureChildDirectoryAt(repoRoot, "runs", runsDir)
+	runsDirectory, err := ensureChildDirectoryAt(repoRoot, runsName, ledger.RunsDir)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("prepare runs directory: %w", err), repoRoot.Close())
 	}
-	runsRoot, err := openChildBoundaryRoot(repoRoot, "runs", runsDirectory)
+	runsRoot, err := openChildBoundaryRoot(repoRoot, runsName, runsDirectory)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("open runs root: %w", err), repoRoot.Close())
 	}
@@ -119,7 +127,7 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 	if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
 		return nil, errors.Join(err, lock.release())
 	}
-	runDir := filepath.Join(runsDir, runID)
+	runDir := filepath.Join(ledger.RunsDir, runID)
 	runRoot, err := createChildRoot(runsRoot, runID)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
@@ -419,6 +427,13 @@ func (ledger Ledger) Latest() (Report, error) {
 	if ledger.RepoState == "" {
 		return Report{}, errors.New("repository state path is required")
 	}
+	if ledger.RunsDir == "" {
+		return Report{}, errors.New("runs directory path is required")
+	}
+	runsName, err := ledger.runsName()
+	if err != nil {
+		return Report{}, err
+	}
 	repoDirectory, err := existingDirectory(ledger.RepoState)
 	if errors.Is(err, os.ErrNotExist) {
 		return Report{}, ErrNoCompleteRuns
@@ -430,8 +445,7 @@ func (ledger Ledger) Latest() (Report, error) {
 		return Report{}, err
 	}
 	defer func() { _ = repoRoot.Close() }()
-	runsDir := filepath.Join(ledger.RepoState, "runs")
-	runsDirectory, err := existingChildDirectoryAt(repoRoot, "runs", runsDir)
+	runsDirectory, err := existingChildDirectoryAt(repoRoot, runsName, ledger.RunsDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return Report{}, ErrNoCompleteRuns
 	} else if err != nil {
@@ -440,7 +454,7 @@ func (ledger Ledger) Latest() (Report, error) {
 	if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
 		return Report{}, err
 	}
-	runsRoot, err := openChildBoundaryRoot(repoRoot, "runs", runsDirectory)
+	runsRoot, err := openChildBoundaryRoot(repoRoot, runsName, runsDirectory)
 	if err != nil {
 		return Report{}, err
 	}
@@ -548,7 +562,7 @@ func validateReportHeader(report Report, runID string) error {
 	if report.RunID != runID {
 		return fmt.Errorf("report run ID %q does not match ledger run ID %q", report.RunID, runID)
 	}
-	if !validRepositoryKey(report.RepoID) {
+	if !repoid.ValidKey(report.RepoID) {
 		return errors.New("report repository ID must be a full lowercase hexadecimal Git or SHA-256 identity")
 	}
 	if report.StartedAt.IsZero() || report.FinishedAt.IsZero() {
@@ -567,6 +581,15 @@ func validateReportHeader(report Report, runID string) error {
 		return errors.New("report findings array is required")
 	}
 	return validateDiffReport(report.Diff)
+}
+
+func (ledger Ledger) runsName() (string, error) {
+	repoState := filepath.Clean(ledger.RepoState)
+	runsDir := filepath.Clean(ledger.RunsDir)
+	if filepath.Dir(runsDir) != repoState {
+		return "", errors.New("runs directory must be a direct child of repository state")
+	}
+	return filepath.Base(runsDir), nil
 }
 
 func validateDiffReport(diff DiffReport) error {

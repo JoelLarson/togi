@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/enricher"
@@ -47,54 +46,34 @@ func (service failingService) Show(string) error  { return service.err }
 func (service failingService) Lint() error        { return service.err }
 func (service failingService) Eject(string) error { return service.err }
 
-func newRootCommand(s streams) *cobra.Command {
-	// The two services resolve independently so that a failure reaching the
-	// run state does not also disable the wiki, or the reverse.
-	pages := defaultWikiService(s)
-	service, err := defaultService(s)
+func newRootCommand(s streams, environment config.Environment) *cobra.Command {
+	service, pages, err := defaultServices(s, environment)
 	if err != nil {
-		return newRootCommandWithServices(s, failingService{err: err}, pages)
+		failure := failingService{err: err}
+		return newRootCommandWithServices(s, failure, failure)
 	}
 	return newRootCommandWithServices(s, service, pages)
 }
 
-// defaultWikiService resolves the wiki loaders from XDG paths. Path
-// resolution is pure, so a failure here means the home directory is
-// unusable; the wiki commands then report that rather than the root command
-// refusing to build.
-func defaultWikiService(s streams) wikiService {
-	home, err := os.UserHomeDir()
+func defaultServices(s streams, environment config.Environment) (runpkg.Service, wikiService, error) {
+	paths, err := config.Resolve(environment)
 	if err != nil {
-		return failingService{err: fmt.Errorf("resolve home directory: %w", err)}
+		return runpkg.Service{}, nil, fmt.Errorf("resolve storage paths: %w", err)
 	}
-	paths, err := config.ResolvePaths(home)
-	if err != nil {
-		return failingService{err: fmt.Errorf("resolve storage paths: %w", err)}
-	}
-	return wiki.Service{
+	pages := wiki.Service{
 		Pages:  wiki.Loader{OverrideDir: paths.Wiki()},
 		Gates:  gate.Loader{OverrideDir: paths.GateOverrides()},
 		Stdout: s.out,
 		Stderr: s.err,
 	}
-}
-
-func defaultService(s streams) (runpkg.Service, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return runpkg.Service{}, fmt.Errorf("resolve home directory: %w", err)
-	}
-	paths, err := config.ResolvePaths(home)
-	if err != nil {
-		return runpkg.Service{}, fmt.Errorf("resolve storage paths: %w", err)
-	}
-	return runpkg.Service{
+	service := runpkg.Service{
 		Paths:      paths,
 		Loader:     gate.Loader{OverrideDir: paths.GateOverrides()},
 		Executor:   runpkg.Executor{Enrichers: enricher.NewRegistry()},
 		Stdout:     s.out,
 		VerboseOut: s.err,
-	}, nil
+	}
+	return service, pages, nil
 }
 
 // newRootCommandWithService is the run/status test seam. Its wiki service is

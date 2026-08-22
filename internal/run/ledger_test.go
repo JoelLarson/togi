@@ -21,12 +21,16 @@ import (
 
 var fixedTime = time.Date(2026, time.August, 21, 15, 12, 30, 123456789, time.UTC)
 
+func testLedger(repoState string) Ledger {
+	return Ledger{RepoState: repoState, RunsDir: filepath.Join(repoState, "runs")}
+}
+
 func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
 	repoState := filepath.Join(t.TempDir(), "external", "repo-state")
 	ledger := Ledger{
-		RepoState: repoState,
-		Now:       func() time.Time { return fixedTime },
-		Random:    bytes.NewReader([]byte{0xa3, 0xf1}),
+		RepoState: repoState, RunsDir: filepath.Join(repoState, "runs"),
+		Now:    func() time.Time { return fixedTime },
+		Random: bytes.NewReader([]byte{0xa3, 0xf1}),
 	}
 
 	run, err := ledger.Start()
@@ -83,6 +87,22 @@ func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
 	}
 }
 
+func TestLedgerUsesExplicitRunsDirectory(t *testing.T) {
+	repoState := filepath.Join(t.TempDir(), "repo-state")
+	runsDir := filepath.Join(repoState, "custom-runs")
+	run, err := (Ledger{RepoState: repoState, RunsDir: runsDir}).Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = run.Close() }()
+	if filepath.Dir(run.Dir) != runsDir {
+		t.Fatalf("run directory = %q, want child of %q", run.Dir, runsDir)
+	}
+	if _, err := os.Stat(filepath.Join(repoState, "runs")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ledger created implicit runs directory: %v", err)
+	}
+}
+
 func TestLedgerStartRejectsSymlinkedRepoState(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows replacement safety is covered by sharing-violation tests")
@@ -104,10 +124,10 @@ func TestLedgerStartRejectsSymlinkedRepoState(t *testing.T) {
 	}
 
 	run, err := (Ledger{
-		RepoState: repoState,
-		Keep:      1,
-		Now:       func() time.Time { return fixedTime },
-		Random:    bytes.NewReader([]byte{0xa3, 0xf1}),
+		RepoState: repoState, RunsDir: filepath.Join(repoState, "runs"),
+		Keep:   1,
+		Now:    func() time.Time { return fixedTime },
+		Random: bytes.NewReader([]byte{0xa3, 0xf1}),
 	}).Start()
 	if run != nil {
 		_ = run.Close()
@@ -147,10 +167,10 @@ func TestLedgerStartRejectsSymlinkedRunsDirectory(t *testing.T) {
 	}
 
 	run, err := (Ledger{
-		RepoState: repoState,
-		Keep:      1,
-		Now:       func() time.Time { return fixedTime },
-		Random:    bytes.NewReader([]byte{0xa3, 0xf1}),
+		RepoState: repoState, RunsDir: filepath.Join(repoState, "runs"),
+		Keep:   1,
+		Now:    func() time.Time { return fixedTime },
+		Random: bytes.NewReader([]byte{0xa3, 0xf1}),
 	}).Start()
 	if run != nil {
 		_ = run.Close()
@@ -180,7 +200,7 @@ func TestLedgerStartTightensExistingDirectoryPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run, err := (Ledger{RepoState: repoState}).Start()
+	run, err := (testLedger(repoState)).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +218,7 @@ func TestLedgerStartTightensExistingDirectoryPermissions(t *testing.T) {
 
 func TestLedgerRejectsConcurrentStart(t *testing.T) {
 	repoState := t.TempDir()
-	first, err := (Ledger{RepoState: repoState, Now: func() time.Time { return fixedTime }}).Start()
+	first, err := (Ledger{RepoState: repoState, RunsDir: filepath.Join(repoState, "runs"), Now: func() time.Time { return fixedTime }}).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,8 +230,8 @@ func TestLedgerRejectsConcurrentStart(t *testing.T) {
 	}
 
 	second, err := (Ledger{
-		RepoState: repoState,
-		Now:       func() time.Time { return fixedTime.Add(time.Hour) },
+		RepoState: repoState, RunsDir: filepath.Join(repoState, "runs"),
+		Now: func() time.Time { return fixedTime.Add(time.Hour) },
 	}).Start()
 	if second != nil {
 		_ = second.Close()
@@ -306,9 +326,9 @@ func TestLedgerAcquiresUnlockedPersistentLockRegardlessOfRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	ledger := Ledger{
-		RepoState: repoState,
-		Now:       func() time.Time { return fixedTime },
-		Random:    bytes.NewReader([]byte{0xa3, 0xf1}),
+		RepoState: repoState, RunsDir: filepath.Join(repoState, "runs"),
+		Now:    func() time.Time { return fixedTime },
+		Random: bytes.NewReader([]byte{0xa3, 0xf1}),
 	}
 
 	run, err := ledger.Start()
@@ -347,7 +367,7 @@ func TestLedgerTightensPersistentLockPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run, err := (Ledger{RepoState: repoState}).Start()
+	run, err := (testLedger(repoState)).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +481,7 @@ func TestLedgerOverwritesStaleLockRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	run, err := (Ledger{RepoState: repoState}).Start()
+	run, err := (testLedger(repoState)).Start()
 	if err != nil {
 		t.Fatalf("Start with stale lock: %v", err)
 	}
@@ -479,7 +499,7 @@ func TestLedgerOverwritesStaleLockRecord(t *testing.T) {
 
 func TestLedgerLockRecordIdentifiesOwner(t *testing.T) {
 	repoState := t.TempDir()
-	run, err := (Ledger{RepoState: repoState, Now: func() time.Time { return fixedTime }}).Start()
+	run, err := (Ledger{RepoState: repoState, RunsDir: filepath.Join(repoState, "runs"), Now: func() time.Time { return fixedTime }}).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +554,7 @@ func TestLedgerRejectsUnsafeLockEntries(t *testing.T) {
 			repoState := t.TempDir()
 			lockPath := filepath.Join(repoState, "lock")
 			test.setup(t, lockPath)
-			run, err := (Ledger{RepoState: repoState}).Start()
+			run, err := (testLedger(repoState)).Start()
 			if run != nil {
 				_ = run.Close()
 			}
@@ -553,7 +573,7 @@ func TestClosePreservesReplacementLock(t *testing.T) {
 		t.Skip("Windows denies lock unlink while its handle is open")
 	}
 	repoState := t.TempDir()
-	run, err := (Ledger{RepoState: repoState}).Start()
+	run, err := (testLedger(repoState)).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -583,11 +603,11 @@ func TestClosePreservesReplacementLock(t *testing.T) {
 
 func TestLedgerReleasesLockWhenStartFails(t *testing.T) {
 	repoState := t.TempDir()
-	_, err := (Ledger{RepoState: repoState, Random: bytes.NewReader(nil)}).Start()
+	_, err := (Ledger{RepoState: repoState, RunsDir: filepath.Join(repoState, "runs"), Random: bytes.NewReader(nil)}).Start()
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("Start error = %v, want EOF", err)
 	}
-	run, err := (Ledger{RepoState: repoState}).Start()
+	run, err := (testLedger(repoState)).Start()
 	if err != nil {
 		t.Fatalf("lock remained held after failed Start: %v", err)
 	}
@@ -614,7 +634,7 @@ func TestLedgerConcurrentStartRaceHasOneOwner(t *testing.T) {
 		go func() {
 			defer group.Done()
 			<-start
-			run, err := (Ledger{RepoState: repoState}).Start()
+			run, err := (testLedger(repoState)).Start()
 			results <- result{run: run, err: err}
 		}()
 	}
@@ -657,7 +677,7 @@ func TestLedgerAdvisoryLockReleasesOnProcessExit(t *testing.T) {
 		t.Fatalf("crash helper: %v\n%s", err, output)
 	}
 
-	run, err := (Ledger{RepoState: repoState}).Start()
+	run, err := (testLedger(repoState)).Start()
 	if err != nil {
 		t.Fatalf("Start after lock owner process exited: %v", err)
 	}
@@ -670,7 +690,7 @@ func TestLedgerLockCrashHelper(t *testing.T) {
 	if os.Getenv("TOGI_LOCK_CRASH_HELPER") != "1" {
 		return
 	}
-	if _, err := (Ledger{RepoState: os.Getenv("TOGI_LOCK_CRASH_STATE")}).Start(); err != nil {
+	if _, err := (Ledger{RepoState: os.Getenv("TOGI_LOCK_CRASH_STATE"), RunsDir: filepath.Join(os.Getenv("TOGI_LOCK_CRASH_STATE"), "runs")}).Start(); err != nil {
 		t.Fatal(err)
 	}
 	os.Exit(0)
@@ -693,7 +713,7 @@ func TestLedgerPrunesBeforeCreatingRun(t *testing.T) {
 	}
 	linkedRun := createRunSymlink(t, runsDir, target)
 
-	ledger := Ledger{RepoState: repoState, Keep: 0, Now: func() time.Time { return fixedTime }, Random: bytes.NewReader([]byte{0xa3, 0xf1})}
+	ledger := Ledger{RepoState: repoState, RunsDir: filepath.Join(repoState, "runs"), Keep: 0, Now: func() time.Time { return fixedTime }, Random: bytes.NewReader([]byte{0xa3, 0xf1})}
 	run, err := ledger.Start()
 	if err != nil {
 		t.Fatal(err)
@@ -817,9 +837,9 @@ func TestLedgerReportsRunIDCollisionAndReleasesLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	ledger := Ledger{
-		RepoState: repoState,
-		Now:       func() time.Time { return fixedTime },
-		Random:    bytes.NewReader([]byte{0xa3, 0xf1}),
+		RepoState: repoState, RunsDir: filepath.Join(repoState, "runs"),
+		Now:    func() time.Time { return fixedTime },
+		Random: bytes.NewReader([]byte{0xa3, 0xf1}),
 	}
 
 	run, err := ledger.Start()
@@ -832,7 +852,7 @@ func TestLedgerReportsRunIDCollisionAndReleasesLock(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(repoState, "lock")); err != nil {
 		t.Fatalf("persistent lock missing after collision: %v", err)
 	}
-	next, err := (Ledger{RepoState: repoState}).Start()
+	next, err := (testLedger(repoState)).Start()
 	if err != nil {
 		t.Fatalf("lock remained held after collision: %v", err)
 	}
@@ -842,7 +862,7 @@ func TestLedgerReportsRunIDCollisionAndReleasesLock(t *testing.T) {
 }
 
 func TestWriteRawPreservesBytes(t *testing.T) {
-	run, err := (Ledger{RepoState: t.TempDir()}).Start()
+	run, err := (testLedger(t.TempDir())).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -882,7 +902,7 @@ func TestRunLedgerWritesRemainAnchoredAfterRepoStateReplacement(t *testing.T) {
 	}
 	root := t.TempDir()
 	repoState := filepath.Join(root, "repo-state")
-	run, err := (Ledger{RepoState: repoState}).Start()
+	run, err := (testLedger(repoState)).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -934,7 +954,7 @@ func TestRunLedgerWritesRemainAnchoredAfterRepoStateReplacement(t *testing.T) {
 }
 
 func TestWriteRawCapsOutputIncludingMarker(t *testing.T) {
-	run, err := (Ledger{RepoState: t.TempDir()}).Start()
+	run, err := (testLedger(t.TempDir())).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -974,7 +994,7 @@ func TestWriteRawCapsOutputIncludingMarker(t *testing.T) {
 }
 
 func TestWriteRawRejectsUnsafeNames(t *testing.T) {
-	run, err := (Ledger{RepoState: t.TempDir()}).Start()
+	run, err := (testLedger(t.TempDir())).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1004,7 +1024,7 @@ func TestWriteRawRejectsUnsafeNames(t *testing.T) {
 }
 
 func TestRunLedgerRejectsWritesAfterClose(t *testing.T) {
-	run, err := (Ledger{RepoState: t.TempDir()}).Start()
+	run, err := (testLedger(t.TempDir())).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1034,7 +1054,7 @@ func TestRunLedgerRejectsUninitializedValue(t *testing.T) {
 
 func TestRunLedgerRejectsCopiedValue(t *testing.T) {
 	repoState := t.TempDir()
-	run, err := (Ledger{RepoState: repoState}).Start()
+	run, err := (testLedger(repoState)).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1059,7 +1079,7 @@ func TestRunLedgerRejectsCopiedValue(t *testing.T) {
 	if err := copied.Close(); !errors.Is(err, ErrUninitialized) {
 		t.Errorf("Close on copied value = %v, want ErrUninitialized", err)
 	}
-	if next, err := (Ledger{RepoState: repoState}).Start(); !errors.Is(err, ErrLocked) {
+	if next, err := (testLedger(repoState)).Start(); !errors.Is(err, ErrLocked) {
 		if next != nil {
 			_ = next.Close()
 		}
@@ -1069,7 +1089,7 @@ func TestRunLedgerRejectsCopiedValue(t *testing.T) {
 
 func TestZeroRunLedgerCannotReleaseProcessClaim(t *testing.T) {
 	repoState := t.TempDir()
-	run, err := (Ledger{RepoState: repoState}).Start()
+	run, err := (testLedger(repoState)).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1078,7 +1098,7 @@ func TestZeroRunLedgerCannotReleaseProcessClaim(t *testing.T) {
 	if err := zero.Close(); !errors.Is(err, ErrUninitialized) {
 		t.Fatalf("zero Close = %v, want ErrUninitialized", err)
 	}
-	if next, err := (Ledger{RepoState: repoState}).Start(); !errors.Is(err, ErrLocked) {
+	if next, err := (testLedger(repoState)).Start(); !errors.Is(err, ErrLocked) {
 		if next != nil {
 			_ = next.Close()
 		}
@@ -1147,7 +1167,7 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 		}
 	}
 
-	got, err := (Ledger{RepoState: repoState}).Latest()
+	got, err := (testLedger(repoState)).Latest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1167,7 +1187,7 @@ func TestLatestSortsSameSecondRunsByNanoseconds(t *testing.T) {
 	writeReportFixture(t, runsDir, newer)
 	writeReportFixture(t, runsDir, older)
 
-	got, err := (Ledger{RepoState: repoState}).Latest()
+	got, err := (testLedger(repoState)).Latest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1236,7 +1256,7 @@ func TestLatestRejectsSymlinkedRepoState(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	if _, err := (Ledger{RepoState: repoState}).Latest(); err == nil {
+	if _, err := (testLedger(repoState)).Latest(); err == nil {
 		t.Fatal("Latest succeeded through a symlinked repository state directory")
 	}
 	after, err := os.ReadFile(reportPath)
@@ -1272,7 +1292,7 @@ func TestLatestRejectsSymlinkedRunsDirectory(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	if _, err := (Ledger{RepoState: repoState}).Latest(); err == nil {
+	if _, err := (testLedger(repoState)).Latest(); err == nil {
 		t.Fatal("Latest succeeded through a symlinked runs directory")
 	}
 	after, err := os.ReadFile(reportPath)
@@ -1297,7 +1317,7 @@ func TestLatestTightensExistingDirectoryPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := (Ledger{RepoState: repoState}).Latest(); !errors.Is(err, ErrNoCompleteRuns) {
+	if _, err := (testLedger(repoState)).Latest(); !errors.Is(err, ErrNoCompleteRuns) {
 		t.Fatalf("Latest error = %v, want ErrNoCompleteRuns", err)
 	}
 	for _, path := range []string{repoState, runsDir} {
@@ -1313,13 +1333,13 @@ func TestLatestTightensExistingDirectoryPermissions(t *testing.T) {
 
 func TestLatestReturnsSentinelWithoutCompleteRuns(t *testing.T) {
 	repoState := t.TempDir()
-	if _, err := (Ledger{RepoState: repoState}).Latest(); !errors.Is(err, ErrNoCompleteRuns) {
+	if _, err := (testLedger(repoState)).Latest(); !errors.Is(err, ErrNoCompleteRuns) {
 		t.Fatalf("Latest error = %v, want ErrNoCompleteRuns", err)
 	}
 }
 
 func TestWriteReportFillsRunIDAndRejectsDuplicate(t *testing.T) {
-	run, err := (Ledger{RepoState: t.TempDir()}).Start()
+	run, err := (testLedger(t.TempDir())).Start()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1457,7 +1477,7 @@ func TestWriteReportRejectsInvalidReportsWithoutArtifacts(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			run, err := (Ledger{RepoState: t.TempDir()}).Start()
+			run, err := (testLedger(t.TempDir())).Start()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1607,7 +1627,7 @@ func TestLatestSkipsSchemaOneReports(t *testing.T) {
 	writeReportFixture(t, runsDir, older)
 	writeReportFixture(t, runsDir, newer)
 
-	got, err := (Ledger{RepoState: repoState}).Latest()
+	got, err := (testLedger(repoState)).Latest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1621,7 +1641,7 @@ func TestLatestSkipsSchemaOneReports(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeReportFixture(t, onlyLegacyRuns, newer)
-	if _, err := (Ledger{RepoState: onlyLegacyState}).Latest(); !errors.Is(err, ErrNoCompleteRuns) {
+	if _, err := (testLedger(onlyLegacyState)).Latest(); !errors.Is(err, ErrNoCompleteRuns) {
 		t.Fatalf("Latest error = %v, want ErrNoCompleteRuns", err)
 	}
 }
@@ -1645,7 +1665,7 @@ func TestWriteReportRejectsTamperedCompleteReports(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			run, err := (Ledger{RepoState: t.TempDir()}).Start()
+			run, err := (testLedger(t.TempDir())).Start()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1673,7 +1693,7 @@ func TestLatestSkipsSemanticallyInvalidNewestReport(t *testing.T) {
 	newer.Counts.Warnings = 1
 	writeReportFixture(t, runsDir, older)
 	writeReportFixture(t, runsDir, newer)
-	got, err := (Ledger{RepoState: repoState}).Latest()
+	got, err := (testLedger(repoState)).Latest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1687,13 +1707,13 @@ func TestLatestSkipsSemanticallyInvalidNewestReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeReportFixture(t, onlyInvalidRuns, newer)
-	if _, err := (Ledger{RepoState: onlyInvalidState}).Latest(); !errors.Is(err, ErrNoCompleteRuns) {
+	if _, err := (testLedger(onlyInvalidState)).Latest(); !errors.Is(err, ErrNoCompleteRuns) {
 		t.Fatalf("Latest error = %v, want ErrNoCompleteRuns", err)
 	}
 }
 
 func TestWriteReportCleansTemporaryFileAfterEncodingError(t *testing.T) {
-	run, err := (Ledger{RepoState: t.TempDir()}).Start()
+	run, err := (testLedger(t.TempDir())).Start()
 	if err != nil {
 		t.Fatal(err)
 	}

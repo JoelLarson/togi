@@ -1,55 +1,94 @@
 package config
 
 import (
+	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
+
+	"github.com/joellarson/togi/internal/repoid"
 )
+
+// Environment supplies the process values needed to resolve XDG paths.
+type Environment struct {
+	Home   string
+	Getenv func(string) string
+}
 
 // Paths names togi's external configuration, durable state, and cache roots.
 type Paths struct {
-	Config string
-	State  string
-	Cache  string
+	config string
+	state  string
+	cache  string
 }
 
-// ResolvePaths computes togi's XDG storage paths without creating directories.
-func ResolvePaths(home string) (Paths, error) {
-	config, configFallback := xdgPath("XDG_CONFIG_HOME", ".config", home)
-	state, stateFallback := xdgPath("XDG_STATE_HOME", filepath.Join(".local", "state"), home)
-	cache, cacheFallback := xdgPath("XDG_CACHE_HOME", ".cache", home)
-	if (configFallback || stateFallback || cacheFallback) && !filepath.IsAbs(home) {
-		return Paths{}, fmt.Errorf("home directory %q must be an absolute path when an XDG fallback is needed", home)
+// Resolve computes togi's XDG storage paths without creating directories.
+func Resolve(environment Environment) (Paths, error) {
+	if environment.Getenv == nil {
+		return Paths{}, errors.New("environment lookup is required")
+	}
+	config, configFallback := xdgPath(environment.Getenv, "XDG_CONFIG_HOME", ".config", environment.Home)
+	state, stateFallback := xdgPath(environment.Getenv, "XDG_STATE_HOME", filepath.Join(".local", "state"), environment.Home)
+	cache, cacheFallback := xdgPath(environment.Getenv, "XDG_CACHE_HOME", ".cache", environment.Home)
+	if (configFallback || stateFallback || cacheFallback) && !filepath.IsAbs(environment.Home) {
+		return Paths{}, fmt.Errorf("home directory %q must be an absolute path when an XDG fallback is needed", environment.Home)
 	}
 
 	return Paths{
-		Config: filepath.Join(config, "togi"),
-		State:  filepath.Join(state, "togi"),
-		Cache:  filepath.Join(cache, "togi"),
+		config: filepath.Join(config, "togi"),
+		state:  filepath.Join(state, "togi"),
+		cache:  filepath.Join(cache, "togi"),
 	}, nil
 }
 
-func xdgPath(environment, fallback, home string) (string, bool) {
-	value := os.Getenv(environment)
+func xdgPath(getenv func(string) string, environment, fallback, home string) (string, bool) {
+	value := getenv(environment)
 	if value != "" && filepath.IsAbs(value) {
 		return value, false
 	}
 	return filepath.Join(home, fallback), true
 }
 
+// IsZero reports whether paths have not been resolved.
+func (p Paths) IsZero() bool {
+	return p.config == "" || p.state == "" || p.cache == ""
+}
+
 // RepoState returns the durable state directory for a repository identity.
-// directory must be the full hexadecimal key from repoid.ID.Directory; it must
-// not contain path separators or traversal components.
-func (p Paths) RepoState(directory string) string {
-	return filepath.Join(p.State, directory)
+func (p Paths) RepoState(id repoid.ID) string {
+	if p.IsZero() || id.IsZero() {
+		return ""
+	}
+	return filepath.Join(p.state, id.Dir())
+}
+
+// RunsDir returns the directory containing all run ledgers for a repository.
+func (p Paths) RunsDir(id repoid.ID) string {
+	if p.IsZero() || id.IsZero() {
+		return ""
+	}
+	return filepath.Join(p.RepoState(id), "runs")
+}
+
+// RunDir returns one run ledger directory.
+func (p Paths) RunDir(id repoid.ID, runID string) string {
+	if p.IsZero() || id.IsZero() || runID == "" {
+		return ""
+	}
+	return filepath.Join(p.RunsDir(id), runID)
 }
 
 // GateOverrides returns the directory containing user-supplied gate definitions.
 func (p Paths) GateOverrides() string {
-	return filepath.Join(p.Config, "gates")
+	if p.IsZero() {
+		return ""
+	}
+	return filepath.Join(p.config, "gates")
 }
 
 // Wiki returns the directory containing user-supplied principle pages.
 func (p Paths) Wiki() string {
-	return filepath.Join(p.Config, "wiki")
+	if p.IsZero() {
+		return ""
+	}
+	return filepath.Join(p.config, "wiki")
 }

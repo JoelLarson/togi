@@ -199,15 +199,13 @@ func TestServiceRejectsUnsupportedPlatformBeforeResolvingRepository(t *testing.T
 
 func TestServiceRejectsUnsafeWiringBeforeRepositoryResolution(t *testing.T) {
 	abs := t.TempDir()
-	validPaths := config.Paths{Config: filepath.Join(abs, "config"), State: filepath.Join(abs, "state")}
+	validPaths := resolveTestPaths(t, filepath.Join(abs, "config"), filepath.Join(abs, "state"), filepath.Join(abs, "cache"))
 	validExecutor := Executor{Enrichers: enricher.NewRegistry()}
 	for _, tc := range []struct {
 		name    string
 		service Service
 	}{
 		{name: "empty paths", service: Service{Executor: validExecutor, Stdout: io.Discard}},
-		{name: "relative config", service: Service{Paths: config.Paths{Config: "config", State: validPaths.State}, Executor: validExecutor, Stdout: io.Discard}},
-		{name: "relative state", service: Service{Paths: config.Paths{Config: validPaths.Config, State: "state"}, Executor: validExecutor, Stdout: io.Discard}},
 		{name: "empty registry", service: Service{Paths: validPaths, Executor: Executor{}, Stdout: io.Discard}},
 		{name: "empty output", service: Service{Paths: validPaths, Executor: validExecutor}},
 	} {
@@ -221,7 +219,7 @@ func TestServiceRejectsUnsafeWiringBeforeRepositoryResolution(t *testing.T) {
 			if called {
 				t.Fatal("repository resolver called with unsafe service wiring")
 			}
-			if _, err := os.Stat(validPaths.State); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(filepath.Join(abs, "state", "togi")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("state touched: %v", err)
 			}
 		})
@@ -315,7 +313,11 @@ func TestServiceRejectsInvalidDiffInputsBeforeLedgerOrGates(t *testing.T) {
 			if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatalf("gate helper executed: %v", statErr)
 			}
-			if _, statErr := os.Stat(paths.State); !errors.Is(statErr, os.ErrNotExist) {
+			id, resolveErr := repoid.Resolve(context.Background(), root)
+			if resolveErr != nil {
+				t.Fatal(resolveErr)
+			}
+			if _, statErr := os.Stat(paths.RepoState(id)); !errors.Is(statErr, os.ErrNotExist) {
 				t.Fatalf("ledger state created: %v", statErr)
 			}
 		})
@@ -373,46 +375,39 @@ func TestServiceScopesCommittedFindingsAndProducesStableMetadata(t *testing.T) {
 	}
 }
 
-func TestServiceRejectsUnsafeInjectedRepositoryIdentityBeforeStateUse(t *testing.T) {
-	root := t.TempDir()
-	paths := config.Paths{Config: filepath.Join(t.TempDir(), "config"), State: filepath.Join(t.TempDir(), "state")}
-	for _, id := range []repoid.ID{
-		{Key: "key", Directory: "repo-key", Root: "relative"},
-		{Key: "", Directory: "repo-key", Root: root},
-		{Key: "key", Directory: "../escape", Root: root},
-		{Key: "key", Directory: " ", Root: root},
-		{Key: "key", Directory: "bad:name", Root: root},
-	} {
-		service := Service{Paths: paths, Executor: Executor{Enrichers: enricher.NewRegistry()}, Stdout: io.Discard, ResolveRepo: func(context.Context, string) (repoid.ID, error) { return id, nil }}
-		if _, err := service.Run(context.Background(), Options{}); err == nil {
-			t.Fatalf("Run accepted identity %#v", id)
-		}
-		if _, err := os.Stat(paths.State); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("state touched: %v", err)
-		}
+func TestServiceRejectsZeroRepositoryIdentityBeforeStateUse(t *testing.T) {
+	storage := t.TempDir()
+	paths := resolveTestPaths(t, filepath.Join(storage, "config"), filepath.Join(storage, "state"), filepath.Join(storage, "cache"))
+	service := Service{Paths: paths, Loader: gate.Loader{OverrideDir: paths.GateOverrides()}, Executor: Executor{Enrichers: enricher.NewRegistry()}, Stdout: io.Discard, ResolveRepo: func(context.Context, string) (repoid.ID, error) { return repoid.ID{}, nil }}
+	if _, err := service.Run(context.Background(), Options{}); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("Run error = %v, want identity error", err)
+	}
+	if _, err := os.Stat(filepath.Join(storage, "state", "togi")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state touched: %v", err)
 	}
 }
 
-func TestValidateRepositoryIDRequiresFullHexKeyDirectory(t *testing.T) {
-	root := t.TempDir()
-	sha1 := strings.Repeat("a", 40)
-	sha256 := strings.Repeat("b", 64)
-
-	for _, id := range []repoid.ID{
-		{Key: sha1, Directory: sha1[:12], Root: root},
-		{Key: sha1, Directory: "repository-" + sha1, Root: root},
-		{Key: "not-hex", Directory: "not-hex", Root: root},
-		{Key: strings.ToUpper(sha1), Directory: strings.ToUpper(sha1), Root: root},
-	} {
-		if err := validateRepositoryID(id); err == nil {
-			t.Fatalf("validateRepositoryID(%#v) succeeded", id)
-		}
+func TestServiceAcceptsCanonicalizedSymlinkRepositoryRoot(t *testing.T) {
+	root, paths := fixtureRepository(t)
+	writeFixtureGate(t, paths.GateOverrides(), "lint", fixtureJSON("lint.go", 2, "golangci-lint/errcheck", "unchecked"), false)
+	link := filepath.Join(t.TempDir(), "repository-link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
 	}
-
-	for _, key := range []string{sha1, sha256} {
-		if err := validateRepositoryID(repoid.ID{Key: key, Directory: key, Root: root}); err != nil {
-			t.Fatalf("validateRepositoryID(%d-character key): %v", len(key), err)
-		}
+	resolved, err := repoid.Resolve(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := repoid.New(resolved.Key(), link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := fixtureService(paths, new(bytes.Buffer))
+	service.ResolveRepo = func(context.Context, string) (repoid.ID, error) { return id, nil }
+	report, err := service.Run(context.Background(), Options{Root: link, GateNames: []string{"lint"}})
+	assertVerdictError(t, err)
+	if report.RepoID != id.Key() || id.Root() != root {
+		t.Fatalf("report repo = %q identity = %#v", report.RepoID, id)
 	}
 }
 
@@ -438,7 +433,8 @@ func TestServiceRejectsRepositoryStateInsideTargetWithoutSideEffects(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			paths := config.Paths{Config: filepath.Join(t.TempDir(), "config"), State: tc.state(t, root)}
+			storage := t.TempDir()
+			paths := resolveTestPaths(t, filepath.Join(storage, "config"), tc.state(t, root), filepath.Join(storage, "cache"))
 			service := Service{Paths: paths, Executor: Executor{Enrichers: enricher.NewRegistry()}, Stdout: io.Discard}
 			if _, err := service.Run(context.Background(), Options{Root: root}); err == nil || !strings.Contains(err.Error(), "target repository") {
 				t.Fatalf("Run error = %v", err)
@@ -573,7 +569,7 @@ func TestServiceGateFilteringAndStatusDoesNotExecute(t *testing.T) {
 		t.Fatal(err)
 	}
 	statusService := Service{
-		Paths:       config.Paths{State: paths.State},
+		Paths:       paths,
 		Stdout:      statusOut,
 		ResolveRepo: func(context.Context, string) (repoid.ID, error) { return statusID, nil },
 	}
@@ -638,7 +634,7 @@ func TestServicePersistsPassingRunBeforeReturningUnverified(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	persisted, err := (Ledger{RepoState: paths.RepoState(id.Directory)}).Latest()
+	persisted, err := (Ledger{RepoState: paths.RepoState(id), RunsDir: paths.RunsDir(id)}).Latest()
 	if err != nil {
 		t.Fatalf("Latest: %v", err)
 	}
@@ -665,7 +661,7 @@ func fixtureRepository(t *testing.T) (string, config.Paths) {
 	gitFixture(t, root, "add", "feature.go")
 	gitFixture(t, root, "-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-qm", "feature")
 	base := t.TempDir()
-	return root, config.Paths{Config: filepath.Join(base, "config"), State: filepath.Join(base, "state"), Cache: filepath.Join(base, "cache")}
+	return root, resolveTestPaths(t, filepath.Join(base, "config"), filepath.Join(base, "state"), filepath.Join(base, "cache"))
 }
 
 func localTrunkFixtureRepository(t *testing.T) (string, config.Paths) {
@@ -684,7 +680,7 @@ func localTrunkFixtureRepository(t *testing.T) (string, config.Paths) {
 	gitFixture(t, root, "add", "second.go")
 	gitFixture(t, root, "-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-qm", "feature two")
 	storage := t.TempDir()
-	return root, config.Paths{Config: filepath.Join(storage, "config"), State: filepath.Join(storage, "state"), Cache: filepath.Join(storage, "cache")}
+	return root, resolveTestPaths(t, filepath.Join(storage, "config"), filepath.Join(storage, "state"), filepath.Join(storage, "cache"))
 }
 
 func scopedFixtureRepository(t *testing.T) (root string, paths config.Paths, base, head string) {
@@ -703,7 +699,7 @@ func scopedFixtureRepository(t *testing.T) (root string, paths config.Paths, bas
 	gitFixture(t, root, "-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-qm", "feature")
 	head = gitFixture(t, root, "rev-parse", "HEAD")
 	storage := t.TempDir()
-	paths = config.Paths{Config: filepath.Join(storage, "config"), State: filepath.Join(storage, "state"), Cache: filepath.Join(storage, "cache")}
+	paths = resolveTestPaths(t, filepath.Join(storage, "config"), filepath.Join(storage, "state"), filepath.Join(storage, "cache"))
 	return root, paths, base, head
 }
 
@@ -766,8 +762,22 @@ func runFixtureService(t *testing.T, root string, paths config.Paths) (Report, s
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(paths.RepoState(id.Directory), "runs", report.RunID)
+	dir := paths.RunDir(id, report.RunID)
 	return report, out.String(), dir, targetTree(t, root)
+}
+
+func resolveTestPaths(t *testing.T, configHome, stateHome, cacheHome string) config.Paths {
+	t.Helper()
+	values := map[string]string{
+		"XDG_CONFIG_HOME": configHome,
+		"XDG_STATE_HOME":  stateHome,
+		"XDG_CACHE_HOME":  cacheHome,
+	}
+	paths, err := config.Resolve(config.Environment{Getenv: func(key string) string { return values[key] }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return paths
 }
 
 func fixtureJSON(file string, line int, rule, message string) string {
