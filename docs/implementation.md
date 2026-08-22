@@ -48,14 +48,17 @@ capture pipes open.
 
 `cmd/togi` thin main; `internal/` split by glossary term (ADR-0012):
 `finding`, `gate`, `normalizer`, `enricher`, `triage`, `flywheel`, `adapter`,
-`wiki`, `repoid`, `config`, `run`. No `pkg/`.
+`wiki`, `repoid`, `config`, `runner`, `gitcmd`, `run`. No `pkg/`.
 
 ## Gate pipeline
 
-Execute → normalize → **enrich** → filter → group → collect. Phase 2
-uses the Go `go/ast` enricher to expand `entity` findings to the smallest
-enclosing declaration before diff filtering; `point` findings retain their
-reported line. The Rust counterpart lands in phase 5.
+Execute → Normalize → Group → Enrich → FilterTouched → terminal
+Group → collect/report. The first Group creates occurrences so enrichment
+can apply entity context to every location. FilterTouched may re-anchor a
+finding to its first surviving occurrence, so the terminal Group restores
+canonical report order. The Go `go/ast` enricher expands `entity` findings to
+the smallest enclosing declaration before diff filtering; `point` findings
+retain their reported line. The Rust counterpart lands in phase 5.
 
 ## Shipped defaults
 
