@@ -251,6 +251,22 @@ func TestServiceResolvesExplicitAndDefaultBase(t *testing.T) {
 	}
 }
 
+func TestServiceResolvesLocalTrunkWithoutRemote(t *testing.T) {
+	root, paths := localTrunkFixtureRepository(t)
+	base := gitFixture(t, root, "rev-parse", "main")
+	head := gitFixture(t, root, "rev-parse", "HEAD")
+	writeFixtureGate(t, paths.GateOverrides(), "lint", fixtureJSON("feature.go", 1, "golangci-lint/errcheck", "unchecked"), false)
+
+	report, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}})
+	assertVerdictError(t, err)
+	if report.Diff.BaseRef != "main" || report.Diff.BaseCommit != base {
+		t.Fatalf("diff base = %#v, want local main at %s", report.Diff, base)
+	}
+	if report.Diff.MergeBase != base || report.Diff.Head != head {
+		t.Fatalf("diff commits = %#v, want merge-base %s and head %s", report.Diff, base, head)
+	}
+}
+
 func TestServiceRejectsInvalidDiffInputsBeforeLedgerOrGates(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -273,6 +289,13 @@ func TestServiceRejectsInvalidDiffInputsBeforeLedgerOrGates(t *testing.T) {
 		}},
 		{name: "missing default", want: "pass --base", prepare: func(t *testing.T, root string) {
 			gitFixture(t, root, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+			gitFixture(t, root, "update-ref", "-d", "refs/remotes/origin/main")
+			gitFixture(t, root, "update-ref", "-d", "refs/remotes/origin/master")
+			if branch := gitFixture(t, root, "symbolic-ref", "--short", "HEAD"); branch != "feature" {
+				gitFixture(t, root, "branch", "-m", "feature")
+			}
+			gitFixture(t, root, "update-ref", "-d", "refs/heads/main")
+			gitFixture(t, root, "update-ref", "-d", "refs/heads/master")
 		}},
 		{name: "invalid base", base: "bad\nref", want: "base revision is invalid"},
 		{name: "unresolved base", base: "refs/heads/missing", want: "selected revision is not a commit"},
@@ -633,6 +656,25 @@ func fixtureRepository(t *testing.T) (string, config.Paths) {
 	gitFixture(t, root, "-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-qm", "feature")
 	base := t.TempDir()
 	return root, config.Paths{Config: filepath.Join(base, "config"), State: filepath.Join(base, "state"), Cache: filepath.Join(base, "cache")}
+}
+
+func localTrunkFixtureRepository(t *testing.T) (string, config.Paths) {
+	t.Helper()
+	root := t.TempDir()
+	gitFixture(t, root, "init", "-q")
+	gitFixture(t, root, "symbolic-ref", "HEAD", "refs/heads/main")
+	writeDiffTestFile(t, root, "base.go", "package fixture\n")
+	gitFixture(t, root, "add", "base.go")
+	gitFixture(t, root, "-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-qm", "base")
+	gitFixture(t, root, "checkout", "-q", "-b", "feature")
+	writeDiffTestFile(t, root, "feature.go", "package fixture\n")
+	gitFixture(t, root, "add", "feature.go")
+	gitFixture(t, root, "-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-qm", "feature one")
+	writeDiffTestFile(t, root, "second.go", "package fixture\n")
+	gitFixture(t, root, "add", "second.go")
+	gitFixture(t, root, "-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-qm", "feature two")
+	storage := t.TempDir()
+	return root, config.Paths{Config: filepath.Join(storage, "config"), State: filepath.Join(storage, "state"), Cache: filepath.Join(storage, "cache")}
 }
 
 func scopedFixtureRepository(t *testing.T) (root string, paths config.Paths, base, head string) {

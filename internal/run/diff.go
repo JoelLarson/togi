@@ -27,6 +27,16 @@ const (
 
 var diffHunkHeader = regexp.MustCompile(`^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@[^\r\n]*\r?$`)
 
+var automaticBaseRefs = []struct {
+	full  string
+	short string
+}{
+	{"refs/remotes/origin/main", "origin/main"},
+	{"refs/remotes/origin/master", "origin/master"},
+	{"refs/heads/main", "main"},
+	{"refs/heads/master", "master"},
+}
+
 // Diff describes the committed feature diff resolved for a run.
 type Diff struct {
 	BaseRef      string
@@ -61,21 +71,8 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 		return Diff{}, fmt.Errorf("resolve HEAD commit: %w", err)
 	}
 
-	baseRef := requestedBase
-	if baseRef == "" {
-		output, refErr := diffGitOutput(ctx, canonicalRoot, gitReferenceOutputLimit,
-			"symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
-		if refErr != nil {
-			if errors.Is(refErr, context.Canceled) || errors.Is(refErr, context.DeadlineExceeded) {
-				return Diff{}, fmt.Errorf("detect origin default branch: %w", refErr)
-			}
-			return Diff{}, errors.New("no base was provided and origin/HEAD is unavailable; pass --base")
-		}
-		baseRef, err = parseDiffRef(output)
-		if err != nil {
-			return Diff{}, errors.New("origin/HEAD is invalid; pass --base")
-		}
-	} else if err := validateRequestedBase(baseRef); err != nil {
+	baseRef, err := resolveDiffBaseRef(ctx, canonicalRoot, requestedBase)
+	if err != nil {
 		return Diff{}, err
 	}
 
@@ -148,6 +145,79 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 		ChangedLines: changedLineCount,
 		Lines:        lines,
 	}, nil
+}
+
+func resolveDiffBaseRef(ctx context.Context, root, requested string) (string, error) {
+	if requested != "" {
+		if err := validateRequestedBase(requested); err != nil {
+			return "", err
+		}
+		return requested, nil
+	}
+
+	output, err := diffGitOutput(ctx, root, gitReferenceOutputLimit,
+		"symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+	if err == nil {
+		ref, parseErr := parseDiffRef(output)
+		if parseErr != nil {
+			return "", errors.New("origin/HEAD is invalid; pass --base")
+		}
+		return ref, nil
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "", fmt.Errorf("detect origin default branch: %w", err)
+	}
+	if !commandExitedWith(err, 1) {
+		return "", fmt.Errorf("detect origin default branch: %w", err)
+	}
+
+	args := []string{"for-each-ref", "--format=%(refname)"}
+	for _, candidate := range automaticBaseRefs {
+		args = append(args, candidate.full)
+	}
+	output, err = diffGitOutput(ctx, root, gitReferenceOutputLimit, args...)
+	if err != nil {
+		return "", fmt.Errorf("detect conventional trunk branches: %w", err)
+	}
+	existing, err := parseAutomaticBaseRefs(output)
+	if err != nil {
+		return "", err
+	}
+	for _, candidate := range automaticBaseRefs {
+		if _, ok := existing[candidate.full]; ok {
+			return candidate.short, nil
+		}
+	}
+	return "", errors.New("no base was provided and no main or master trunk is available; pass --base")
+}
+
+func commandExitedWith(err error, code int) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == code
+}
+
+func parseAutomaticBaseRefs(output []byte) (map[string]struct{}, error) {
+	existing := make(map[string]struct{})
+	if len(output) == 0 {
+		return existing, nil
+	}
+	if !utf8.Valid(output) || output[len(output)-1] != '\n' || bytes.ContainsAny(output, "\r\x00") {
+		return nil, errors.New("Git returned malformed conventional trunk refs")
+	}
+	allowed := make(map[string]struct{}, len(automaticBaseRefs))
+	for _, candidate := range automaticBaseRefs {
+		allowed[candidate.full] = struct{}{}
+	}
+	for _, ref := range strings.Split(string(output[:len(output)-1]), "\n") {
+		if _, ok := allowed[ref]; !ok {
+			return nil, errors.New("Git returned an unexpected conventional trunk ref")
+		}
+		if _, duplicate := existing[ref]; duplicate {
+			return nil, errors.New("Git returned a duplicate conventional trunk ref")
+		}
+		existing[ref] = struct{}{}
+	}
+	return existing, nil
 }
 
 type changedPath struct {

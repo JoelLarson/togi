@@ -43,6 +43,156 @@ func TestResolveDiffDetectsOriginHeadAndChangedLines(t *testing.T) {
 	assertFullObjectID(t, got.Head)
 }
 
+func TestResolveDiffDetectsConventionalTrunkRefs(t *testing.T) {
+	tests := []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{name: "remote main", ref: "refs/remotes/origin/main", want: "origin/main"},
+		{name: "remote master", ref: "refs/remotes/origin/master", want: "origin/master"},
+		{name: "local main", ref: "refs/heads/main", want: "main"},
+		{name: "local master", ref: "refs/heads/master", want: "master"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repo := newDiffTestRepo(t)
+			writeDiffTestFile(t, repo, "file.go", "base\n")
+			base := commitDiffTestRepo(t, repo, "base")
+			gitDiffTest(t, repo, "checkout", "-q", "-b", "feature")
+			gitDiffTest(t, repo, "update-ref", "-d", "refs/heads/main")
+			gitDiffTest(t, repo, "update-ref", test.ref, base)
+			writeDiffTestFile(t, repo, "file.go", "feature\n")
+			head := commitDiffTestRepo(t, repo, "feature")
+
+			got, err := resolveDiff(context.Background(), repo, "")
+			if err != nil {
+				t.Fatalf("resolveDiff() error = %v", err)
+			}
+			if got.BaseRef != test.want || got.BaseCommit != base || got.MergeBase != base || got.Head != head {
+				t.Fatalf("resolveDiff() = %#v, want %s at %s and head %s", got, test.want, base, head)
+			}
+		})
+	}
+}
+
+func TestResolveDiffPrefersOriginHeadOverConventionalRefs(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "old base\n")
+	oldBase := commitDiffTestRepo(t, repo, "old base")
+	gitDiffTest(t, repo, "update-ref", "refs/remotes/origin/main", oldBase)
+	writeDiffTestFile(t, repo, "file.go", "selected base\n")
+	selectedBase := commitDiffTestRepo(t, repo, "selected base")
+	gitDiffTest(t, repo, "update-ref", "refs/remotes/origin/release", selectedBase)
+	gitDiffTest(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/release")
+	gitDiffTest(t, repo, "checkout", "-q", "-b", "feature")
+	writeDiffTestFile(t, repo, "file.go", "feature\n")
+	commitDiffTestRepo(t, repo, "feature")
+
+	got, err := resolveDiff(context.Background(), repo, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BaseRef != "origin/release" || got.BaseCommit != selectedBase {
+		t.Fatalf("resolveDiff() = %#v, want symbolic origin/release at %s", got, selectedBase)
+	}
+}
+
+func TestResolveDiffPrefersRemoteMainOverStaleLocalMain(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "local base\n")
+	localBase := commitDiffTestRepo(t, repo, "local base")
+	gitDiffTest(t, repo, "checkout", "-q", "-b", "upstream")
+	writeDiffTestFile(t, repo, "upstream.go", "package upstream\n")
+	remoteBase := commitDiffTestRepo(t, repo, "remote base")
+	gitDiffTest(t, repo, "update-ref", "refs/remotes/origin/main", remoteBase)
+	gitDiffTest(t, repo, "checkout", "-q", "-b", "feature")
+	writeDiffTestFile(t, repo, "feature.go", "package feature\n")
+	commitDiffTestRepo(t, repo, "feature")
+
+	got, err := resolveDiff(context.Background(), repo, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BaseRef != "origin/main" || got.BaseCommit != remoteBase || got.MergeBase != remoteBase {
+		t.Fatalf("resolveDiff() = %#v, want remote main %s instead of local main %s", got, remoteBase, localBase)
+	}
+}
+
+func TestResolveDiffUsesRemoteFreeLinkedWorktreeFeature(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "base.go", "package feature\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	feature := filepath.Join(t.TempDir(), "feature")
+	gitDiffTest(t, repo, "worktree", "add", "-q", "-b", "feature", feature, "main")
+	writeDiffTestFile(t, feature, "first.go", "package feature\n")
+	commitDiffTestRepo(t, feature, "first feature commit")
+	writeDiffTestFile(t, feature, "second.go", "package feature\n")
+	head := commitDiffTestRepo(t, feature, "second feature commit")
+
+	got, err := resolveDiff(context.Background(), feature, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BaseRef != "main" || got.BaseCommit != base || got.MergeBase != base || got.Head != head {
+		t.Fatalf("resolveDiff() = %#v, want remote-free main %s and head %s", got, base, head)
+	}
+	if got.ChangedFiles != 2 || got.ChangedLines != 2 {
+		t.Fatalf("scope = %#v, want both feature commits", got)
+	}
+}
+
+func TestResolveDiffMovesMergeBaseAfterRebase(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "base.go", "package feature\n")
+	oldBase := commitDiffTestRepo(t, repo, "old base")
+	gitDiffTest(t, repo, "checkout", "-q", "-b", "feature")
+	writeDiffTestFile(t, repo, "feature.go", "package feature\n")
+	commitDiffTestRepo(t, repo, "feature")
+	gitDiffTest(t, repo, "checkout", "-q", "main")
+	writeDiffTestFile(t, repo, "trunk.go", "package feature\n")
+	newBase := commitDiffTestRepo(t, repo, "advance trunk")
+	gitDiffTest(t, repo, "checkout", "-q", "feature")
+	gitDiffTest(t, repo, "rebase", "main")
+
+	got, err := resolveDiff(context.Background(), repo, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BaseRef != "main" || got.BaseCommit != newBase || got.MergeBase != newBase || got.MergeBase == oldBase {
+		t.Fatalf("resolveDiff() = %#v, want rebased merge-base %s", got, newBase)
+	}
+}
+
+func TestResolveDiffOnTrunkHasEmptyScope(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "package trunk\n")
+	head := commitDiffTestRepo(t, repo, "trunk")
+
+	got, err := resolveDiff(context.Background(), repo, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BaseRef != "main" || got.BaseCommit != head || got.MergeBase != head || got.Head != head {
+		t.Fatalf("resolveDiff() = %#v, want main at HEAD %s", got, head)
+	}
+	if got.Lines == nil || got.ChangedFiles != 0 || got.ChangedLines != 0 || len(got.Lines) != 0 {
+		t.Fatalf("scope = %#v, want an empty nonnil line map", got)
+	}
+}
+
+func TestResolveDiffRequiresBaseWithoutConventionalTrunk(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "base\n")
+	commitDiffTestRepo(t, repo, "base")
+	gitDiffTest(t, repo, "branch", "-m", "feature")
+
+	_, err := resolveDiff(context.Background(), repo, "")
+	if err == nil || !strings.Contains(err.Error(), "main") || !strings.Contains(err.Error(), "master") || !strings.Contains(err.Error(), "--base") {
+		t.Fatalf("resolveDiff() error = %v, want conventional-trunk diagnostic", err)
+	}
+}
+
 func TestResolveDiffIgnoresHostileGitEnvironmentWithoutRefreshingIndex(t *testing.T) {
 	target := newDiffTestRepo(t)
 	writeDiffTestFile(t, target, "target.go", "base\n")
@@ -210,14 +360,17 @@ func TestResolveDiffSupportsSHA256ObjectIDs(t *testing.T) {
 	}
 }
 
-func TestResolveDiffRequiresBaseWhenOriginHeadIsMissing(t *testing.T) {
+func TestResolveDiffUsesLocalMainWhenOriginHeadIsMissing(t *testing.T) {
 	repo := newDiffTestRepo(t)
 	writeDiffTestFile(t, repo, "file.go", "base\n")
-	commitDiffTestRepo(t, repo, "base")
+	head := commitDiffTestRepo(t, repo, "base")
 
-	_, err := resolveDiff(context.Background(), repo, "")
-	if err == nil || !strings.Contains(err.Error(), "--base") {
-		t.Fatalf("resolveDiff() error = %v, want --base diagnostic", err)
+	got, err := resolveDiff(context.Background(), repo, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BaseRef != "main" || got.BaseCommit != head {
+		t.Fatalf("resolveDiff() = %#v, want local main at %s", got, head)
 	}
 }
 
