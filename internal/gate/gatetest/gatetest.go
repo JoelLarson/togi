@@ -109,15 +109,6 @@ func Aliases(aliases map[string]string) Option {
 	}
 }
 
-// Normalizer sets the compiled normalizer and its optional fixed rule/message.
-func Normalizer(name, ruleID, message string) Option {
-	return func(value *fixture) {
-		value.binding.Normalizer = name
-		value.binding.RuleID = ruleID
-		value.binding.Message = message
-	}
-}
-
 // Language sets the binding language.
 func Language(language string) Option {
 	return func(value *fixture) { value.binding.Language = language }
