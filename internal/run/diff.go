@@ -52,6 +52,13 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 	if err != nil {
 		return Diff{}, err
 	}
+	localAttributes, err := resolveLocalAttributesPath(ctx, canonicalRoot)
+	if err != nil {
+		return Diff{}, err
+	}
+	if err := checkLocalAttributes(localAttributes); err != nil {
+		return Diff{}, err
+	}
 
 	status, err := diffGitOutput(ctx, canonicalRoot, gitStatusOutputLimit,
 		"status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none")
@@ -141,6 +148,9 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 			changedLineCount += lineRange.End - lineRange.Start + 1
 		}
 	}
+	if err := checkLocalAttributes(localAttributes); err != nil {
+		return Diff{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return Diff{}, fmt.Errorf("resolve committed diff: %w", err)
 	}
@@ -159,6 +169,11 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 type changedPath struct {
 	previous string
 	current  string
+}
+
+type localAttributesPath struct {
+	path      string
+	commonDir string
 }
 
 func deterministicDiffOptions() []string {
@@ -187,6 +202,91 @@ func canonicalDiffRoot(root string) (string, error) {
 		return "", errors.New("repository root must be a directory")
 	}
 	return canonical, nil
+}
+
+func resolveLocalAttributesPath(ctx context.Context, root string) (localAttributesPath, error) {
+	attributesOutput, err := diffGitOutput(ctx, root, gitPathsOutputLimit, "rev-parse", "--git-path", "info/attributes")
+	if err != nil {
+		return localAttributesPath{}, fmt.Errorf("resolve local Git attributes path: %w", err)
+	}
+	commonOutput, err := diffGitOutput(ctx, root, gitPathsOutputLimit, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return localAttributesPath{}, fmt.Errorf("resolve local Git attributes path: %w", err)
+	}
+	attributes, err := parseSingleGitLine(attributesOutput)
+	if err != nil {
+		return localAttributesPath{}, errors.New("resolve local Git attributes path: Git returned malformed output")
+	}
+	common, err := parseSingleGitLine(commonOutput)
+	if err != nil {
+		return localAttributesPath{}, errors.New("resolve local Git attributes path: Git returned malformed output")
+	}
+	attributes, err = absoluteGitPath(root, attributes)
+	if err != nil {
+		return localAttributesPath{}, err
+	}
+	common, err = absoluteGitPath(root, common)
+	if err != nil {
+		return localAttributesPath{}, err
+	}
+	canonicalCommon, err := filepath.EvalSymlinks(common)
+	if err != nil {
+		return localAttributesPath{}, errors.New("resolve local Git attributes path: common Git directory cannot be resolved")
+	}
+	info, err := os.Stat(canonicalCommon)
+	if err != nil || !info.IsDir() {
+		return localAttributesPath{}, errors.New("resolve local Git attributes path: common Git directory is invalid")
+	}
+	if !pathWithinRoot(common, attributes) {
+		return localAttributesPath{}, errors.New("resolve local Git attributes path: path is outside the common Git directory")
+	}
+	return localAttributesPath{path: attributes, commonDir: canonicalCommon}, nil
+}
+
+func absoluteGitPath(root, path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), nil
+	}
+	absolute, err := filepath.Abs(filepath.Join(root, path))
+	if err != nil {
+		return "", errors.New("resolve local Git attributes path: path cannot be made absolute")
+	}
+	return filepath.Clean(absolute), nil
+}
+
+func checkLocalAttributes(attributes localAttributesPath) error {
+	info, err := os.Lstat(attributes.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return validateLocalAttributesParent(attributes)
+	}
+	if err != nil {
+		return errors.New("inspect local Git attributes: path cannot be inspected")
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() != 0 {
+		return errors.New("local Git attributes must be absent or an empty regular file")
+	}
+	return validateLocalAttributesParent(attributes)
+}
+
+func validateLocalAttributesParent(attributes localAttributesPath) error {
+	parent := filepath.Dir(attributes.path)
+	for {
+		resolved, err := filepath.EvalSymlinks(parent)
+		if err == nil {
+			if !pathWithinRoot(attributes.commonDir, resolved) {
+				return errors.New("local Git attributes path is outside the common Git directory")
+			}
+			return nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return errors.New("inspect local Git attributes: parent path cannot be resolved")
+		}
+		next := filepath.Dir(parent)
+		if next == parent || !pathWithinRoot(attributes.commonDir, next) {
+			return errors.New("local Git attributes path is unsafe")
+		}
+		parent = next
+	}
 }
 
 func resolveDiffCommit(ctx context.Context, root, ref string) (string, error) {

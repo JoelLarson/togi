@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,6 +100,114 @@ func TestResolveDiffHonorsCommittedAttributes(t *testing.T) {
 	}
 }
 
+func TestResolveDiffRejectsRepositoryLocalAttributes(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "base\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	writeDiffTestFile(t, repo, "file.go", "feature\n")
+	commitDiffTestRepo(t, repo, "feature")
+	attributes := localAttributesPathForTest(t, repo)
+	if err := os.MkdirAll(filepath.Dir(attributes), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const contents = "*.go binary\n"
+	if err := os.WriteFile(attributes, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolveDiff(context.Background(), repo, base)
+	if err == nil || !strings.Contains(err.Error(), "local Git attributes") {
+		t.Fatalf("resolveDiff() error = %v, want local-attributes diagnostic", err)
+	}
+	if strings.Contains(err.Error(), "*.go") || strings.Contains(err.Error(), "binary") {
+		t.Fatalf("resolveDiff() exposed local attributes contents: %v", err)
+	}
+}
+
+func TestResolveDiffAllowsEmptyRepositoryLocalAttributes(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "base\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	writeDiffTestFile(t, repo, "file.go", "feature\n")
+	commitDiffTestRepo(t, repo, "feature")
+	attributes := localAttributesPathForTest(t, repo)
+	if err := os.MkdirAll(filepath.Dir(attributes), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(attributes, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveDiff(context.Background(), repo, base)
+	if err != nil {
+		t.Fatalf("resolveDiff() error = %v", err)
+	}
+	want := finding.ChangedLines{"file.go": {{Start: 1, End: 1}}}
+	if !reflect.DeepEqual(got.Lines, want) {
+		t.Fatalf("resolveDiff() lines = %#v, want %#v", got.Lines, want)
+	}
+}
+
+func TestResolveDiffRejectsUnsafeRepositoryLocalAttributesPath(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		create func(*testing.T, string)
+	}{
+		{name: "symlink", create: func(t *testing.T, path string) {
+			target := filepath.Join(t.TempDir(), "attributes")
+			if err := os.WriteFile(target, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+		}},
+		{name: "nonregular", create: func(t *testing.T, path string) {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := newDiffTestRepo(t)
+			writeDiffTestFile(t, repo, "file.go", "base\n")
+			base := commitDiffTestRepo(t, repo, "base")
+			attributes := localAttributesPathForTest(t, repo)
+			if err := os.MkdirAll(filepath.Dir(attributes), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			test.create(t, attributes)
+
+			_, err := resolveDiff(context.Background(), repo, base)
+			if err == nil || !strings.Contains(err.Error(), "local Git attributes") {
+				t.Fatalf("resolveDiff() error = %v, want unsafe local-attributes diagnostic", err)
+			}
+		})
+	}
+}
+
+func TestResolveDiffFindsRepositoryLocalAttributesFromLinkedWorktree(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "base\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	linked := filepath.Join(t.TempDir(), "linked")
+	gitDiffTest(t, repo, "worktree", "add", "-b", "feature", linked, "main")
+	writeDiffTestFile(t, linked, "file.go", "feature\n")
+	commitDiffTestRepo(t, linked, "feature")
+	attributes := localAttributesPathForTest(t, linked)
+	if err := os.MkdirAll(filepath.Dir(attributes), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(attributes, []byte("*.go binary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolveDiff(context.Background(), linked, base)
+	if err == nil || !strings.Contains(err.Error(), "local Git attributes") {
+		t.Fatalf("resolveDiff(linked worktree) error = %v, want local-attributes diagnostic", err)
+	}
+}
+
 func TestDeterministicDiffOptions(t *testing.T) {
 	want := []string{
 		"--no-ext-diff",
@@ -179,4 +288,13 @@ func waitForDiffTestFile(t *testing.T, path string, timeout time.Duration) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", filepath.Base(path))
+}
+
+func localAttributesPathForTest(t *testing.T, repo string) string {
+	t.Helper()
+	path := gitDiffTest(t, repo, "rev-parse", "--git-path", "info/attributes")
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(repo, path)
+	}
+	return filepath.Clean(path)
 }
