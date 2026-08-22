@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/joellarson/togi/internal/finding"
@@ -69,11 +70,25 @@ func (Go) Enrich(ctx context.Context, enrichment Context, in []finding.Finding) 
 		}
 
 		if out[index].EndLine == 0 {
-			out[index].EndLine = enclosingDeclarationEndLine(parsed, out[index].Line)
+			endLine, err := enclosingDeclarationEndLine(ctx, parsed, out[index].Line)
+			if err != nil {
+				return nil, err
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, fmt.Errorf("enrich Go findings: %w", err)
+			}
+			out[index].EndLine = endLine
 		}
 		for occurrence := range out[index].Occurrences {
 			if out[index].Occurrences[occurrence].EndLine == 0 {
-				out[index].Occurrences[occurrence].EndLine = enclosingDeclarationEndLine(parsed, out[index].Occurrences[occurrence].Line)
+				endLine, err := enclosingDeclarationEndLine(ctx, parsed, out[index].Occurrences[occurrence].Line)
+				if err != nil {
+					return nil, err
+				}
+				if err := ctx.Err(); err != nil {
+					return nil, fmt.Errorf("enrich Go findings: %w", err)
+				}
+				out[index].Occurrences[occurrence].EndLine = endLine
 			}
 		}
 	}
@@ -82,8 +97,12 @@ func (Go) Enrich(ctx context.Context, enrichment Context, in []finding.Finding) 
 }
 
 type parsedFile struct {
-	file *ast.File
-	fset *token.FileSet
+	declarations []declarationInterval
+}
+
+type declarationInterval struct {
+	start int
+	end   int
 }
 
 func clone(in []finding.Finding) []finding.Finding {
@@ -141,32 +160,68 @@ func parseGoFile(ctx context.Context, root *os.Root, path string) (parsedFile, e
 	if err != nil {
 		return parsedFile{}, fmt.Errorf("parse Go source %q", path)
 	}
-	return parsedFile{file: parsed, fset: fset}, nil
+	if err := ctx.Err(); err != nil {
+		return parsedFile{}, fmt.Errorf("enrich Go findings: %w", err)
+	}
+	declarations, err := collectDeclarationIntervals(ctx, parsed, fset)
+	if err != nil {
+		return parsedFile{}, err
+	}
+	return parsedFile{declarations: declarations}, nil
 }
 
-func enclosingDeclarationEndLine(parsed parsedFile, line int) int {
-	shortestRange := 0
-	startLine := 0
-	endLine := 0
-	ast.Inspect(parsed.file, func(node ast.Node) bool {
+func collectDeclarationIntervals(ctx context.Context, file *ast.File, fset *token.FileSet) ([]declarationInterval, error) {
+	var intervals []declarationInterval
+	var inspectErr error
+	ast.Inspect(file, func(node ast.Node) bool {
+		if inspectErr != nil {
+			return false
+		}
+		if err := ctx.Err(); err != nil {
+			inspectErr = fmt.Errorf("enrich Go findings: %w", err)
+			return false
+		}
 		declaration, ok := node.(ast.Decl)
 		if !ok {
 			return true
 		}
-		start := parsed.fset.Position(declaration.Pos()).Line
-		end := parsed.fset.Position(declaration.End()).Line
-		if line < start || line > end {
-			return true
-		}
-		declarationRange := end - start
-		isShorter := endLine == 0 || declarationRange < shortestRange
-		isEarlierEqualRange := declarationRange == shortestRange && (start < startLine || (start == startLine && end < endLine))
-		if isShorter || isEarlierEqualRange {
-			shortestRange = declarationRange
-			startLine = start
-			endLine = end
-		}
+		intervals = append(intervals, declarationInterval{
+			start: fset.Position(declaration.Pos()).Line,
+			end:   fset.Position(declaration.End()).Line,
+		})
 		return true
 	})
-	return endLine
+	if inspectErr != nil {
+		return nil, inspectErr
+	}
+	sort.Slice(intervals, func(left, right int) bool {
+		leftRange := intervals[left].end - intervals[left].start
+		rightRange := intervals[right].end - intervals[right].start
+		if leftRange != rightRange {
+			return leftRange < rightRange
+		}
+		if intervals[left].start != intervals[right].start {
+			return intervals[left].start < intervals[right].start
+		}
+		return intervals[left].end < intervals[right].end
+	})
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("enrich Go findings: %w", err)
+	}
+	return intervals, nil
+}
+
+func enclosingDeclarationEndLine(ctx context.Context, parsed parsedFile, line int) (int, error) {
+	for _, declaration := range parsed.declarations {
+		if err := ctx.Err(); err != nil {
+			return 0, fmt.Errorf("enrich Go findings: %w", err)
+		}
+		if declaration.start <= line && line <= declaration.end {
+			return declaration.end, nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, fmt.Errorf("enrich Go findings: %w", err)
+	}
+	return 0, nil
 }

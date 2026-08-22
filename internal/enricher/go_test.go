@@ -3,7 +3,6 @@ package enricher
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -201,7 +200,7 @@ func TestGoEnrichRejectsSymlinkEscape(t *testing.T) {
 	writeGoSource(t, escape, "outside.go", declarationSource)
 	link := filepath.Join(root, "outside")
 	if err := os.Symlink(escape, link); err != nil {
-		if errors.Is(err, fs.ErrPermission) {
+		if symlinkUnavailable(err) {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
 		t.Fatalf("Symlink(%q, %q): %v", escape, link, err)
@@ -218,6 +217,36 @@ func TestGoEnrichHonorsCanceledContextBeforeReading(t *testing.T) {
 	cancel()
 
 	_, err := (Go{}).Enrich(ctx, goEntityContext(filepath.Join(t.TempDir(), "does-not-exist")), []finding.Finding{{File: "example.go", Line: 1}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Go.Enrich() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestGoEnrichHonorsCancellationAfterParsing(t *testing.T) {
+	root := t.TempDir()
+	writeGoSource(t, root, "example.go", declarationSource)
+
+	_, err := (Go{}).Enrich(newCancelAfterContext(4), goEntityContext(root), []finding.Finding{{File: "example.go", Line: 4}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Go.Enrich() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestGoEnrichHonorsCancellationDuringDeclarationCollection(t *testing.T) {
+	root := t.TempDir()
+	writeGoSource(t, root, "example.go", declarationSource)
+
+	_, err := (Go{}).Enrich(newCancelAfterContext(5), goEntityContext(root), []finding.Finding{{File: "example.go", Line: 4}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Go.Enrich() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestGoEnrichHonorsCancellationDuringDeclarationLookup(t *testing.T) {
+	root := t.TempDir()
+	writeGoSource(t, root, "simple.go", minimalDeclarationSource)
+
+	_, err := (Go{}).Enrich(newCancelAfterContext(12), goEntityContext(root), []finding.Finding{{File: "simple.go", Line: 3}})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Go.Enrich() error = %v, want context.Canceled", err)
 	}
@@ -258,6 +287,24 @@ func writeGoSource(t *testing.T, root, name, source string) {
 	}
 }
 
+type cancelAfterContext struct {
+	context.Context
+	allowed int
+	checks  int
+}
+
+func newCancelAfterContext(allowed int) *cancelAfterContext {
+	return &cancelAfterContext{Context: context.Background(), allowed: allowed}
+}
+
+func (ctx *cancelAfterContext) Err() error {
+	ctx.checks++
+	if ctx.checks > ctx.allowed {
+		return context.Canceled
+	}
+	return nil
+}
+
 const declarationSource = `package sample
 
 type Record struct {
@@ -285,4 +332,9 @@ func Work() {
 	}
 	println(localValue, localConst, localType{})
 }
+`
+
+const minimalDeclarationSource = `package sample
+
+var Value = 1
 `
