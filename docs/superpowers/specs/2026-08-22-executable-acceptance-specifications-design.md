@@ -39,15 +39,16 @@ test command runs only the application-level suite:
 
 ```sh
 go test ./...
-go test ./acceptance -v -args -acceptance.driver=cli
-go test ./acceptance -v -args -acceptance.driver=all
+go test ./acceptance/... -v -args -acceptance.driver=cli
+go test ./acceptance/... -v -args -acceptance.driver=all
 ```
 
 Selecting `cli` runs only the compiled-CLI driver. For each feature test,
 selecting `all` runs the service driver first and the CLI driver second. An
 unknown or unavailable driver is an error, never a skip or an empty successful
 matrix. Because package-specific flags cannot safely be passed through
-`go test ./...`, the explicit driver forms target `./acceptance` directly.
+`go test ./...`, the explicit driver forms target `./acceptance/...`
+directly.
 
 Every example runs through every selected driver except an example that
 requires a test-only capability absent from the production boundary. The only
@@ -55,8 +56,11 @@ initial exception is simulated platform selection: those examples carry an
 `@simulated-platform` tag, run through the service driver, and are excluded
 from the CLI driver's Godog tag expression. The CLI driver still runs the
 real-host platform example. The driver registry declares this matrix, and a
-harness test fails if an example is excluded without a declared capability or
-if a selected driver executes no examples.
+static matrix test fails if an example is excluded without a declared
+capability. After host eligibility and driver tags are applied,
+`FeatureOptions` fails if an instantiated feature has no eligible examples.
+Packages or feature tests omitted by a user's `-run` filter never instantiate
+a suite, and a host-ineligible group skips before this validation.
 
 The scenarios require no installed gate tools or external network service.
 Real Git repositories and remotes live under test-owned temporary directories.
@@ -68,67 +72,110 @@ still compile the suite and execute the unsupported-platform specification;
 Linux-only feature groups skip with an explicit reason. Host eligibility is a
 suite precondition independent of the selected driver's capability tags.
 
-Every driver, fixture, step definition, and Godog dependency lives in
-`*_test.go` files or the test dependency graph. `go build ./cmd/togi` includes
-none of the acceptance harness. The CLI driver builds the production binary
-only when that driver is selected.
+The shared harness is an ordinary Go package under
+`acceptance/internal/harness` so separate acceptance-domain packages can
+import it. Consequently `go build ./...` compiles the harness, but
+`go build ./cmd/togi` does not include it in the production binary because
+production code never imports it. Feature-specific state and bindings remain
+in `*_test.go`. The CLI driver builds the production binary only when that
+driver is selected.
 
 ## Suite Layout
 
-The suite lives outside `internal/` because it tests the assembled
-application, not a production package boundary:
+The acceptance tree lives beside the production `internal/` tree because it
+tests the assembled application rather than one production package boundary.
+Its own nested `internal/harness` is shared acceptance infrastructure:
 
 ```text
 acceptance/
-├── features/
+├── README.md
+├── internal/
+│   └── harness/
+│       ├── main.go
+│       ├── selector.go
+│       ├── driver.go
+│       ├── service_driver.go
+│       ├── cli_driver.go
+│       ├── observation.go
+│       ├── repository.go
+│       └── gate_tool.go
+├── gauntlet/
+│   ├── main_test.go
 │   ├── running_the_gauntlet.feature
+│   ├── running_the_gauntlet_test.go
 │   ├── judging_a_feature_diff.feature
-│   ├── keeping_run_history.feature
+│   ├── judging_a_feature_diff_test.go
+│   └── steps_test.go
+├── gate/
+│   ├── main_test.go
 │   ├── customizing_gates.feature
+│   ├── customizing_gates_test.go
+│   └── steps_test.go
+├── runledger/
+│   ├── main_test.go
+│   ├── keeping_run_history.feature
+│   ├── keeping_run_history_test.go
+│   └── steps_test.go
+├── wiki/
+│   ├── main_test.go
 │   ├── using_principle_pages.feature
-│   └── supporting_platforms.feature
-├── running_the_gauntlet_test.go
-├── judging_a_feature_diff_test.go
-├── keeping_run_history_test.go
-├── customizing_gates_test.go
-├── using_principle_pages_test.go
-├── supporting_platforms_test.go
-├── driver_test.go
-├── service_driver_test.go
-├── cli_driver_test.go
-├── repository_steps_test.go
-├── gate_steps_test.go
-├── report_steps_test.go
-├── history_steps_test.go
-├── wiki_steps_test.go
-├── repository_test.go
-└── gate_tool_test.go
+│   ├── using_principle_pages_test.go
+│   └── steps_test.go
+└── platform/
+    ├── main_test.go
+    ├── supporting_platforms.feature
+    ├── supporting_platforms_test.go
+    └── steps_test.go
 ```
 
-Each `.feature` file is the primary human-readable specification for one
-cohesive capability. Its corresponding `_test.go` file owns that feature's
-scenario state and feature-specific actions. Shared step files own the
-canonical vocabulary and implementations for repository, gate, report, run
-history, and principle-page concepts. Shared infrastructure contains no story
-text.
+`acceptance/README.md` is the mandatory human entry point. It explains the
+purpose of the suite, gives a short capability index and reading order, and
+shows the service, CLI, and all-driver commands. A reader follows the index
+into a domain directory and opens its `.feature` files before any Go code. A
+harness catalog test keeps that entry point complete. The index lives between
+`<!-- feature-index:start -->` and `<!-- feature-index:end -->` markers and
+contains one list item per line in the exact form
+`- [Title](domain/name.feature)`. The test recursively discovers
+`acceptance/<domain>/*.feature`, excluding `internal` and `testdata`, normalizes
+paths to slash-separated paths relative to `acceptance/`, and requires the
+discovered paths and indexed paths to match exactly once. It also requires
+each feature to have an adjacent `_test.go` file with the same stem.
 
-This test-only `acceptance` package does not introduce an application module
-or alter the glossary-owned package layout in ADR-0012.
+Each domain directory is an independent Go test package. Every `.feature` is
+co-located with a thin matching `_test.go` file that owns the Godog entry
+point, scenario-local state, and feature-specific actions. The domain's
+`steps_test.go` owns vocabulary shared by features in that domain. Test files
+declare the package name matching their directory, such as `package gauntlet`;
+there is no empty production package to test externally.
+
+`acceptance/internal/harness` owns driver selection, domain driver ports,
+service and CLI implementations, raw observations, repository fixtures, fake
+gate tools, and cross-domain step primitives. It contains no story text. The
+`internal` placement prevents production packages outside `acceptance/` from
+importing it.
+
+These acceptance packages describe tests rather than application modules.
+They do not alter the glossary-owned production layout in ADR-0012. Domain
+directory names nevertheless use existing vocabulary where possible so a
+reader can move between `CONTEXT.md`, production packages, and specifications
+without translation.
 
 ## Godog Structure
 
-Each feature group gets its own `godog.TestSuite` pointed at exactly one
-feature path. This differs from the smallest official examples, which run a
-whole `features/` directory through one initializer, but uses the same public
-API and permits focused execution. Each suite composes the domain step sets it
-needs. A shared step expression therefore has one meaning across features
-without forcing every feature to register unrelated vocabulary.
+Each feature gets its own `godog.TestSuite` pointed at the adjacent feature
+file. This differs from the smallest official examples, which run a whole
+directory through one initializer, but uses the same public API and permits
+focused execution. Each suite composes cross-domain harness steps, its domain
+steps, and its feature actions without registering unrelated vocabulary.
 
-Every step expression is declared once in a domain-owned catalog or as a
-feature-specific action. Feature initializers select catalog entries; they do
-not redeclare their expressions. A harness test assembles all catalogs and
-feature actions together and fails duplicate expressions, even though normal
-execution keeps one Godog registry per feature.
+Cross-domain step expressions are declared once in the harness; expressions
+shared only inside one domain are declared once in that domain's step set.
+Feature initializers select those entries rather than redeclaring them. When
+an authored step needs the same meaning in a second domain, its binding moves
+to the harness instead of being copied. Strict mode still detects ambiguity
+inside every assembled feature registry. Synonymous wording across domains is
+a review concern; the design does not claim that a mechanical check can prove
+semantic equivalence.
 
 The suite uses Godog's documented feature-object pattern. The
 `ScenarioInitializer` creates a new feature state object for every scenario,
@@ -139,16 +186,16 @@ Conceptually:
 
 ```go
 func TestRunningTheGauntlet(t *testing.T) {
-	forEachSelectedDriver(t, func(t *testing.T, factory DriverFactory) {
+	harness.ForEachSelectedDriver(t, func(t *testing.T, factory harness.DriverFactory) {
 		suite := godog.TestSuite{
 			Name: "running the gauntlet",
 			ScenarioInitializer: func(sc *godog.ScenarioContext) {
 				feature := newGauntletFeature(factory)
 				feature.InitializeScenario(sc)
 			},
-			Options: featureOptions(t, "features/running_the_gauntlet.feature"),
+			Options: harness.FeatureOptions(t, "running_the_gauntlet.feature"),
 		}
-		requireGodogSuccess(t, suite.Run())
+		harness.RequireGodogSuccess(t, suite.Run())
 	})
 }
 
@@ -162,7 +209,7 @@ func (feature *gauntletFeature) InitializeScenario(sc *godog.ScenarioContext) {
 }
 ```
 
-`featureOptions` sets `Strict: true`, `TestingT: t`, `Concurrency: 1`,
+`harness.FeatureOptions` sets `Strict: true`, `TestingT: t`, `Concurrency: 1`,
 `Randomize: 0`, and exactly one feature path. Strict mode makes undefined,
 pending, and ambiguous steps fail the suite. A harness regression test proves
 that undefined, pending, and ambiguous steps each produce a nonzero result.
@@ -232,13 +279,23 @@ such as exit 4 with no report, and prove the channels remain independent.
 This keeps assertions in `Then` steps without making each driver a second
 implementation of togi's semantics.
 
-The initial service driver assembles `run.Service`, `wiki.Service`, gate
+The service driver assembles `run.Service`, `wiki.Service`, gate
 loaders, enrichers, XDG paths, and deterministic clocks/randomness. It is the
 only driver allowed to import those concrete application services. The CLI
-driver builds the production binary once for its selected test run, invokes
-it in each scenario's repository with isolated environment and streams, and
-observes its exit status and external artifacts. Both implement the same
-domain ports and run the same feature files.
+driver builds the production binary once per selected domain test process,
+invokes it in each scenario's repository with isolated environment and
+streams, and observes its exit status and external artifacts. Go's build cache
+limits the repeated work across domain packages; sharing one binary across
+test processes is deferred until measurement justifies the coordination.
+Both drivers implement the same domain ports and run the same feature files.
+
+Each domain's `main_test.go` delegates `TestMain` to `harness.Main`. The
+harness parses the driver flag, walks upward from the domain package working
+directory to the module `go.mod`, and, when CLI execution is selected, builds
+the binary into a process-owned temporary directory. It makes that path
+available to every scenario in the domain and removes the directory after
+`m.Run` returns and before `harness.Main` returns its exit code. Service-only
+runs do not build the binary.
 
 Repository setup is separate test infrastructure rather than part of the
 driver. It creates real repositories, commits, branches, linked worktrees,
@@ -394,18 +451,18 @@ not sufficient.
 Implementation is complete when:
 
 ```sh
-go test ./acceptance -v
-go test ./acceptance -v -args -acceptance.driver=cli
-go test ./acceptance -v -args -acceptance.driver=all
+go test ./acceptance/... -v
+go test ./acceptance/... -v -args -acceptance.driver=cli
+go test ./acceptance/... -v -args -acceptance.driver=all
 go test ./...
 go build ./...
 ```
 
 pass in a network-denied environment, after module dependencies are available,
 and without installed gate tools. The default commands execute the service
-driver only; CLI and all-driver verification are explicit. Each feature can be
-run independently through its Go test with the same driver flag, and Godog
-exposes individual scenarios as subtests for focused execution. On Linux,
+driver only; CLI and all-driver verification are explicit. A domain package,
+feature test, or Godog scenario can be selected independently with normal Go
+test path and `-run` filtering while using the same driver flag. On Linux,
 required scenarios may not be skipped. Strict mode rejects pending, undefined,
 and ambiguous steps. The existing package suite continues to pass unchanged
 except for deliberate test-infrastructure reuse or exact duplicate removal
