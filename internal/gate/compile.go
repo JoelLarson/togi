@@ -3,12 +3,14 @@ package gate
 import (
 	"errors"
 	"fmt"
-	"reflect"
+	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/normalizer"
+	"github.com/pelletier/go-toml/v2"
 )
 
 // Compile validates a gate wholesale and compiles each binding's normalizer.
@@ -33,9 +35,13 @@ func Compile(manifest Manifest, bindings map[string]Binding) (Gate, error) {
 	compiled := make(map[string]Binding, len(bindings))
 	snapshots := make(map[string]*bindingSnapshot, len(bindings))
 	for _, language := range languages {
-		binding := cloneBindingState(bindings[language])
-		if binding.Language != language {
-			return Gate{}, fmt.Errorf("binding %q declares language %q", language, binding.Language)
+		wireBinding := bindings[language]
+		if wireBinding.Language != language {
+			return Gate{}, fmt.Errorf("binding %q declares language %q", language, wireBinding.Language)
+		}
+		binding, err := cloneBindingState(wireBinding)
+		if err != nil {
+			return Gate{}, fmt.Errorf("binding %s: %w", language, err)
 		}
 		if err := validateBindingValue(binding); err != nil {
 			return Gate{}, fmt.Errorf("binding %s: %w", language, err)
@@ -49,7 +55,11 @@ func Compile(manifest Manifest, bindings map[string]Binding) (Gate, error) {
 		if err != nil {
 			return Gate{}, fmt.Errorf("binding %s: %w", language, err)
 		}
-		snapshot := &bindingSnapshot{wire: cloneBindingState(binding)}
+		snapshotWire, err := cloneBindingState(binding)
+		if err != nil {
+			return Gate{}, fmt.Errorf("binding %s: %w", language, err)
+		}
+		snapshot := &bindingSnapshot{wire: snapshotWire}
 		binding.compiled = parser
 		binding.owner = owner
 		binding.snapshot = snapshot
@@ -68,18 +78,22 @@ func cloneManifest(manifest Manifest) Manifest {
 	return manifest
 }
 
-func cloneBindingState(binding Binding) Binding {
+func cloneBindingState(binding Binding) (Binding, error) {
 	binding.Command = cloneSlice(binding.Command)
 	binding.SuccessExitCodes = cloneSlice(binding.SuccessExitCodes)
 	binding.FindingExitCodes = cloneSlice(binding.FindingExitCodes)
-	binding.Settings = cloneSettings(binding.Settings)
+	settings, err := cloneSettings(binding.Settings)
+	if err != nil {
+		return Binding{}, err
+	}
+	binding.Settings = settings
 	binding.SeverityMap = cloneSeverityMap(binding.SeverityMap)
 	binding.Version.Command = cloneSlice(binding.Version.Command)
 	binding.Aliases = cloneAliases(binding.Aliases)
 	binding.compiled = nil
 	binding.owner = nil
 	binding.snapshot = nil
-	return binding
+	return binding, nil
 }
 
 func cloneSlice[T any](values []T) []T {
@@ -89,67 +103,68 @@ func cloneSlice[T any](values []T) []T {
 	return append(make([]T, 0, len(values)), values...)
 }
 
-func cloneSettings(settings map[string]any) map[string]any {
+func cloneSettings(settings map[string]any) (map[string]any, error) {
 	if settings == nil {
-		return nil
+		return nil, nil
 	}
 	cloned := make(map[string]any, len(settings))
-	for key, value := range settings {
-		cloned[key] = cloneSettingValue(value)
+	keys := make([]string, 0, len(settings))
+	for key := range settings {
+		keys = append(keys, key)
 	}
-	return cloned
+	sort.Strings(keys)
+	for _, key := range keys {
+		value, err := cloneSettingValue(key, settings[key])
+		if err != nil {
+			return nil, err
+		}
+		cloned[key] = value
+	}
+	return cloned, nil
 }
 
-func cloneSettingValue(value any) any {
-	if value == nil {
-		return nil
-	}
-	return cloneSettingReflect(reflect.ValueOf(value)).Interface()
-}
-
-func cloneSettingReflect(value reflect.Value) reflect.Value {
-	switch value.Kind() {
-	case reflect.Interface:
-		if value.IsNil() {
-			return reflect.Zero(value.Type())
+func cloneSettingValue(path string, value any) (any, error) {
+	switch value := value.(type) {
+	case string, bool, int64, time.Time, toml.LocalDate, toml.LocalTime, toml.LocalDateTime:
+		return value, nil
+	case float64:
+		if math.IsNaN(value) {
+			return nil, fmt.Errorf("settings %s: NaN is not supported", path)
 		}
-		cloned := reflect.New(value.Type()).Elem()
-		cloned.Set(cloneSettingReflect(value.Elem()))
-		return cloned
-	case reflect.Map:
-		if value.IsNil() {
-			return reflect.Zero(value.Type())
+		return value, nil
+	case map[string]any:
+		if value == nil {
+			return nil, fmt.Errorf("settings %s: null is not a TOML value", path)
 		}
-		cloned := reflect.MakeMapWithSize(value.Type(), value.Len())
-		iterator := value.MapRange()
-		for iterator.Next() {
-			cloned.SetMapIndex(iterator.Key(), cloneSettingReflect(iterator.Value()))
+		cloned := make(map[string]any, len(value))
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			keys = append(keys, key)
 		}
-		return cloned
-	case reflect.Pointer:
-		if value.IsNil() {
-			return reflect.Zero(value.Type())
+		sort.Strings(keys)
+		for _, key := range keys {
+			item, err := cloneSettingValue(path+"."+key, value[key])
+			if err != nil {
+				return nil, err
+			}
+			cloned[key] = item
 		}
-		cloned := reflect.New(value.Type().Elem())
-		cloned.Elem().Set(cloneSettingReflect(value.Elem()))
-		return cloned
-	case reflect.Slice:
-		if value.IsNil() {
-			return reflect.Zero(value.Type())
+		return cloned, nil
+	case []any:
+		if value == nil {
+			return nil, fmt.Errorf("settings %s: null is not a TOML value", path)
 		}
-		cloned := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
-		for index := range value.Len() {
-			cloned.Index(index).Set(cloneSettingReflect(value.Index(index)))
+		cloned := make([]any, len(value))
+		for index, item := range value {
+			item, err := cloneSettingValue(fmt.Sprintf("%s[%d]", path, index), item)
+			if err != nil {
+				return nil, err
+			}
+			cloned[index] = item
 		}
-		return cloned
-	case reflect.Array:
-		cloned := reflect.New(value.Type()).Elem()
-		for index := range value.Len() {
-			cloned.Index(index).Set(cloneSettingReflect(value.Index(index)))
-		}
-		return cloned
+		return cloned, nil
 	default:
-		return value
+		return nil, fmt.Errorf("settings %s: unsupported TOML value type %T", path, value)
 	}
 }
 

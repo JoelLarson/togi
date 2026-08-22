@@ -2,6 +2,7 @@ package gate
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/normalizer"
+	"github.com/pelletier/go-toml/v2"
 )
 
 func TestLoadAllReadsEmbeddedGoBindings(t *testing.T) {
@@ -328,7 +330,7 @@ func TestCompileDefensivelyClonesCallerInput(t *testing.T) {
 	blocking := []finding.Severity{finding.Warning}
 	severityMap := map[string]finding.Severity{"warning": finding.Warning}
 	aliases := map[string]string{"golangci-lint/*": "lint-correctness"}
-	settings := map[string]any{"nested": []map[string]any{{"value": "original"}}}
+	settings := map[string]any{"nested": []any{map[string]any{"value": "original"}}}
 	manifest := Manifest{
 		Name: "fixture", Description: "fixture", CostClass: Fast, FixPolicy: ReportOnly,
 		Scope: Repo, Location: PointLocation, Blocking: blocking, Timeout: time.Second,
@@ -352,7 +354,7 @@ func TestCompileDefensivelyClonesCallerInput(t *testing.T) {
 	binding.Version.Command[0] = "changed"
 	severityMap["warning"] = finding.Info
 	aliases["golangci-lint/*"] = "changed"
-	settings["nested"].([]map[string]any)[0]["value"] = "changed"
+	settings["nested"].([]any)[0].(map[string]any)["value"] = "changed"
 	delete(bindings, "go")
 
 	got := compiled.Bindings["go"]
@@ -365,7 +367,7 @@ func TestCompileDefensivelyClonesCallerInput(t *testing.T) {
 	if got.SeverityMap["warning"] != finding.Warning || got.Aliases["golangci-lint/*"] != "lint-correctness" {
 		t.Fatalf("compiled maps changed through caller aliases: severity=%v aliases=%v", got.SeverityMap, got.Aliases)
 	}
-	if nested := got.Settings["nested"].([]map[string]any)[0]["value"]; nested != "original" {
+	if nested := got.Settings["nested"].([]any)[0].(map[string]any)["value"]; nested != "original" {
 		t.Fatalf("compiled nested setting = %v, want original", nested)
 	}
 
@@ -408,6 +410,76 @@ func TestCompileDefensivelyClonesCallerInput(t *testing.T) {
 	}
 	close(stop)
 	<-stopped
+}
+
+func TestCompileRejectsUnsupportedSettings(t *testing.T) {
+	type settingWithSlice struct {
+		Values []string
+	}
+
+	for _, test := range []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{name: "struct with mutable slice", value: settingWithSlice{Values: []string{"original"}}, want: "unsupported TOML value type"},
+		{name: "non-reflexive NaN", value: math.NaN(), want: "NaN is not supported"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := Manifest{
+				Name: "fixture", Description: "fixture", CostClass: Fast, FixPolicy: ReportOnly,
+				Scope: Repo, Location: PointLocation, Blocking: []finding.Severity{}, Timeout: time.Second,
+			}
+			binding := Binding{
+				Language: "go", Tool: "fixture", Command: []string{"fixture"}, SuccessExitCodes: []int{0},
+				Normalizer: "golangci-json", Settings: map[string]any{"nested": []any{map[string]any{"bad": test.value}}},
+				SeverityMap: map[string]finding.Severity{"default": finding.Warning},
+			}
+
+			_, err := Compile(manifest, map[string]Binding{"go": binding})
+			if err == nil || !strings.Contains(err.Error(), "binding go: settings nested[0].bad:") || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Compile() error = %v, want binding/settings context containing %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCompileAcceptsTOMLSettingValues(t *testing.T) {
+	localDate := toml.LocalDate{Year: 2026, Month: 8, Day: 22}
+	localTime := toml.LocalTime{Hour: 14, Minute: 30}
+	settings := map[string]any{
+		"string":          "value",
+		"bool":            true,
+		"integer":         int64(42),
+		"float":           3.5,
+		"offset_datetime": time.Date(2026, 8, 22, 14, 30, 0, 0, time.UTC),
+		"local_date":      localDate,
+		"local_time":      localTime,
+		"local_datetime":  toml.LocalDateTime{LocalDate: localDate, LocalTime: localTime},
+		"nested":          map[string]any{"array": []any{"original", int64(1)}},
+	}
+	manifest := Manifest{
+		Name: "fixture", Description: "fixture", CostClass: Fast, FixPolicy: ReportOnly,
+		Scope: Repo, Location: PointLocation, Blocking: []finding.Severity{}, Timeout: time.Second,
+	}
+	binding := Binding{
+		Language: "go", Tool: "fixture", Command: []string{"fixture"}, SuccessExitCodes: []int{0},
+		Normalizer: "golangci-json", Settings: settings,
+		SeverityMap: map[string]finding.Severity{"default": finding.Warning},
+	}
+
+	compiled, err := Compile(manifest, map[string]Binding{"go": binding})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings["nested"].(map[string]any)["array"].([]any)[0] = "changed"
+	got := compiled.Bindings["go"]
+	if !compiled.Valid() || !got.Valid() {
+		t.Fatalf("compiled TOML settings validity = %v/%v, want true/true", compiled.Valid(), got.Valid())
+	}
+	if value := got.Settings["nested"].(map[string]any)["array"].([]any)[0]; value != "original" {
+		t.Fatalf("compiled nested setting = %v, want original", value)
+	}
 }
 
 func TestCompiledValidityDetectsReturnedValueMutation(t *testing.T) {

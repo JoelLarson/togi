@@ -94,7 +94,11 @@ type bindingSnapshot struct{ wire Binding }
 // Valid reports whether this binding was minted by Compile and its exported
 // configuration still matches the state that was compiled.
 func (b Binding) Valid() bool {
-	return b.owner != nil && b.snapshot != nil && b.compiled != nil && reflect.DeepEqual(cloneBindingState(b), b.snapshot.wire)
+	if b.owner == nil || b.snapshot == nil || b.compiled == nil {
+		return false
+	}
+	wire, err := cloneBindingState(b)
+	return err == nil && reflect.DeepEqual(wire, b.snapshot.wire)
 }
 
 // Normalize converts raw tool output into findings via the binding's
