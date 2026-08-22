@@ -344,10 +344,8 @@ func (w *World) After(ctx context.Context, _ *godog.Scenario, scenarioErr error)
 	}
 	return ctx, result
 }
-func (w *World) BindRepositories(*godog.ScenarioContext) {}
-func (w *World) BindGates(*godog.ScenarioContext)        {}
-func (w *World) Environment() *Environment               { return w.environment }
-func (w *World) Repository() *Repository                 { return w.repository }
+func (w *World) Environment() *Environment { return w.environment }
+func (w *World) Repository() *Repository   { return w.repository }
 func (w *World) UseRepository(repository *Repository) error {
 	if repository == nil || repository.Root == "" {
 		return errors.New("scenario repository is required")

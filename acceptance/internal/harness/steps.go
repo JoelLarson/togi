@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	"github.com/cucumber/godog"
 )
@@ -32,6 +33,27 @@ func (w *World) BindReports(sc *godog.ScenarioContext) {
 		}
 		if outcome.Code != want {
 			return fmt.Errorf("application outcome = %d, want %d", outcome.Code, want)
+		}
+		return nil
+	})
+}
+
+func (w *World) BindRepositories(*godog.ScenarioContext) {}
+
+// BindGates supplies assertions about operator-owned gate configuration.
+func (w *World) BindGates(sc *godog.ScenarioContext) {
+	sc.Step(`^the target repository contains no gate definition$`, func() error {
+		if w.repository == nil {
+			return fmt.Errorf("scenario repository is required")
+		}
+		tree, err := w.repository.Tree()
+		if err != nil {
+			return err
+		}
+		for _, name := range tree {
+			if filepath.Base(name) == "gate.toml" {
+				return fmt.Errorf("target repository contains gate definition %q", name)
+			}
 		}
 		return nil
 	})
