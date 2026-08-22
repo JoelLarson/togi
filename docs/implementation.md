@@ -52,9 +52,10 @@ capture pipes open.
 
 ## Gate pipeline
 
-Execute → normalize → **enrich** → collect. The enricher seam exists from
-phase 1 (a no-op interface); the Go `go/ast` implementation lands in phase 2
-where `end_line` is first consumed, and the Rust counterpart in phase 5.
+Execute → normalize → **enrich** → filter → group → collect. Phase 2
+uses the Go `go/ast` enricher to expand `entity` findings to the smallest
+enclosing declaration before diff filtering; `point` findings retain their
+reported line. The Rust counterpart lands in phase 5.
 
 ## Shipped defaults
 
@@ -85,6 +86,7 @@ description = "Function-level complexity limits"
 cost_class  = "fast"                  # instant | fast | slow | glacial
 fix_policy  = "llm-fix"               # autofix-only | autofix-then-llm | llm-fix | report-only
 scope       = "diff"                  # diff | repo
+location    = "entity"                # point | entity
 blocking    = ["error", "warning"]    # severities that block merge-ready
 timeout     = "60s"                   # optional; cost_class implies a default
 ```
