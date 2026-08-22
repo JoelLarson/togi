@@ -54,6 +54,8 @@ func main() {
 	case "record-dir":
 		wd, _ := os.Getwd()
 		fmt.Fprint(os.Stdout, wd)
+	case "mark":
+		_ = os.WriteFile(os.Args[2], []byte("executed"), 0600)
 	case "active":
 		path := os.Args[2]
 		d, _ := time.ParseDuration(os.Args[3])

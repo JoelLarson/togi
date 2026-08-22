@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/joellarson/togi/internal/finding"
@@ -61,6 +61,9 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 	if len(status) != 0 {
 		return Diff{}, errors.New("worktree must be clean before resolving diff scope")
 	}
+	if err := rejectHiddenIndexEntries(ctx, canonicalRoot); err != nil {
+		return Diff{}, err
+	}
 
 	head, err := resolveDiffCommit(ctx, canonicalRoot, "HEAD")
 	if err != nil {
@@ -102,8 +105,10 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 		return Diff{}, fmt.Errorf("parse merge-base commit: %w", err)
 	}
 
-	pathOutput, err := diffGitOutput(ctx, canonicalRoot, gitPathsOutputLimit,
-		"diff", "--name-status", "--diff-filter=ACMRTUXB", "--no-ext-diff", "--find-renames", "-z", mergeBase, head, "--")
+	pathArgs := []string{"diff", "--name-status", "--diff-filter=ACMRTUXB"}
+	pathArgs = append(pathArgs, deterministicDiffOptions()...)
+	pathArgs = append(pathArgs, "-z", mergeBase, head, "--")
+	pathOutput, err := diffGitOutput(ctx, canonicalRoot, gitPathsOutputLimit, pathArgs...)
 	if err != nil {
 		return Diff{}, fmt.Errorf("list changed paths: %w", err)
 	}
@@ -113,9 +118,12 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 	}
 
 	lines := make(finding.ChangedLines, len(paths))
+	blobLineCounts := make(map[string]int)
 	changedLineCount := 0
 	for _, path := range paths {
-		args := []string{"diff", "--unified=0", "--inter-hunk-context=0", "--no-color", "--no-ext-diff", "--find-renames", mergeBase, head, "--"}
+		args := []string{"diff", "--unified=0", "--no-color"}
+		args = append(args, deterministicDiffOptions()...)
+		args = append(args, mergeBase, head, "--")
 		if path.previous != "" {
 			args = append(args, literalPathspec(path.previous))
 		}
@@ -124,7 +132,7 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 		if err != nil {
 			return Diff{}, fmt.Errorf("read changed-line ranges: %w", err)
 		}
-		ranges, err := parseDiffHunks(ctx, canonicalRoot, path.current, patch)
+		ranges, err := parseDiffHunks(ctx, canonicalRoot, head, path.current, patch, blobLineCounts)
 		if err != nil {
 			return Diff{}, fmt.Errorf("parse changed-line ranges: %w", err)
 		}
@@ -151,6 +159,18 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 type changedPath struct {
 	previous string
 	current  string
+}
+
+func deterministicDiffOptions() []string {
+	return []string{
+		"--no-ext-diff",
+		"--no-textconv",
+		"--diff-algorithm=myers",
+		"--no-indent-heuristic",
+		"--inter-hunk-context=0",
+		"--find-renames=50%",
+		"-l0",
+	}
 }
 
 func canonicalDiffRoot(root string) (string, error) {
@@ -225,6 +245,29 @@ func validateRequestedBase(base string) error {
 	return nil
 }
 
+func rejectHiddenIndexEntries(ctx context.Context, root string) error {
+	output, err := diffGitOutput(ctx, root, gitPathsOutputLimit, "ls-files", "-v", "-z")
+	if err != nil {
+		return fmt.Errorf("inspect repository index flags: %w", err)
+	}
+	if len(output) == 0 {
+		return nil
+	}
+	if output[len(output)-1] != 0 {
+		return errors.New("inspect repository index flags: Git returned malformed output")
+	}
+	for _, record := range bytes.Split(output[:len(output)-1], []byte{0}) {
+		if len(record) < 3 || record[1] != ' ' {
+			return errors.New("inspect repository index flags: Git returned malformed output")
+		}
+		tag := record[0]
+		if tag == 'S' || (tag >= 'a' && tag <= 'z') {
+			return errors.New("repository index contains hidden entries; clear assume-unchanged and skip-worktree flags")
+		}
+	}
+	return nil
+}
+
 func parseChangedPaths(root string, output []byte) ([]changedPath, error) {
 	if len(output) == 0 {
 		return []changedPath{}, nil
@@ -271,7 +314,8 @@ func changedPathCount(status string) (int, error) {
 	if len(status) == 1 && strings.ContainsRune("AMTUXB", rune(status[0])) {
 		return 1, nil
 	}
-	if len(status) >= 2 && (status[0] == 'R' || status[0] == 'C') {
+	if len(status) == 4 && (status[0] == 'R' || status[0] == 'C') &&
+		status[1] >= '0' && status[1] <= '9' && status[2] >= '0' && status[2] <= '9' && status[3] >= '0' && status[3] <= '9' {
 		score, err := strconv.Atoi(status[1:])
 		if err == nil && score >= 0 && score <= 100 {
 			return 2, nil
@@ -304,7 +348,7 @@ func isWindowsDiffAbsolute(path string) bool {
 	return len(path) >= 3 && ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) && path[1] == ':' && path[2] == '/'
 }
 
-func parseDiffHunks(ctx context.Context, root, path string, patch []byte) ([]finding.LineRange, error) {
+func parseDiffHunks(ctx context.Context, root, head, path string, patch []byte, blobLineCounts map[string]int) ([]finding.LineRange, error) {
 	if len(patch) == 0 {
 		return []finding.LineRange{}, nil
 	}
@@ -332,7 +376,7 @@ func parseDiffHunks(ctx context.Context, root, path string, patch []byte) ([]fin
 			}
 		}
 		if count == 0 {
-			anchor, err := deletionAnchor(ctx, root, path, start)
+			anchor, err := deletionAnchor(ctx, root, head, path, start, blobLineCounts)
 			if err != nil {
 				return nil, err
 			}
@@ -373,32 +417,40 @@ func mergeLineRanges(ranges []finding.LineRange) []finding.LineRange {
 	return merged[:write+1]
 }
 
-func deletionAnchor(ctx context.Context, root, path string, requested int) (int, error) {
+func deletionAnchor(ctx context.Context, root, head, path string, requested int, blobLineCounts map[string]int) (int, error) {
 	if ctx == nil {
 		return 0, errors.New("deletion anchor context is required")
 	}
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	currentPath, exists, err := safeCurrentPath(root, path)
-	if err != nil {
+	if blobLineCounts == nil {
+		return 0, errors.New("deletion anchor blob cache is required")
+	}
+	if _, err := parseObjectID([]byte(head)); err != nil {
+		return 0, errors.New("deletion anchor HEAD is invalid")
+	}
+	if err := validateDiffPath(root, path); err != nil {
 		return 0, err
 	}
-	if !exists {
-		return 0, nil
-	}
-	file, err := os.Open(currentPath)
-	if err != nil {
-		return 0, errors.New("read current repository file for deletion anchor")
-	}
-	defer file.Close()
 
-	lineCount, err := countFileLines(ctx, file)
-	if err != nil {
-		return 0, fmt.Errorf("read current repository file for deletion anchor: %w", err)
+	lineCount, cached := blobLineCounts[path]
+	if !cached {
+		blob, err := diffGitOutput(ctx, root, gitDiffOutputLimit, "cat-file", "blob", head+":"+path)
+		if err != nil {
+			return 0, fmt.Errorf("read captured repository blob for deletion anchor: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		lineCount = countBlobLines(blob)
+		blobLineCounts[path] = lineCount
 	}
 	if lineCount == 0 {
 		return 0, nil
+	}
+	if requested == 0 {
+		return 1, nil
 	}
 	if requested > 0 && requested <= lineCount {
 		return requested, nil
@@ -406,99 +458,78 @@ func deletionAnchor(ctx context.Context, root, path string, requested int) (int,
 	return lineCount, nil
 }
 
-func safeCurrentPath(root, path string) (string, bool, error) {
-	canonicalRoot, err := canonicalDiffRoot(root)
-	if err != nil {
-		return "", false, err
-	}
-	if err := validateDiffPath(canonicalRoot, path); err != nil {
-		return "", false, err
-	}
-	current := canonicalRoot
-	components := strings.Split(filepath.FromSlash(path), string(filepath.Separator))
-	for index, component := range components {
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if errors.Is(err, os.ErrNotExist) {
-			return current, false, nil
-		}
-		if err != nil {
-			return "", false, errors.New("inspect current repository file")
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			resolved, err := filepath.EvalSymlinks(current)
-			if err != nil || !pathWithinRoot(canonicalRoot, resolved) {
-				return "", false, errors.New("current repository path escapes repository root")
-			}
-			current = resolved
-		}
-		if index < len(components)-1 && !isDirectoryPath(current) {
-			return "", false, errors.New("current repository path is not a file")
-		}
-	}
-	return current, true, nil
-}
-
-func isDirectoryPath(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
 func pathWithinRoot(root, path string) bool {
 	relative, err := filepath.Rel(root, path)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
 }
 
-func countFileLines(ctx context.Context, reader io.Reader) (int, error) {
-	buffer := make([]byte, 32<<10)
-	lines := 0
-	hasData := false
-	last := byte('\n')
-	for {
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		read, err := reader.Read(buffer)
-		if read > 0 {
-			hasData = true
-			last = buffer[read-1]
-			lines += bytes.Count(buffer[:read], []byte{'\n'})
-		}
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return 0, err
-		}
+func countBlobLines(blob []byte) int {
+	if len(blob) == 0 {
+		return 0
 	}
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if hasData && last != '\n' {
+	lines := bytes.Count(blob, []byte{'\n'})
+	if blob[len(blob)-1] != '\n' {
 		lines++
 	}
-	return lines, nil
+	return lines
 }
 
 func diffGitOutput(ctx context.Context, root string, limit int, args ...string) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, "git", args...)
+	gitArgs := []string{"-c", "core.fsmonitor=false", "-c", "core.attributesFile=" + os.DevNull}
+	gitArgs = append(gitArgs, args...)
+	output, err := boundedCommandOutput(ctx, root, "git", gitArgs, diffGitEnvironment(), limit)
+	if err != nil {
+		return nil, err
+	}
+	return output, nil
+}
+
+func boundedCommandOutput(ctx context.Context, root, executable string, args, environment []string, limit int) ([]byte, error) {
+	if ctx == nil {
+		return nil, errors.New("command context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Dir = root
-	cmd.Env = diffGitEnvironment()
+	cmd.Env = environment
+	cmd.WaitDelay = 100 * time.Millisecond
 	stdout := newBoundedBuffer(limit, []byte("[output truncated]"))
 	stderr := newBoundedBuffer(gitReferenceOutputLimit, []byte("[output truncated]"))
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+	tree, err := prepareProcessTree(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("prepare command process tree: %w", err)
+	}
+	cmd.Cancel = func() error {
+		return tree.terminate(cmd.Process)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, errors.Join(fmt.Errorf("command start failed: %w", err), tree.close(nil))
+	}
+	if err := tree.afterStart(cmd.Process); err != nil {
+		terminateErr := tree.terminate(cmd.Process)
+		waitErr := cmd.Wait()
+		return nil, errors.Join(err, terminateErr, waitErr, tree.close(cmd.Process))
+	}
+	waitErr := cmd.Wait()
+	cleanupErr := tree.close(cmd.Process)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, errors.Join(ctxErr, cleanupErr)
+	}
+	if waitErr != nil || cleanupErr != nil {
+		if waitErr != nil {
+			waitErr = fmt.Errorf("command failed: %w", waitErr)
 		}
-		return nil, fmt.Errorf("Git command failed: %w", err)
+		return nil, errors.Join(waitErr, cleanupErr)
 	}
 	if stdout.Truncated() || stderr.Truncated() {
-		return nil, errors.New("Git command output exceeded its limit")
+		return nil, errors.New("command output exceeded its limit")
 	}
 	return append([]byte(nil), stdout.Bytes()...), nil
 }
@@ -516,6 +547,8 @@ func diffGitEnvironment() []string {
 		"LC_ALL=C",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_ATTR_NOSYSTEM=1",
+		"GIT_NO_LAZY_FETCH=1",
 		"GIT_NO_REPLACE_OBJECTS=1",
 		"GIT_OPTIONAL_LOCKS=0",
 	)

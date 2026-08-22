@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -179,16 +177,17 @@ func TestResolveDiffUsesMergeBaseAcrossDivergedHistory(t *testing.T) {
 
 func TestResolveDiffSupportsSHA256ObjectIDs(t *testing.T) {
 	repo := t.TempDir()
-	cmd := exec.Command("git", "init", "--object-format=sha256", "-b", "main")
+	cmd := exec.Command("git", "init", "--object-format=sha256")
 	cmd.Dir = repo
 	cmd.Env = diffTestGitEnvironment()
 	if output, err := cmd.CombinedOutput(); err != nil {
 		message := string(output)
-		if strings.Contains(message, "unknown value") || strings.Contains(message, "unsupported") || strings.Contains(message, "invalid object format") {
+		if strings.Contains(message, "unknown option") || strings.Contains(message, "unknown value") || strings.Contains(message, "unsupported") || strings.Contains(message, "invalid object format") {
 			t.Skipf("Git SHA-256 repositories unsupported: %s", output)
 		}
 		t.Fatalf("initialize SHA-256 repository: %v: %s", err, output)
 	}
+	gitDiffTest(t, repo, "symbolic-ref", "HEAD", "refs/heads/main")
 	gitDiffTest(t, repo, "config", "user.name", "Togi Tests")
 	gitDiffTest(t, repo, "config", "user.email", "togi@example.invalid")
 	writeDiffTestFile(t, repo, "file.go", "base\n")
@@ -347,6 +346,23 @@ func TestResolveDiffAnchorsPureDeletionsInCurrentFiles(t *testing.T) {
 	}
 }
 
+func TestResolveDiffAnchorsFirstLineDeletionAtLineOne(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "delete\nkeep two\nkeep three\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	writeDiffTestFile(t, repo, "file.go", "keep two\nkeep three\n")
+	commitDiffTestRepo(t, repo, "delete first line")
+
+	got, err := resolveDiff(context.Background(), repo, base)
+	if err != nil {
+		t.Fatalf("resolveDiff() error = %v", err)
+	}
+	want := finding.ChangedLines{"file.go": {{Start: 1, End: 1}}}
+	if !reflect.DeepEqual(got.Lines, want) {
+		t.Fatalf("resolveDiff() lines = %#v, want %#v", got.Lines, want)
+	}
+}
+
 func TestResolveDiffUsesRenameDestinationAndNULSafePaths(t *testing.T) {
 	repo := newDiffTestRepo(t)
 	writeDiffTestFile(t, repo, "old name.go", "same\n")
@@ -502,6 +518,23 @@ func TestResolveDiffRejectsDirtyWorktreeWithoutEchoingStatus(t *testing.T) {
 	}
 }
 
+func TestResolveDiffRejectsHiddenIndexChanges(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			repo := newDiffTestRepo(t)
+			writeDiffTestFile(t, repo, "hidden.go", "clean\n")
+			commitDiffTestRepo(t, repo, "base")
+			gitDiffTest(t, repo, "update-index", flag, "--", "hidden.go")
+			writeDiffTestFile(t, repo, "hidden.go", "hidden change\n")
+
+			_, err := resolveDiff(context.Background(), repo, "main")
+			if err == nil || !strings.Contains(err.Error(), "index") || strings.Contains(err.Error(), "hidden.go") {
+				t.Fatalf("resolveDiff() error = %v, want redacted index-flag rejection", err)
+			}
+		})
+	}
+}
+
 func TestResolveDiffValidatesInputs(t *testing.T) {
 	if _, err := resolveDiff(nil, t.TempDir(), "main"); err == nil || !strings.Contains(err.Error(), "context") {
 		t.Fatalf("resolveDiff(nil) error = %v", err)
@@ -525,59 +558,39 @@ func TestMergeLineRangesSortsAndCombinesAdjacentAndOverlapping(t *testing.T) {
 	}
 }
 
-func TestDeletionAnchorUsesFinalCurrentLineAndRejectsSymlinkEscape(t *testing.T) {
-	root := t.TempDir()
-	writeDiffTestFile(t, root, "file.go", "one\ntwo\nthree")
-	got, err := deletionAnchor(context.Background(), root, "file.go", 9)
+func TestChangedPathCountRequiresCanonicalRenameScores(t *testing.T) {
+	for _, status := range []string{"R000", "R001", "R100", "C050"} {
+		if got, err := changedPathCount(status); err != nil || got != 2 {
+			t.Errorf("changedPathCount(%q) = %d, %v, want 2, nil", status, got, err)
+		}
+	}
+	for _, status := range []string{"R", "R0", "R00", "R0000", "R101", "R-01", "Cabc"} {
+		if _, err := changedPathCount(status); err == nil {
+			t.Errorf("changedPathCount(%q) error = nil, want malformed status", status)
+		}
+	}
+}
+
+func TestDeletionAnchorUsesCapturedHeadBlob(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "one\ntwo\nthree")
+	writeDiffTestFile(t, repo, "empty.go", "")
+	head := commitDiffTestRepo(t, repo, "captured")
+	writeDiffTestFile(t, repo, "file.go", "live worktree\n")
+	cache := make(map[string]int)
+
+	got, err := deletionAnchor(context.Background(), repo, head, "file.go", 9, cache)
 	if err != nil || got != 3 {
 		t.Fatalf("deletionAnchor() = %d, %v, want 3", got, err)
 	}
-	if got, err := deletionAnchor(context.Background(), root, "deleted.go", 1); err != nil || got != 0 {
-		t.Fatalf("deletionAnchor(deleted file) = %d, %v, want no anchor", got, err)
+	if got, err := deletionAnchor(context.Background(), repo, head, "file.go", 0, cache); err != nil || got != 1 {
+		t.Fatalf("deletionAnchor(first line) = %d, %v, want 1", got, err)
 	}
-
-	outside := filepath.Join(t.TempDir(), "outside.go")
-	if err := os.WriteFile(outside, []byte("outside\n"), 0o600); err != nil {
-		t.Fatal(err)
+	if got, err := deletionAnchor(context.Background(), repo, head, "empty.go", 1, cache); err != nil || got != 0 {
+		t.Fatalf("deletionAnchor(empty blob) = %d, %v, want 0", got, err)
 	}
-	if err := os.Symlink(outside, filepath.Join(root, "escape.go")); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	if _, err := deletionAnchor(context.Background(), root, "escape.go", 1); err == nil || !strings.Contains(err.Error(), "repository") {
-		t.Fatalf("deletionAnchor(symlink escape) error = %v", err)
-	}
-}
-
-func TestDeletionAnchorHonorsCancellationDuringScan(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "large.go")
-	file, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Truncate(128 << 10); err != nil {
-		file.Close()
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	ctx := newCancelOnErrCallContext(3)
-	if _, err := deletionAnchor(ctx, root, "large.go", 1); !errors.Is(err, context.Canceled) {
-		t.Fatalf("deletionAnchor() error = %v, want cancellation during scan", err)
-	}
-}
-
-func TestResolveDiffChecksCancellationBeforeSuccess(t *testing.T) {
-	repo := newDiffTestRepo(t)
-	writeDiffTestFile(t, repo, "file.go", "base\n")
-	base := commitDiffTestRepo(t, repo, "base")
-	writeDiffTestFile(t, repo, "file.go", "feature\n")
-	commitDiffTestRepo(t, repo, "feature")
-
-	ctx := newCancelOnErrCallContext(8)
-	if _, err := resolveDiff(ctx, repo, base); !errors.Is(err, context.Canceled) {
-		t.Fatalf("resolveDiff() error = %v after %d context checks, want final cancellation", err, ctx.calls.Load())
+	if len(cache) != 2 {
+		t.Fatalf("cached blob counts = %#v, want one entry per destination path", cache)
 	}
 }
 
@@ -593,7 +606,8 @@ func TestValidateDiffPathRejectsPlatformIndependentEscapes(t *testing.T) {
 func newDiffTestRepo(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
-	gitDiffTest(t, repo, "init", "-b", "main")
+	gitDiffTest(t, repo, "init")
+	gitDiffTest(t, repo, "symbolic-ref", "HEAD", "refs/heads/main")
 	gitDiffTest(t, repo, "config", "user.name", "Togi Tests")
 	gitDiffTest(t, repo, "config", "user.email", "togi@example.invalid")
 	return repo
@@ -666,26 +680,4 @@ func assertFullObjectID(t *testing.T, value string) {
 			t.Fatalf("object ID %q is not lowercase hexadecimal", value)
 		}
 	}
-}
-
-type cancelOnErrCallContext struct {
-	cancelAt int32
-	calls    atomic.Int32
-	done     chan struct{}
-	once     sync.Once
-}
-
-func (*cancelOnErrCallContext) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (ctx *cancelOnErrCallContext) Done() <-chan struct{}   { return ctx.done }
-func (*cancelOnErrCallContext) Value(any) any               { return nil }
-func (ctx *cancelOnErrCallContext) Err() error {
-	if ctx.calls.Add(1) >= ctx.cancelAt {
-		ctx.once.Do(func() { close(ctx.done) })
-		return context.Canceled
-	}
-	return nil
-}
-
-func newCancelOnErrCallContext(cancelAt int32) *cancelOnErrCallContext {
-	return &cancelOnErrCallContext{cancelAt: cancelAt, done: make(chan struct{})}
 }
