@@ -4,12 +4,14 @@ import (
 	"context"
 
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/gate"
 )
 
 // Context describes the repository context available to an enricher.
 type Context struct {
 	Root     string
 	Language string
+	Location gate.Location
 }
 
 // Enricher adds context to normalized findings.

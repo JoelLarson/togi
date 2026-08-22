@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/gate"
 )
 
 func TestNoopEnrichPreservesFindings(t *testing.T) {
@@ -30,7 +31,7 @@ func TestNoopEnrichPreservesFindings(t *testing.T) {
 	}
 	wantInput := cloneFindings(in)
 
-	got, err := (Noop{}).Enrich(context.Background(), Context{Root: "/repo", Language: "go"}, in)
+	got, err := (Noop{}).Enrich(context.Background(), Context{Root: "/repo", Language: "go", Location: gate.PointLocation}, in)
 	if err != nil {
 		t.Fatalf("Noop.Enrich() error = %v, want nil", err)
 	}
