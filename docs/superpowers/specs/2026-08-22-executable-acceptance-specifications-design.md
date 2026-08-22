@@ -9,13 +9,16 @@ reader cannot use them as a concise answer to "what does togi do?"
 
 This design adds an acceptance-specification suite above the package tests.
 Each feature describes a user story in Gherkin and exercises integrations
-between application modules through a replaceable driver. The specifications
-become the primary behavioral catalog; package tests remain the fast tool for
-building toward those behaviors and exhaustively covering edge cases.
+between application modules through a replaceable driver. The feature files
+become the primary catalog of application behavior; package tests remain the
+fast tool for building toward those behaviors and exhaustively covering edge
+cases.
 
-The initial suite targets application logic directly. It does not test Cobra
-argument parsing or the compiled process boundary. Those drivers can be added
-later and run the same feature files without changing the specifications.
+The same feature files run through two test-only drivers. The default service
+driver targets application logic directly. An opt-in compiled-CLI driver
+exercises the public process boundary without changing the specifications.
+Cobra argument parsing is covered through that compiled boundary rather than
+through a separate in-process driver.
 
 ## Dependency and Execution Model
 
@@ -30,18 +33,45 @@ goal of this work, and maintaining a local Gherkin runner would be more code,
 less capable, and less familiar than accepting a focused test dependency.
 Godog remains pre-1.0, so the version is pinned and upgrades are explicit.
 
-The acceptance suite runs as part of:
+The acceptance suite registers a Go test flag with the values `service`,
+`cli`, and `all`. Omitting the flag selects `service`, so the normal repository
+test command runs only the application-level suite:
 
 ```sh
 go test ./...
+go test ./acceptance -v -args -acceptance.driver=cli
+go test ./acceptance -v -args -acceptance.driver=all
 ```
 
-It requires no installed gate tools and performs no network access. Real Git
-repositories live under test-owned temporary directories. Fake gate
-executables and XDG config/state/cache roots are isolated per scenario.
+Selecting `cli` runs only the compiled-CLI driver. For each feature test,
+selecting `all` runs the service driver first and the CLI driver second. An
+unknown or unavailable driver is an error, never a skip or an empty successful
+matrix. Because package-specific flags cannot safely be passed through
+`go test ./...`, the explicit driver forms target `./acceptance` directly.
+
+Every example runs through every selected driver except an example that
+requires a test-only capability absent from the production boundary. The only
+initial exception is simulated platform selection: those examples carry an
+`@simulated-platform` tag, run through the service driver, and are excluded
+from the CLI driver's Godog tag expression. The CLI driver still runs the
+real-host platform example. The driver registry declares this matrix, and a
+harness test fails if an example is excluded without a declared capability or
+if a selected driver executes no examples.
+
+The scenarios require no installed gate tools or external network service.
+Real Git repositories and remotes live under test-owned temporary directories.
+Fake gate executables and XDG config/state/cache roots are isolated per
+scenario. Verification runs in a network-denied environment after Go module
+dependencies are available, so an accidental scenario dependency cannot pass.
 Scenarios that execute the Phase 1/2 runtime run only on Linux. Other hosts
 still compile the suite and execute the unsupported-platform specification;
-Linux-only feature groups skip with an explicit reason.
+Linux-only feature groups skip with an explicit reason. Host eligibility is a
+suite precondition independent of the selected driver's capability tags.
+
+Every driver, fixture, step definition, and Godog dependency lives in
+`*_test.go` files or the test dependency graph. `go build ./cmd/togi` includes
+none of the acceptance harness. The CLI driver builds the production binary
+only when that driver is selected.
 
 ## Suite Layout
 
@@ -65,14 +95,22 @@ acceptance/
 ├── supporting_platforms_test.go
 ├── driver_test.go
 ├── service_driver_test.go
+├── cli_driver_test.go
+├── repository_steps_test.go
+├── gate_steps_test.go
+├── report_steps_test.go
+├── history_steps_test.go
+├── wiki_steps_test.go
 ├── repository_test.go
 └── gate_tool_test.go
 ```
 
 Each `.feature` file is the primary human-readable specification for one
 cohesive capability. Its corresponding `_test.go` file owns that feature's
-scenario state, step bindings, and step implementations. Shared files contain
-only the driver port and test infrastructure; they do not contain story text.
+scenario state and feature-specific actions. Shared step files own the
+canonical vocabulary and implementations for repository, gate, report, run
+history, and principle-page concepts. Shared infrastructure contains no story
+text.
 
 This test-only `acceptance` package does not introduce an application module
 or alter the glossary-owned package layout in ADR-0012.
@@ -82,22 +120,30 @@ or alter the glossary-owned package layout in ADR-0012.
 Each feature group gets its own `godog.TestSuite` pointed at exactly one
 feature path. This differs from the smallest official examples, which run a
 whole `features/` directory through one initializer, but uses the same public
-API and keeps unrelated step vocabularies from forming one global registry.
+API and permits focused execution. Each suite composes the domain step sets it
+needs. A shared step expression therefore has one meaning across features
+without forcing every feature to register unrelated vocabulary.
+
+Every step expression is declared once in a domain-owned catalog or as a
+feature-specific action. Feature initializers select catalog entries; they do
+not redeclare their expressions. A harness test assembles all catalogs and
+feature actions together and fails duplicate expressions, even though normal
+execution keeps one Godog registry per feature.
 
 The suite uses Godog's documented feature-object pattern. The
 `ScenarioInitializer` creates a new feature state object for every scenario,
-then that object binds its methods directly with `Given`, `When`, and `Then`.
-There is no separate `registerReportingSteps` layer.
+then that object binds feature actions and the required domain step sets with
+`Given`, `When`, and `Then`.
 
 Conceptually:
 
 ```go
 func TestRunningTheGauntlet(t *testing.T) {
-	forEachDriver(t, func(t *testing.T, factory DriverFactory) {
+	forEachSelectedDriver(t, func(t *testing.T, factory DriverFactory) {
 		suite := godog.TestSuite{
 			Name: "running the gauntlet",
 			ScenarioInitializer: func(sc *godog.ScenarioContext) {
-				feature := &gauntletFeature{factory: factory}
+				feature := newGauntletFeature(factory)
 				feature.InitializeScenario(sc)
 			},
 			Options: featureOptions(t, "features/running_the_gauntlet.feature"),
@@ -109,43 +155,90 @@ func TestRunningTheGauntlet(t *testing.T) {
 func (feature *gauntletFeature) InitializeScenario(sc *godog.ScenarioContext) {
 	sc.Before(feature.startScenario)
 	sc.After(feature.finishScenario)
-	sc.Given(`^a committed Go repository$`, feature.aCommittedGoRepository)
+	feature.repositories.Bind(sc)
+	feature.gates.Bind(sc)
+	feature.reports.Bind(sc)
 	sc.When(`^I run the gauntlet$`, feature.iRunTheGauntlet)
-	sc.Then(`^the complexity gate is errored$`, feature.theComplexityGateIsErrored)
 }
 ```
 
+`featureOptions` sets `Strict: true`, `TestingT: t`, `Concurrency: 1`,
+`Randomize: 0`, and exactly one feature path. Strict mode makes undefined,
+pending, and ambiguous steps fail the suite. A harness regression test proves
+that undefined, pending, and ambiguous steps each produce a nonzero result.
+
 `Before` creates the isolated driver and scenario resources. `After` closes
 the driver and removes any resources not already owned by `testing.T`.
-Scenarios run serially initially. The state lifecycle is nevertheless
-scenario-local, so later parallelism does not require redesigning the step
-definitions.
+Hooks perform isolation and cleanup only. Every repository shape, gate
+behavior, platform choice, or other condition that causes the expected result
+appears in a visible `Given` step. Scenarios run serially initially.
+
+## Gherkin Authoring Rules
+
+Feature text is declarative application language, not a script of driver
+operations. Each feature names the actor, capability, and benefit. Examples
+normally use three to five steps, contain one event, and illustrate one
+distinct user-visible contract. Causally relevant setup remains visible in
+`Given`; `Then` steps assert documented output, errors, or persisted artifacts
+observable at the selected driver boundary.
+
+Gherkin's optional `Rule:` keyword groups examples under one business
+invariant, such as `Rule: An errored gate never suppresses healthy findings`.
+It is a Gherkin document heading, not a togi gate rule or finding `rule_id`.
+Use it when it makes a feature easier to scan; do not add it mechanically.
+
+Wording should survive a change of driver or implementation. Feature text
+therefore does not mention Cobra, Go service construction, fake tools,
+subprocess stdout, JSON decoding, or test helpers. Concrete names and values
+are preferred where they make an example easier to follow. The feature
+catalog below is scope: before implementation is complete, every listed
+user-visible behavior maps to a named example or `Rule:` in its feature file.
+This traceability does not pull exhaustive tool-rule or language-parser
+matrices into acceptance; those remain with the owning package or future
+language module.
 
 ## Driver Boundary
 
-Gherkin and step definitions speak only in application concepts: repository,
-gate, finding, report, verdict, run history, and principle page. They do not
-mention Cobra commands, concrete service construction, or subprocess output.
+Gherkin and step definitions speak in application concepts: repository, gate,
+finding, report, verdict, run history, and principle page. Driver code alone
+knows whether those actions are service calls or process invocations.
 
-`DriverFactory` creates one isolated driver per scenario. `TogiDriver` exposes
-the application actions required by the features:
+`DriverFactory` creates one isolated set of domain drivers per scenario. The
+port is split by capability rather than forming one broad interface:
 
-- run the gauntlet on a repository with explicit options;
-- read the latest completed run;
-- show, lint, and eject principle pages;
-- select a simulated runtime platform where the platform story requires it;
-- close scenario-owned resources.
+- `GauntletDriver` runs the gauntlet on a repository with explicit options;
+- `HistoryDriver` invokes status for a repository;
+- `WikiDriver` shows, lints, and ejects principle pages;
+- `Close` releases scenario-owned resources.
 
-The driver returns test-side result values rather than calling `testing.T`.
-Results expose reports, gate statuses, findings, verdicts, persisted artifact
-locations, rendered output, and classified application errors. This keeps
-assertions in Then steps and permits future drivers to translate Cobra output
-or a compiled process back into the same result model.
+Platform simulation and fixture construction belong to the scenario
+environment, not these user-action ports. A feature depends only on the
+capabilities it exercises. Capability tags describe the required test seam,
+not the production implementation or invocation mechanism.
+
+Drivers return raw test-side observations rather than calling `testing.T`.
+`RunObservation` preserves stdout, stderr, the typed service error or process
+exit status, persisted report bytes, and artifact locations. Drivers do not
+return a decoded verdict, finding set, gate status, or classified outcome.
+
+A shared acceptance observation layer decodes documented artifacts and
+classifies the driver-specific exit source for `Then` steps. Its constructors
+retain provenance, so a report value can only come from report bytes and an
+outcome can only come from the typed error or process status. It cannot infer
+an errored report from exit code 4, infer an exit category from a report
+verdict, or substitute the service's returned report for persisted bytes in a
+persistence assertion. Focused harness tests feed contradictory observations,
+such as exit 4 with no report, and prove the channels remain independent.
+This keeps assertions in `Then` steps without making each driver a second
+implementation of togi's semantics.
 
 The initial service driver assembles `run.Service`, `wiki.Service`, gate
 loaders, enrichers, XDG paths, and deterministic clocks/randomness. It is the
-only acceptance code allowed to import those concrete application services.
-Future Cobra and compiled-CLI drivers implement the same test-side port.
+only driver allowed to import those concrete application services. The CLI
+driver builds the production binary once for its selected test run, invokes
+it in each scenario's repository with isolated environment and streams, and
+observes its exit status and external artifacts. Both implement the same
+domain ports and run the same feature files.
 
 Repository setup is separate test infrastructure rather than part of the
 driver. It creates real repositories, commits, branches, linked worktrees,
@@ -161,21 +254,23 @@ Each scenario follows the same lifecycle:
 Gherkin Given steps
     -> real temporary Git repository + isolated XDG roots + fake gates
 Gherkin When step
-    -> TogiDriver application action
-    -> service driver invokes assembled application services
-    -> structured acceptance result captures report, artifacts, and error
+    -> domain driver application action
+    -> selected driver invokes a service or the compiled CLI
+    -> RunObservation captures raw output, outcome source, and artifacts
 Gherkin Then steps
-    -> assertions over user-observable behavior
+    -> shared observation layer decodes artifacts for assertions
 After hook
     -> driver/resource cleanup
 ```
 
 Expected togi outcomes are data, not harness failures. For example,
 `run.Service.Run` returns both a report and a typed exit error when findings
-remain or a gate is errored. The service driver records both in `RunResult`,
-the When step succeeds, and Then steps assert the report, verdict, and error
-classification. Setup failures, unreadable fixtures, or an inability to call
-the application remain step errors and fail the scenario immediately.
+remain or a gate is errored, while the CLI exposes the corresponding report
+artifact and process status. The selected driver records those independent
+channels in `RunObservation`; the When step succeeds, and Then steps decode and
+assert the report, verdict, and outcome. Setup failures, unreadable fixtures,
+or an inability to call the application remain step errors and fail the
+scenario immediately.
 
 Step functions return descriptive errors rather than calling `t.Fatal`.
 Failure messages name the expected business outcome and the observed report.
@@ -224,8 +319,9 @@ As an operator evolving personal standards, I can customize gates outside the
 target repository so that my gauntlet changes without imposing repository
 files on collaborators.
 
-Scenarios cover working shipped defaults, wholesale XDG overrides, additional
-override-only gates, and rejection of invalid definitions before tools run.
+Scenarios cover shipped definitions loading and normalizing representative
+recorded output, wholesale XDG overrides, additional override-only gates, and
+rejection of invalid definitions before tools run.
 
 ### Using principle pages
 
@@ -262,6 +358,11 @@ Package tests continue to own:
 - cancellation checkpoints and process-tree implementation details;
 - platform-specific build and lock mechanics.
 
+Language-specific normalizer fixtures and tool-rule matrices remain below the
+acceptance boundary even if languages later become their own modules. The
+acceptance suite keeps one representative language example wherever language
+changes do not alter the user-visible contract.
+
 A security or failure behavior appears once in the acceptance suite when it
 defines a user-facing guarantee. Exhaustive attack and error permutations stay
 in the owning unit tests. After the acceptance suite has proven stable, exact
@@ -278,11 +379,15 @@ are the behavior under test.
 All Git behavior uses real local repositories. Gate behavior uses fake tools
 whose stdout, stderr, exit status, delay, and version output are controlled by
 the scenario. Tests never require golangci-lint or gocyclo to be installed.
+This proves togi's behavior against representative tool contracts, not that a
+new external-tool release remains compatible. Any real-tool compatibility
+check stays tagged and outside the default acceptance run.
 
 The suite begins with Godog concurrency set to one. This favors deterministic
-output and makes filesystem ownership obvious. The driver boundary and
-per-scenario initializer preserve the option to parallelize later after
-measuring suite cost.
+output and makes filesystem ownership obvious. Later parallelism additionally
+requires command-specific environment injection and forbids process-global
+working-directory or environment mutation; scenario-local objects alone are
+not sufficient.
 
 ## Verification
 
@@ -290,12 +395,18 @@ Implementation is complete when:
 
 ```sh
 go test ./acceptance -v
+go test ./acceptance -v -args -acceptance.driver=cli
+go test ./acceptance -v -args -acceptance.driver=all
 go test ./...
 go build ./...
 ```
 
-pass without network access or installed gate tools. Each feature can be run
-independently through its Go test, and Godog exposes individual scenarios as
-subtests for focused execution. The existing package suite continues to pass
-unchanged except for deliberate test-infrastructure reuse or exact duplicate
-removal approved after adoption.
+pass in a network-denied environment, after module dependencies are available,
+and without installed gate tools. The default commands execute the service
+driver only; CLI and all-driver verification are explicit. Each feature can be
+run independently through its Go test with the same driver flag, and Godog
+exposes individual scenarios as subtests for focused execution. On Linux,
+required scenarios may not be skipped. Strict mode rejects pending, undefined,
+and ambiguous steps. The existing package suite continues to pass unchanged
+except for deliberate test-infrastructure reuse or exact duplicate removal
+approved after adoption.
