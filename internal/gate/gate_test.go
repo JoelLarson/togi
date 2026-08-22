@@ -58,6 +58,7 @@ func TestManifestLocation(t *testing.T) {
 		{name: "omitted", want: PointLocation},
 		{name: "point", location: `location = "point"`, want: PointLocation},
 		{name: "entity", location: `location = "entity"`, want: EntityLocation},
+		{name: "explicit empty", location: `location = ""`, wantErr: "invalid location"},
 		{name: "invalid", location: `location = "file"`, wantErr: "invalid location"},
 	}
 
