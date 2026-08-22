@@ -250,6 +250,19 @@ func TestLintFailsOnConflictingAliases(t *testing.T) {
 	if !errors.Is(err, ErrConflictingAliases) {
 		t.Fatalf("err = %v, want ErrConflictingAliases", err)
 	}
+	var conflictErr *AliasConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("err = %v, want *AliasConflictError", err)
+	}
+	if conflictErr.RuleIDs != 1 {
+		t.Fatalf("RuleIDs = %d, want 1", conflictErr.RuleIDs)
+	}
+	if got, want := conflictErr.Error(), "conflicting aliases: 1 rule IDs"; got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
+	}
+	if got := conflictErr.ExitCode(); got != 1 {
+		t.Fatalf("ExitCode() = %d, want 1", got)
+	}
 	if !strings.Contains(stderr.String(), `"gocyclo/complexity" is aliased to`) {
 		t.Fatalf("stderr = %q", stderr.String())
 	}

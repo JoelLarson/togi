@@ -2,12 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"strings"
 	"testing"
 
-	runpkg "github.com/joellarson/togi/internal/run"
 	"github.com/joellarson/togi/internal/wiki"
 )
 
@@ -87,15 +87,15 @@ func TestWikiLintSucceedsWithoutConflicts(t *testing.T) {
 }
 
 func TestWikiLintConflictsExitWithFindingsStatus(t *testing.T) {
-	service := &fakeWikiService{lintErr: wiki.ErrConflictingAliases}
-	err := executeWiki(t, service, "wiki", "lint")
-
-	var exitErr *runpkg.ExitError
-	if !errors.As(err, &exitErr) {
-		t.Fatalf("err = %v, want an ExitError", err)
+	conflictErr := &wiki.AliasConflictError{RuleIDs: 2}
+	service := &fakeWikiService{lintErr: conflictErr}
+	cmd := newRootCommandWithServices(streams{out: io.Discard, err: io.Discard}, &fakeService{}, service)
+	if got := executeCommand(context.Background(), []string{"wiki", "lint"}, io.Discard, cmd); got != 1 {
+		t.Fatalf("exit code = %d, want 1", got)
 	}
-	if exitErr.Code != 1 {
-		t.Fatalf("exit code = %d, want 1", exitErr.Code)
+	err := executeWiki(t, service, "wiki", "lint")
+	if err != conflictErr {
+		t.Fatalf("err = %v, want original conflict error", err)
 	}
 }
 
@@ -104,9 +104,9 @@ func TestWikiLintPropagatesOtherErrors(t *testing.T) {
 	service := &fakeWikiService{lintErr: errors.New("gate directory unreadable")}
 	err := executeWiki(t, service, "wiki", "lint")
 
-	var exitErr *runpkg.ExitError
-	if errors.As(err, &exitErr) {
-		t.Fatalf("err = %v, want an untyped error", err)
+	var exitCoder interface{ ExitCode() int }
+	if errors.As(err, &exitCoder) {
+		t.Fatalf("err = %v, want an error without an exit code", err)
 	}
 	if err == nil || err.Error() != "gate directory unreadable" {
 		t.Fatalf("err = %v", err)

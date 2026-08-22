@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,19 +32,11 @@ func executeCommand(ctx context.Context, args []string, errOut io.Writer, cmd in
 }) int {
 	cmd.SetContext(ctx)
 	cmd.SetArgs(args)
-	if err := cmd.Execute(); err != nil {
+	err := cmd.Execute()
+	if err != nil {
 		_, _ = fmt.Fprintln(errOut, err)
-		var exitErr *runpkg.ExitError
-		if errors.As(err, &exitErr) && exitErr != nil && validPublishedExitCode(exitErr.Code) {
-			return exitErr.Code
-		}
-		return 70
 	}
-	return 0
-}
-
-func validPublishedExitCode(code int) bool {
-	return code >= 1 && code <= 5
+	return runpkg.ResolveExit(err)
 }
 
 func mainEnvironment(getenv func(string) string) config.Environment {

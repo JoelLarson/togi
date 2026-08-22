@@ -173,13 +173,7 @@ func newWikiCommand(pages wikiService) *cobra.Command {
 		Use:   "lint",
 		Short: "Check every alias target for dangling and conflicting pages",
 		Args:  cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			err := pages.Lint()
-			if errors.Is(err, wiki.ErrConflictingAliases) {
-				return &runpkg.ExitError{Code: 1, Err: err}
-			}
-			return err
-		},
+		RunE:  func(_ *cobra.Command, _ []string) error { return pages.Lint() },
 	})
 	command.AddCommand(&cobra.Command{
 		Use:   "eject <page>",

@@ -20,9 +20,10 @@ import (
 
 // Options controls one report-only run.
 type Options struct {
-	Root       string
-	Base       string
-	GateNames  []string
+	Root      string
+	Base      string
+	GateNames []string
+	// ReportOnly stabilizes the pre-phase-3 CLI surface; see docs/implementation.md.
 	ReportOnly bool
 	Verbose    bool
 	NoColor    bool

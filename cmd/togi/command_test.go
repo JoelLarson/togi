@@ -36,6 +36,13 @@ type fakeService struct {
 	statusErr     error
 }
 
+type commandExitError struct {
+	code int
+}
+
+func (e commandExitError) Error() string { return "command exit error" }
+func (e commandExitError) ExitCode() int { return e.code }
+
 func (service *fakeService) Run(ctx context.Context, opts runpkg.Options) (runpkg.Report, error) {
 	service.ctx = ctx
 	service.runOptions = opts
@@ -125,6 +132,7 @@ func TestMainRunMapsTypedAndInternalErrors(t *testing.T) {
 		want int
 	}{
 		{name: "typed", err: &runpkg.ExitError{Code: 5, Err: errors.New("unverified")}, want: 5},
+		{name: "generic exit coder", err: commandExitError{code: 3}, want: 3},
 		{name: "blocked", err: &runpkg.ExitError{Code: 2, Err: errors.New("blocked")}, want: 2},
 		{name: "typed nil", err: typedNil, want: 70},
 		{name: "zero", err: &runpkg.ExitError{Code: 0}, want: 70},

@@ -17,6 +17,26 @@ import (
 // than one page.
 var ErrConflictingAliases = errors.New("conflicting aliases")
 
+// AliasConflictError reports how many rule IDs point at conflicting pages.
+type AliasConflictError struct {
+	RuleIDs int
+}
+
+func (e *AliasConflictError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("conflicting aliases: %d rule IDs", e.RuleIDs)
+}
+
+// ExitCode marks conflicting aliases as findings for CLI callers.
+func (e *AliasConflictError) ExitCode() int { return 1 }
+
+// Is preserves compatibility with ErrConflictingAliases.
+func (e *AliasConflictError) Is(target error) bool {
+	return target == ErrConflictingAliases
+}
+
 // GateSource supplies the compiled gate definitions whose bindings own wiki aliases.
 type GateSource interface {
 	LoadAll() ([]gate.Gate, error)
@@ -159,7 +179,7 @@ func (s Service) Lint() error {
 		return err
 	}
 	if len(conflicts) > 0 {
-		return fmt.Errorf("%w: %d rule IDs", ErrConflictingAliases, len(conflicts))
+		return &AliasConflictError{RuleIDs: len(conflicts)}
 	}
 	return nil
 }
