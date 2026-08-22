@@ -113,6 +113,20 @@ func TestFilterTouchedRejectsChangedPathTraversal(t *testing.T) {
 	}
 }
 
+func TestFilterTouchedRejectsFindingPathTraversal(t *testing.T) {
+	finding := scopedFinding("dir/../file.go", 10, 0)
+	if _, err := FilterTouched([]Finding{finding}, ChangedLines{"file.go": {{Start: 10, End: 10}}}); err == nil {
+		t.Fatal("FilterTouched() error = nil, want finding path validation error")
+	}
+}
+
+func TestFilterTouchedRejectsAbsoluteFindingPath(t *testing.T) {
+	finding := scopedFinding(filepath.Join(string(filepath.Separator), "file.go"), 10, 0)
+	if _, err := FilterTouched([]Finding{finding}, ChangedLines{"file.go": {{Start: 10, End: 10}}}); err == nil {
+		t.Fatal("FilterTouched() error = nil, want finding path validation error")
+	}
+}
+
 func TestFilterTouchedDoesNotMutateInputOrOccurrenceStorage(t *testing.T) {
 	finding := scopedFinding("src/file.go", 10, 0)
 	finding.Occurrences = []Occurrence{{Line: 30}, {Line: 20}}

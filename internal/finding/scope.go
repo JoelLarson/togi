@@ -29,7 +29,10 @@ func FilterTouched(findings []Finding, changed ChangedLines) ([]Finding, error) 
 		if err := Validate(finding); err != nil {
 			return nil, fmt.Errorf("finding %d: %w", index, err)
 		}
-		file := normalizeFile(finding.File)
+		file, err := canonicalRepositoryPath(finding.File)
+		if err != nil {
+			return nil, fmt.Errorf("finding %d: %w", index, err)
+		}
 		ranges := changedPaths[file]
 		if len(ranges) == 0 {
 			continue
@@ -64,7 +67,7 @@ func FilterTouched(findings []Finding, changed ChangedLines) ([]Finding, error) 
 func validateChangedLines(changed ChangedLines) (map[string][]LineRange, error) {
 	validated := make(map[string][]LineRange, len(changed))
 	for path, ranges := range changed {
-		canonical, err := validateChangedPath(path)
+		canonical, err := canonicalRepositoryPath(path)
 		if err != nil {
 			return nil, err
 		}
@@ -78,20 +81,24 @@ func validateChangedLines(changed ChangedLines) (map[string][]LineRange, error) 
 	return validated, nil
 }
 
-func validateChangedPath(path string) (string, error) {
+func canonicalRepositoryPath(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
-		return "", errors.New("changed path must not be empty")
+		return "", errors.New("repository path must not be empty")
 	}
 	portable := strings.ReplaceAll(path, `\`, "/")
-	if filepath.IsAbs(path) || strings.HasPrefix(portable, "/") {
-		return "", fmt.Errorf("changed path %q must be repository-relative", path)
+	if filepath.IsAbs(path) || strings.HasPrefix(portable, "/") || isWindowsAbsolute(portable) {
+		return "", fmt.Errorf("repository path %q must be repository-relative", path)
 	}
 	for _, component := range strings.Split(portable, "/") {
 		if component == ".." {
-			return "", fmt.Errorf("changed path %q must not contain traversal", path)
+			return "", fmt.Errorf("repository path %q must not contain traversal", path)
 		}
 	}
 	return normalizeFile(path), nil
+}
+
+func isWindowsAbsolute(path string) bool {
+	return len(path) >= 3 && ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) && path[1] == ':' && path[2] == '/'
 }
 
 func overlapsChanged(location Occurrence, changed []LineRange) bool {
