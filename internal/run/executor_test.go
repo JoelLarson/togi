@@ -126,24 +126,24 @@ func helperBinary(t *testing.T) string {
 }
 
 type rawWrite struct {
-	gate, language, stream string
-	raw                    []byte
+	stream string
+	raw    []byte
 }
 
-type memoryRawStore struct {
+type memoryRawSink struct {
 	mu     sync.Mutex
 	writes []rawWrite
 	err    map[string]error
 }
 
-func (s *memoryRawStore) WriteRaw(gate, language, stream string, raw []byte) error {
+func (s *memoryRawSink) WriteRaw(stream string, raw []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.writes = append(s.writes, rawWrite{gate: gate, language: language, stream: stream, raw: append([]byte(nil), raw...)})
+	s.writes = append(s.writes, rawWrite{stream: stream, raw: append([]byte(nil), raw...)})
 	return s.err[stream]
 }
 
-func (s *memoryRawStore) raw(stream string) []byte {
+func (s *memoryRawSink) raw(stream string) []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, write := range s.writes {
@@ -182,7 +182,7 @@ func (e *recordingEnricher) Enrich(_ context.Context, ctx enricher.Context, in [
 	return in, nil
 }
 
-func executeFixture(t *testing.T, root string, binding gate.Binding, manifest gate.Manifest) (GateReport, *memoryRawStore, *recordingEnricher) {
+func executeFixture(t *testing.T, root string, binding gate.Binding, manifest gate.Manifest) (GateReport, *memoryRawSink, *recordingEnricher) {
 	t.Helper()
 	if manifest.Name == "" {
 		manifest.Name = "test"
@@ -191,10 +191,10 @@ func executeFixture(t *testing.T, root string, binding gate.Binding, manifest ga
 		manifest.Timeout = 5 * time.Second
 	}
 	compiledGate, compiledBinding := compileGateFixture(t, manifest, binding)
-	store := &memoryRawStore{}
+	store := &memoryRawSink{}
 	enrich := &recordingEnricher{}
 	report := (Executor{Enrichers: enricher.Registry{"go": enrich}}).Execute(context.Background(), compileRequest(t, Request{
-		Gate: compiledGate, Binding: compiledBinding, Root: root, RawStore: store,
+		Gate: compiledGate, Binding: compiledBinding, Root: root, RawSink: store,
 	}))
 	return report, store, enrich
 }
@@ -322,7 +322,7 @@ func TestExecuteGroupsBeforeEnrichThenFiltersDiffScope(t *testing.T) {
 	}}
 	report := (Executor{Enrichers: enricher.Registry{"go": enrich}}).Execute(context.Background(), compileRequest(t, Request{
 		Gate:    gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff, Location: gate.EntityLocation}},
-		Binding: binding, Root: root, RawStore: &memoryRawStore{},
+		Binding: binding, Root: root, RawSink: &memoryRawSink{},
 		ChangedLines: finding.ChangedLines{"source.go": {{Start: 6, End: 6}}},
 	}))
 
@@ -352,7 +352,7 @@ func TestExecuteRepoScopeBypassesNilChangedLines(t *testing.T) {
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, raw, "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"warning": finding.Warning}}
 	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{
 		Gate:    gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Repo}},
-		Binding: binding, Root: root, RawStore: &memoryRawStore{},
+		Binding: binding, Root: root, RawSink: &memoryRawSink{},
 	}))
 	if report.Status != GateFindings || len(report.Findings) != 1 {
 		t.Fatalf("report = %#v", report)
@@ -366,7 +366,7 @@ func TestExecuteDiffScopeAcceptsEmptyChangedLines(t *testing.T) {
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, raw, "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"warning": finding.Warning}}
 	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{
 		Gate:    gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff}},
-		Binding: binding, Root: root, RawStore: &memoryRawStore{}, ChangedLines: finding.ChangedLines{},
+		Binding: binding, Root: root, RawSink: &memoryRawSink{}, ChangedLines: finding.ChangedLines{},
 	}))
 	if report.Status != GatePassed || len(report.Findings) != 0 {
 		t.Fatalf("report = %#v", report)
@@ -377,10 +377,10 @@ func TestExecuteRejectsNilChangedLinesForDiffScopeBeforeCommand(t *testing.T) {
 	root := t.TempDir()
 	marker := filepath.Join(root, "executed")
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: []string{helperBinary(t), "mark", marker}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
-	store := &memoryRawStore{}
+	store := &memoryRawSink{}
 	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{
 		Gate:    gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff}},
-		Binding: binding, Root: root, RawStore: store,
+		Binding: binding, Root: root, RawSink: store,
 	}))
 	if report.Status != GateErrored || report.Error != "diff-scoped gate requires changed lines" {
 		t.Fatalf("report = %#v", report)
@@ -404,7 +404,7 @@ func TestExecuteRejectsInvalidChangedLinesForDiffScopeBeforeVersionOrGate(t *tes
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			versionMarker := filepath.Join(root, "version-"+strings.ReplaceAll(test.name, " ", "-"))
-			store := &memoryRawStore{}
+			store := &memoryRawSink{}
 			runnerCalled := false
 			binding := gate.Binding{
 				Language: "go", Tool: "fixture", Command: []string{"fixture"}, SuccessExitCodes: []int{0},
@@ -421,7 +421,7 @@ func TestExecuteRejectsInvalidChangedLinesForDiffScopeBeforeVersionOrGate(t *tes
 				Gate:         gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff}},
 				Binding:      binding,
 				Root:         root,
-				RawStore:     store,
+				RawSink:      store,
 				ChangedLines: test.changed,
 			}))
 			if report.Status != GateErrored || report.Error != "filter findings by scope: invalid changed-line scope" {
@@ -448,7 +448,7 @@ func TestExecuteRedactsInvalidDiffScope(t *testing.T) {
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, raw, "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"warning": finding.Warning}}
 	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{
 		Gate:    gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff}},
-		Binding: binding, Root: root, RawStore: &memoryRawStore{},
+		Binding: binding, Root: root, RawSink: &memoryRawSink{},
 		ChangedLines: finding.ChangedLines{"../" + secret: {{Start: 1, End: 1}}},
 	}))
 	if report.Status != GateErrored || report.Error != "filter findings by scope: invalid changed-line scope" || len(report.Findings) != 0 {
@@ -473,7 +473,7 @@ func TestCollectKeepsHealthySiblingWhenScopeOrEnrichmentFails(t *testing.T) {
 		{
 			name:     "scope",
 			executor: Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}},
-			broken:   Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "broken", Timeout: time.Second, Scope: gate.Diff}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}, ChangedLines: finding.ChangedLines{"../invalid": {{Start: 1, End: 1}}}},
+			broken:   Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "broken", Timeout: time.Second, Scope: gate.Diff}}, Binding: binding, Root: root, RawSink: &memoryRawSink{}, ChangedLines: finding.ChangedLines{"../invalid": {{Start: 1, End: 1}}}},
 		},
 		{
 			name: "enrichment",
@@ -483,11 +483,11 @@ func TestCollectKeepsHealthySiblingWhenScopeOrEnrichmentFails(t *testing.T) {
 				}
 				return nil
 			}}}},
-			broken: Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "broken", Timeout: time.Second, Scope: gate.Repo, Location: gate.EntityLocation}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}},
+			broken: Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "broken", Timeout: time.Second, Scope: gate.Repo, Location: gate.EntityLocation}}, Binding: binding, Root: root, RawSink: &memoryRawSink{}},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			healthy := compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "healthy", Timeout: time.Second, Scope: gate.Repo, Location: gate.PointLocation}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}})
+			healthy := compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "healthy", Timeout: time.Second, Scope: gate.Repo, Location: gate.PointLocation}}, Binding: binding, Root: root, RawSink: &memoryRawSink{}})
 			reports := Collect(context.Background(), test.executor, []Request{compileRequest(t, test.broken), healthy}, 2)
 			if len(reports) != 2 || reports[0].Status != GateErrored || reports[1].Status != GateFindings || len(reports[1].Findings) != 1 {
 				t.Fatalf("reports = %#v", reports)
@@ -560,9 +560,9 @@ func TestExecuteInfrastructureFailuresAreErrored(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			store := &memoryRawStore{}
+			store := &memoryRawSink{}
 			enrich := &recordingEnricher{}
-			report := (Executor{Enrichers: enricher.Registry{"go": enrich}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second}}, Binding: test.bind(base), Root: root, RawStore: store}))
+			report := (Executor{Enrichers: enricher.Registry{"go": enrich}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second}}, Binding: test.bind(base), Root: root, RawSink: store}))
 			if report.Status != GateErrored || len(report.Findings) != 0 || report.Error == "" {
 				t.Fatalf("report = %#v", report)
 			}
@@ -572,10 +572,10 @@ func TestExecuteInfrastructureFailuresAreErrored(t *testing.T) {
 
 func TestExecuteDeadlineCoversProcessAndPersistsBothStreams(t *testing.T) {
 	root := t.TempDir()
-	store := &memoryRawStore{}
+	store := &memoryRawSink{}
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: []string{helperBinary(t), "sleep", "5s"}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
 	started := time.Now()
-	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "slow", Timeout: 40 * time.Millisecond}}, Binding: binding, Root: root, RawStore: store}))
+	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "slow", Timeout: 40 * time.Millisecond}}, Binding: binding, Root: root, RawSink: store}))
 	if report.Status != GateErrored || !strings.Contains(report.Error, "deadline") {
 		t.Fatalf("report = %#v", report)
 	}
@@ -591,7 +591,7 @@ func TestExecuteDeadlineBoundsInheritedPipeShutdown(t *testing.T) {
 	root := t.TempDir()
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: []string{helperBinary(t), "spawn", "5s"}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
 	started := time.Now()
-	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "tree", Timeout: 40 * time.Millisecond}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}}))
+	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "tree", Timeout: 40 * time.Millisecond}}, Binding: binding, Root: root, RawSink: &memoryRawSink{}}))
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("inherited pipes held execution for %v", elapsed)
 	}
@@ -605,7 +605,7 @@ func TestExecuteDeadlineTerminatesDescendants(t *testing.T) {
 	started := filepath.Join(root, "descendant-started")
 	survived := filepath.Join(root, "descendant-survived")
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: []string{helperBinary(t), "spawn-survivor", started, survived}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
-	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "tree", Timeout: 150 * time.Millisecond}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}}))
+	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "tree", Timeout: 150 * time.Millisecond}}, Binding: binding, Root: root, RawSink: &memoryRawSink{}}))
 	if report.Status != GateErrored || !strings.Contains(report.Error, "deadline") {
 		t.Fatalf("report = %#v", report)
 	}
@@ -621,10 +621,10 @@ func TestExecuteDeadlineTerminatesDescendants(t *testing.T) {
 func TestExecutePersistsBeforeClassificationAndStopsOnPersistenceFailure(t *testing.T) {
 	root := t.TempDir()
 	secret := "raw-secret-that-must-not-leak"
-	store := &memoryRawStore{err: map[string]error{"stdout": errors.New("disk full"), "stderr": errors.New("read only")}}
+	store := &memoryRawSink{err: map[string]error{"stdout": errors.New("disk full"), "stderr": errors.New("read only")}}
 	enrich := &recordingEnricher{}
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, secret, "diagnostic", 2), SuccessExitCodes: []int{0}, FindingExitCodes: []int{1}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
-	report := (Executor{Enrichers: enricher.Registry{"go": enrich}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second}}, Binding: binding, Root: root, RawStore: store}))
+	report := (Executor{Enrichers: enricher.Registry{"go": enrich}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second}}, Binding: binding, Root: root, RawSink: store}))
 	if report.Status != GateErrored || enrich.calls != 0 {
 		t.Fatalf("report=%#v enrich calls=%d", report, enrich.calls)
 	}
@@ -639,7 +639,7 @@ func TestExecutePersistsBeforeClassificationAndStopsOnPersistenceFailure(t *test
 func TestExecuteCleanupFailureOverridesValidFindingExit(t *testing.T) {
 	root := t.TempDir()
 	writeSource(t, root, "source.go", "package source\nfunc complex() {}\n")
-	store := &memoryRawStore{}
+	store := &memoryRawSink{}
 	binding := gate.Binding{
 		Language: "go", Tool: "fixture", Command: emitCommand(t, "17 pkg complex source.go:2:1\n", "", 1), SuccessExitCodes: []int{0}, FindingExitCodes: []int{1},
 		Normalizer: `regex:^(?P<value>\d+) \S+ (?P<symbol>\S+) (?P<file>[^:]+):(?P<line>\d+):\d+$`, RuleID: "gocyclo/complexity", Message: "complexity {{.value}} in {{.symbol}}", SeverityMap: map[string]finding.Severity{"default": finding.Warning},
@@ -650,7 +650,7 @@ func TestExecuteCleanupFailureOverridesValidFindingExit(t *testing.T) {
 		result.CleanupErr = errors.New("injected process-tree cleanup failure")
 		return result
 	}
-	report := executor.Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "complexity", Timeout: time.Second}}, Binding: binding, Root: root, RawStore: store}))
+	report := executor.Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "complexity", Timeout: time.Second}}, Binding: binding, Root: root, RawSink: store}))
 	if report.Status != GateErrored || len(report.Findings) != 0 || !strings.Contains(report.Error, "clean up") {
 		t.Fatalf("report = %#v", report)
 	}
@@ -661,9 +661,9 @@ func TestExecuteCleanupFailureOverridesValidFindingExit(t *testing.T) {
 
 func TestExecuteCapsAndMarksBothStreamsWithoutDeadlock(t *testing.T) {
 	root := t.TempDir()
-	store := &memoryRawStore{}
+	store := &memoryRawSink{}
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: []string{helperBinary(t), "large", fmt.Sprint(rawOutputLimit + 512*1024)}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
-	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "large", Timeout: 5 * time.Second}}, Binding: binding, Root: root, RawStore: store}))
+	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "large", Timeout: 5 * time.Second}}, Binding: binding, Root: root, RawSink: store}))
 	if report.Status != GateErrored || !strings.Contains(report.Error, "capture limit") {
 		t.Fatalf("report = %#v", report)
 	}
@@ -677,9 +677,9 @@ func TestExecuteCapsAndMarksBothStreamsWithoutDeadlock(t *testing.T) {
 
 func TestExecuteDoesNotTruncateOutputAtExactLimit(t *testing.T) {
 	root := t.TempDir()
-	store := &memoryRawStore{}
+	store := &memoryRawSink{}
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: []string{helperBinary(t), "large", fmt.Sprint(rawOutputLimit)}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
-	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "exact", Timeout: 5 * time.Second}}, Binding: binding, Root: root, RawStore: store}))
+	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "exact", Timeout: 5 * time.Second}}, Binding: binding, Root: root, RawSink: store}))
 	if strings.Contains(report.Error, "capture limit") {
 		t.Fatalf("exact-limit output was marked truncated: %#v", report)
 	}
@@ -693,9 +693,9 @@ func TestExecuteDoesNotTruncateOutputAtExactLimit(t *testing.T) {
 
 func TestExecuteUsesRepositoryDirectoryAndNoShell(t *testing.T) {
 	root := t.TempDir()
-	store := &memoryRawStore{}
+	store := &memoryRawSink{}
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: []string{helperBinary(t), "record-dir"}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
-	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "cwd", Timeout: time.Second}}, Binding: binding, Root: root, RawStore: store}))
+	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "cwd", Timeout: time.Second}}, Binding: binding, Root: root, RawSink: store}))
 	if report.Status != GateErrored {
 		t.Fatalf("report = %#v", report)
 	}
@@ -705,7 +705,7 @@ func TestExecuteUsesRepositoryDirectoryAndNoShell(t *testing.T) {
 
 	marker := filepath.Join(root, "shell-expanded")
 	binding.Command = emitCommand(t, "$(touch "+marker+")", "", 0)
-	report = (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "literal", Timeout: time.Second}}, Binding: binding, Root: root, RawStore: store}))
+	report = (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "literal", Timeout: time.Second}}, Binding: binding, Root: root, RawSink: store}))
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("shell expression executed: %v", err)
 	}
@@ -725,7 +725,7 @@ func TestExecuteEnricherAndGroupingErrorsAreRedacted(t *testing.T) {
 		{name: "group", enrich: &recordingEnricher{mutate: func(in []finding.Finding) []finding.Finding { in[0].RuleID = "invalid"; return in }}, want: "group"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			report := (Executor{Enrichers: enricher.Registry{"go": test.enrich}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second}}, Binding: base, Root: root, RawStore: &memoryRawStore{}}))
+			report := (Executor{Enrichers: enricher.Registry{"go": test.enrich}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second}}, Binding: base, Root: root, RawSink: &memoryRawSink{}}))
 			if report.Status != GateErrored || !strings.Contains(report.Error, test.want) {
 				t.Fatalf("report = %#v", report)
 			}
@@ -737,7 +737,7 @@ func TestExecuteEnricherAndGroupingErrorsAreRedacted(t *testing.T) {
 
 	binding := base
 	binding.Command = emitCommand(t, "secret-normalizer", "", 0)
-	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}}))
+	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second}}, Binding: binding, Root: root, RawSink: &memoryRawSink{}}))
 	if report.Status != GateErrored || strings.Contains(report.Error, "secret-normalizer") {
 		t.Fatalf("normalizer error leaked raw output: %#v", report)
 	}
@@ -758,7 +758,7 @@ func TestExecuteStageErrorsNeverExposePartialRawValues(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			report := (Executor{Enrichers: enricher.Registry{"go": test.enricher}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}}))
+			report := (Executor{Enrichers: enricher.Registry{"go": test.enricher}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second}}, Binding: binding, Root: root, RawSink: &memoryRawSink{}}))
 			if report.Status != GateErrored || !strings.Contains(report.Error, test.stage) {
 				t.Fatalf("report = %#v", report)
 			}
@@ -809,10 +809,10 @@ func TestExecuteVersionChecksAreAdvisoryAndShareDeadline(t *testing.T) {
 		t.Fatalf("version deadline report = %#v", report)
 	}
 
-	store := &memoryRawStore{}
+	store := &memoryRawSink{}
 	binding = base
 	binding.Version = gate.Version{Command: []string{helperBinary(t), "large", fmt.Sprint(rawOutputLimit + 1)}, Pattern: `(\S+)`, Constraint: ">=1.0.0"}
-	report = (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: 5 * time.Second}}, Binding: binding, Root: root, RawStore: store}))
+	report = (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: 5 * time.Second}}, Binding: binding, Root: root, RawSink: store}))
 	if report.Status != GatePassed || len(report.Warnings) == 0 || !strings.Contains(report.Warnings[0], "capture limit") {
 		t.Fatalf("large version report = %#v", report)
 	}
@@ -827,14 +827,14 @@ func TestExecuteDurationUsesInjectedClockAndNeverGoesNegative(t *testing.T) {
 	var index atomic.Int32
 	now := func() time.Time { return times[min(int(index.Add(1))-1, len(times)-1)] }
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, "", "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
-	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}, Now: now}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "clock", Timeout: time.Second}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}}))
+	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}, Now: now}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "clock", Timeout: time.Second}}, Binding: binding, Root: root, RawSink: &memoryRawSink{}}))
 	if report.DurationMS != 0 {
 		t.Fatalf("duration = %d, want 0", report.DurationMS)
 	}
 
 	times = []time.Time{time.Unix(10, 0), time.Unix(11, 500_000_000)}
 	index.Store(0)
-	report = (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}, Now: now}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "clock", Timeout: time.Second}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}}))
+	report = (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}, Now: now}).Execute(context.Background(), compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "clock", Timeout: time.Second}}, Binding: binding, Root: root, RawSink: &memoryRawSink{}}))
 	if report.DurationMS != 1500 {
 		t.Fatalf("duration = %d, want 1500", report.DurationMS)
 	}
@@ -843,8 +843,8 @@ func TestExecuteDurationUsesInjectedClockAndNeverGoesNegative(t *testing.T) {
 func TestExecuteRejectsInvalidRuntimeInputs(t *testing.T) {
 	root := t.TempDir()
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, "", "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
-	valid := compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "gate", Timeout: time.Second}}, Binding: binding, Root: root, RawStore: &memoryRawStore{}})
-	var nilStore *memoryRawStore
+	valid := compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "gate", Timeout: time.Second}}, Binding: binding, Root: root, RawSink: &memoryRawSink{}})
+	var nilSink *memoryRawSink
 	var nilEnricher *recordingEnricher
 	rootFile := filepath.Join(t.TempDir(), "root-file")
 	writeSource(t, filepath.Dir(rootFile), filepath.Base(rootFile), "not a directory")
@@ -862,9 +862,10 @@ func TestExecuteRejectsInvalidRuntimeInputs(t *testing.T) {
 		{name: "nil context", executor: Executor{Enrichers: enricher.NewRegistry()}, request: valid},
 		{name: "uncompiled witness", ctx: context.Background(), executor: Executor{Enrichers: enricher.NewRegistry()}, request: Request{}},
 		{name: "empty root", ctx: context.Background(), executor: Executor{Enrichers: enricher.NewRegistry()}, request: with(func(request *Request) { request.Root = "" })},
+		{name: "negative position", ctx: context.Background(), executor: Executor{Enrichers: enricher.NewRegistry()}, request: with(func(request *Request) { request.Position = -1 })},
 		{name: "missing root", ctx: context.Background(), executor: Executor{Enrichers: enricher.NewRegistry()}, request: with(func(request *Request) { request.Root = filepath.Join(root, "missing") })},
 		{name: "root is file", ctx: context.Background(), executor: Executor{Enrichers: enricher.NewRegistry()}, request: with(func(request *Request) { request.Root = rootFile })},
-		{name: "typed nil store", ctx: context.Background(), executor: Executor{Enrichers: enricher.NewRegistry()}, request: with(func(request *Request) { request.RawStore = nilStore })},
+		{name: "typed nil store", ctx: context.Background(), executor: Executor{Enrichers: enricher.NewRegistry()}, request: with(func(request *Request) { request.RawSink = nilSink })},
 		{name: "typed nil enricher", ctx: context.Background(), executor: Executor{Enrichers: enricher.Registry{"go": nilEnricher}}, request: valid},
 	}
 	for _, test := range tests {
@@ -887,13 +888,13 @@ func TestExecuteRejectsBindingOwnedByAnotherGate(t *testing.T) {
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, "", "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
 	firstGate, _ := compileGateFixture(t, gate.Manifest{Name: "first", Timeout: time.Second}, binding)
 	_, secondBinding := compileGateFixture(t, gate.Manifest{Name: "second", Timeout: time.Second}, binding)
-	store := &memoryRawStore{}
+	store := &memoryRawSink{}
 	if !firstGate.Valid() || !secondBinding.Valid() {
 		t.Fatal("test requires independently valid gate and binding")
 	}
 
 	report := (Executor{Enrichers: enricher.NewRegistry()}).Execute(context.Background(), Request{
-		Gate: firstGate, Binding: secondBinding, Root: root, RawStore: store,
+		Gate: firstGate, Binding: secondBinding, Root: root, RawSink: store,
 	})
 	if report.Status != GateErrored || !strings.Contains(report.Error, "does not belong") {
 		t.Fatalf("report = %#v, want binding ownership error", report)
@@ -915,13 +916,13 @@ func TestCollectReturnsReportsInRequestOrderAndLimitsConcurrency(t *testing.T) {
 	root := t.TempDir()
 	markerDir := t.TempDir()
 	completionDir := t.TempDir()
-	store := &memoryRawStore{}
+	store := &memoryRawSink{}
 	registry := enricher.Registry{}
 	requests := make([]Request, 4)
 	durations := []time.Duration{320 * time.Millisecond, 40 * time.Millisecond, 180 * time.Millisecond, 80 * time.Millisecond}
 	for index := range requests {
 		binding := gate.Binding{Language: fmt.Sprintf("go%d", index), Tool: "fixture", Command: []string{helperBinary(t), "active", filepath.Join(markerDir, fmt.Sprint(index)), durations[index].String(), filepath.Join(completionDir, fmt.Sprint(index))}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
-		requests[index] = compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: fmt.Sprintf("gate%d", index), Timeout: 2 * time.Second}}, Binding: binding, Root: root, RawStore: store})
+		requests[index] = compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: fmt.Sprintf("gate%d", index), Timeout: 2 * time.Second}}, Binding: binding, Position: index, Root: root, RawSink: store})
 		registry[binding.Language] = enricher.Noop{}
 	}
 	type result struct {
@@ -951,6 +952,9 @@ func TestCollectReturnsReportsInRequestOrderAndLimitsConcurrency(t *testing.T) {
 				if report.Gate != fmt.Sprintf("gate%d", index) {
 					t.Fatalf("report %d gate = %q", index, report.Gate)
 				}
+				if report.Position != index {
+					t.Fatalf("report %d position = %d", index, report.Position)
+				}
 			}
 			return
 		default:
@@ -974,15 +978,15 @@ func TestCollectReturnsReportsInRequestOrderAndLimitsConcurrency(t *testing.T) {
 func TestCollectPreservesFastHealthyFindingsWhenEarlierGateTimesOut(t *testing.T) {
 	root := t.TempDir()
 	writeSource(t, root, "source.go", "package source\nfunc complex() {}\n")
-	store := &memoryRawStore{}
+	store := &memoryRawSink{}
 	slow := gate.Binding{Language: "slow", Tool: "fixture", Command: []string{helperBinary(t), "sleep", "5s"}, SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
 	fast := gate.Binding{
 		Language: "go", Tool: "fixture", Command: emitCommand(t, "17 pkg complex source.go:2:1\n", "", 1), SuccessExitCodes: []int{0}, FindingExitCodes: []int{1},
 		Normalizer: `regex:^(?P<value>\d+) \S+ (?P<symbol>\S+) (?P<file>[^:]+):(?P<line>\d+):\d+$`, RuleID: "gocyclo/complexity", Message: "complexity {{.value}} in {{.symbol}}", SeverityMap: map[string]finding.Severity{"default": finding.Warning},
 	}
 	requests := []Request{
-		compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "slow", Timeout: 150 * time.Millisecond}}, Binding: slow, Root: root, RawStore: store}),
-		compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "fast", Timeout: time.Second}}, Binding: fast, Root: root, RawStore: store}),
+		compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "slow", Timeout: 150 * time.Millisecond}}, Binding: slow, Root: root, RawSink: store}),
+		compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "fast", Timeout: time.Second}}, Binding: fast, Root: root, RawSink: store}),
 	}
 	reports := Collect(context.Background(), Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}, "slow": enricher.Noop{}}}, requests, 2)
 	if len(reports) != 2 || reports[0].Gate != "slow" || reports[1].Gate != "fast" {
@@ -1001,13 +1005,13 @@ func TestCollectPreservesFastHealthyFindingsWhenEarlierGateTimesOut(t *testing.T
 
 func TestCollectKeepsHealthySiblingAndDrainsAfterCancellation(t *testing.T) {
 	root := t.TempDir()
-	store := &memoryRawStore{}
+	store := &memoryRawSink{}
 	clean := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, "", "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
 	missing := clean
 	missing.Command = []string{filepath.Join(root, "missing")}
 	requests := []Request{
-		compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "broken", Timeout: time.Second}}, Binding: missing, Root: root, RawStore: store}),
-		compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "healthy", Timeout: time.Second}}, Binding: clean, Root: root, RawStore: store}),
+		compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "broken", Timeout: time.Second}}, Binding: missing, Root: root, RawSink: store}),
+		compileRequest(t, Request{Gate: gate.Gate{Manifest: gate.Manifest{Name: "healthy", Timeout: time.Second}}, Binding: clean, Root: root, RawSink: store}),
 	}
 	reports := Collect(context.Background(), Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}, requests, 0)
 	if len(reports) != 2 || reports[0].Status != GateErrored || reports[1].Status != GatePassed {

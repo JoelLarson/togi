@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/gate"
 )
 
 var fixedTime = time.Date(2026, time.August, 21, 15, 12, 30, 123456789, time.UTC)
@@ -25,6 +26,15 @@ const ledgerTestRepoID = "dddddddddddddddddddddddddddddddddddddddd"
 
 func testLedger(repoState string) Ledger {
 	return Ledger{RepoID: ledgerTestRepoID, RepoState: repoState, RunsDir: filepath.Join(repoState, "runs")}
+}
+
+func mustRawSink(t *testing.T, run *RunLedger, gate, language string) RawSink {
+	t.Helper()
+	sink, err := run.RawSink(gate, language)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sink
 }
 
 func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
@@ -871,7 +881,7 @@ func TestWriteRawPreservesBytes(t *testing.T) {
 	t.Cleanup(func() { _ = run.Close() })
 	raw := []byte{'o', 'u', 't', 0, '\n', 0xff}
 
-	if err := run.WriteRaw("golangci-lint", "go", "stdout", raw); err != nil {
+	if err := mustRawSink(t, run, "golangci-lint", "go").WriteRaw("stdout", raw); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(run.Dir, "raw", "golangci-lint.go.stdout")
@@ -925,7 +935,7 @@ func TestRunLedgerWritesRemainAnchoredAfterRepoStateReplacement(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	if err := run.WriteRaw("gate", "go", "stdout", []byte("anchored")); err != nil {
+	if err := mustRawSink(t, run, "gate", "go").WriteRaw("stdout", []byte("anchored")); err != nil {
 		_ = run.Close()
 		t.Fatal(err)
 	}
@@ -965,7 +975,8 @@ func TestWriteRawCapsOutputIncludingMarker(t *testing.T) {
 	marker := []byte("\n[togi: output truncated]\n")
 	raw := bytes.Repeat([]byte("x"), limit+1)
 
-	if err := run.WriteRaw("gocyclo", "go", "stderr", raw); err != nil {
+	sink := mustRawSink(t, run, "gocyclo", "go")
+	if err := sink.WriteRaw("stderr", raw); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(run.Dir, "raw", "gocyclo.go.stderr"))
@@ -983,7 +994,7 @@ func TestWriteRawCapsOutputIncludingMarker(t *testing.T) {
 	}
 
 	exact := bytes.Repeat([]byte("y"), limit)
-	if err := run.WriteRaw("gocyclo", "go", "stdout", exact); err != nil {
+	if err := sink.WriteRaw("stdout", exact); err != nil {
 		t.Fatal(err)
 	}
 	got, err = os.ReadFile(filepath.Join(run.Dir, "raw", "gocyclo.go.stdout"))
@@ -1016,8 +1027,12 @@ func TestWriteRawRejectsUnsafeNames(t *testing.T) {
 		{gate: "gate", language: "../go", stream: "stdout"},
 		{gate: "gate", language: "go", stream: "output"},
 	} {
-		if err := run.WriteRaw(test.gate, test.language, test.stream, []byte("unsafe")); err == nil {
-			t.Errorf("WriteRaw(%q, %q, %q) succeeded", test.gate, test.language, test.stream)
+		sink, err := run.RawSink(test.gate, test.language)
+		if test.stream != "stdout" && test.stream != "stderr" && err == nil {
+			err = sink.WriteRaw(test.stream, []byte("unsafe"))
+		}
+		if err == nil {
+			t.Errorf("RawSink/WriteRaw(%q, %q, %q) succeeded", test.gate, test.language, test.stream)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(run.Dir, "escape.go.stdout")); !errors.Is(err, os.ErrNotExist) {
@@ -1033,8 +1048,8 @@ func TestRunLedgerRejectsWritesAfterClose(t *testing.T) {
 	if err := run.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := run.WriteRaw("gate", "go", "stdout", nil); !errors.Is(err, ErrClosed) {
-		t.Errorf("WriteRaw after Close = %v, want ErrClosed", err)
+	if _, err := run.RawSink("gate", "go"); !errors.Is(err, ErrClosed) {
+		t.Errorf("RawSink after Close = %v, want ErrClosed", err)
 	}
 	if err := run.WriteReport(Report{SchemaVersion: 1}); !errors.Is(err, ErrClosed) {
 		t.Errorf("WriteReport after Close = %v, want ErrClosed", err)
@@ -1043,8 +1058,8 @@ func TestRunLedgerRejectsWritesAfterClose(t *testing.T) {
 
 func TestRunLedgerRejectsUninitializedValue(t *testing.T) {
 	var run RunLedger
-	if err := run.WriteRaw("gate", "go", "stdout", nil); !errors.Is(err, ErrUninitialized) {
-		t.Errorf("WriteRaw on zero value = %v, want ErrUninitialized", err)
+	if _, err := run.RawSink("gate", "go"); !errors.Is(err, ErrUninitialized) {
+		t.Errorf("RawSink on zero value = %v, want ErrUninitialized", err)
 	}
 	if err := run.WriteReport(Report{SchemaVersion: 1}); !errors.Is(err, ErrUninitialized) {
 		t.Errorf("WriteReport on zero value = %v, want ErrUninitialized", err)
@@ -1072,8 +1087,8 @@ func TestRunLedgerRejectsCopiedValue(t *testing.T) {
 		marker:   run,
 	}
 
-	if err := copied.WriteRaw("gate", "go", "stdout", nil); !errors.Is(err, ErrUninitialized) {
-		t.Errorf("WriteRaw on copied value = %v, want ErrUninitialized", err)
+	if _, err := copied.RawSink("gate", "go"); !errors.Is(err, ErrUninitialized) {
+		t.Errorf("RawSink on copied value = %v, want ErrUninitialized", err)
 	}
 	if err := copied.WriteReport(Report{SchemaVersion: 1}); !errors.Is(err, ErrUninitialized) {
 		t.Errorf("WriteReport on copied value = %v, want ErrUninitialized", err)
@@ -1115,7 +1130,7 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	wanted := Report{
-		SchemaVersion: 2,
+		SchemaVersion: ReportSchemaVersion,
 		RunID:         "20260821T120200.000000000Z-0002",
 		RepoID:        strings.Repeat("d", 40),
 		Diff:          completeReportFixture("").Diff,
@@ -1125,6 +1140,9 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 		Gates: []GateReport{{
 			Gate:       "lint",
 			Language:   "go",
+			Blocking:   []finding.Severity{finding.Error, finding.Warning},
+			FixPolicy:  gate.ReportOnly,
+			Position:   0,
 			Status:     GateErrored,
 			DurationMS: 5000,
 			Error:      "tool missing",
@@ -1132,6 +1150,7 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 		Findings: []finding.Finding{},
 		Counts:   Counts{},
 	}
+	wanted.Ref = RunRef{ID: wanted.RunID, Dir: filepath.Join(runsDir, wanted.RunID)}
 	writeReportFixture(t, runsDir, Report{SchemaVersion: 1, RunID: "20260821T120000.000000000Z-0000"})
 	malformedDir := filepath.Join(runsDir, "20260821T120100.000000000Z-0001")
 	if err := os.Mkdir(malformedDir, 0o700); err != nil {
@@ -1184,8 +1203,8 @@ func TestLatestSortsSameSecondRunsByNanoseconds(t *testing.T) {
 	if err := os.Mkdir(runsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	older := Report{SchemaVersion: 2, RunID: "20260821T120000.100000000Z-ffff"}
-	newer := Report{SchemaVersion: 2, RunID: "20260821T120000.900000000Z-0000"}
+	older := Report{SchemaVersion: ReportSchemaVersion, RunID: "20260821T120000.100000000Z-ffff"}
+	newer := Report{SchemaVersion: ReportSchemaVersion, RunID: "20260821T120000.900000000Z-0000"}
 	writeReportFixture(t, runsDir, newer)
 	writeReportFixture(t, runsDir, older)
 
@@ -1207,7 +1226,7 @@ func TestLatestReadRemainsAnchoredAfterRunsDirectoryReplacement(t *testing.T) {
 	if err := os.Mkdir(runsPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	wanted := Report{SchemaVersion: 2, RunID: "20260821T120000.100000000Z-0000"}
+	wanted := Report{SchemaVersion: ReportSchemaVersion, RunID: "20260821T120000.100000000Z-0000"}
 	writeReportFixture(t, runsPath, wanted)
 	runsRoot, err := os.OpenRoot(runsPath)
 	if err != nil {
@@ -1468,7 +1487,7 @@ func TestWriteReportRejectsInvalidReportsWithoutArtifacts(t *testing.T) {
 		}},
 		{name: "future schema", report: func(runID string) Report {
 			report := completeReportFixture(runID)
-			report.SchemaVersion = 3
+			report.SchemaVersion = 4
 			return report
 		}},
 		{name: "run ID", report: func(runID string) Report {
@@ -1647,7 +1666,7 @@ func TestValidateReportAcceptsZeroAndBinaryDiffCounts(t *testing.T) {
 	}
 }
 
-func TestLatestSkipsSchemaOneReports(t *testing.T) {
+func TestLatestTreatsSchemaTwoReportsAsIncomplete(t *testing.T) {
 	repoState := t.TempDir()
 	runsDir := filepath.Join(repoState, "runs")
 	if err := os.Mkdir(runsDir, 0o700); err != nil {
@@ -1655,7 +1674,7 @@ func TestLatestSkipsSchemaOneReports(t *testing.T) {
 	}
 	older := completeReportFixture("20260821T120000.000000000Z-0000")
 	newer := completeReportFixture("20260821T120100.000000000Z-0001")
-	newer.SchemaVersion = 1
+	newer.SchemaVersion = 2
 	writeReportFixture(t, runsDir, older)
 	writeReportFixture(t, runsDir, newer)
 
@@ -1690,6 +1709,9 @@ func TestWriteReportRejectsTamperedCompleteReports(t *testing.T) {
 		{name: "verdict", tamper: func(report *Report) { report.Verdict = VerdictFindings }},
 		{name: "gate name", tamper: func(report *Report) { report.Gates[0].Gate = "" }},
 		{name: "gate language", tamper: func(report *Report) { report.Gates[0].Language = "" }},
+		{name: "gate blocking", tamper: func(report *Report) { report.Gates[0].Blocking = nil }},
+		{name: "gate fix policy", tamper: func(report *Report) { report.Gates[0].FixPolicy = "manual" }},
+		{name: "gate position", tamper: func(report *Report) { report.Gates[0].Position = -1 }},
 		{name: "passed error", tamper: func(report *Report) { report.Gates[0].Error = "failed" }},
 		{name: "findings without findings", tamper: func(report *Report) { report.Gates[0].Status = GateFindings }},
 		{name: "errored without error", tamper: func(report *Report) { report.Gates[0].Status = GateErrored; report.Verdict = VerdictErrored }},
@@ -1818,7 +1840,7 @@ func completeReportDefaults(report Report) Report {
 func completeReportFixture(runID string) Report {
 	started := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
 	return Report{
-		SchemaVersion: 2,
+		SchemaVersion: ReportSchemaVersion,
 		RunID:         runID,
 		RepoID:        strings.Repeat("d", 40),
 		Diff: DiffReport{
@@ -1830,8 +1852,11 @@ func completeReportFixture(runID string) Report {
 		StartedAt:  started,
 		FinishedAt: started.Add(time.Second),
 		Verdict:    VerdictUnverified,
-		Gates:      []GateReport{{Gate: "lint", Language: "go", Status: GatePassed}},
-		Findings:   []finding.Finding{},
-		Counts:     Counts{},
+		Gates: []GateReport{{
+			Gate: "lint", Language: "go", Blocking: []finding.Severity{finding.Error, finding.Warning},
+			FixPolicy: gate.ReportOnly, Position: 0, Status: GatePassed,
+		}},
+		Findings: []finding.Finding{},
+		Counts:   Counts{},
 	}
 }

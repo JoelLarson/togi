@@ -26,7 +26,7 @@ import (
 	"github.com/joellarson/togi/internal/repoid"
 )
 
-func TestBuildReportRecordsDiffScopeWithoutLineRanges(t *testing.T) {
+func TestComposeReportRecordsDiffScopeWithoutLineRanges(t *testing.T) {
 	started := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
 	diff := Diff{
 		BaseRef:      "origin/main",
@@ -41,8 +41,8 @@ func TestBuildReportRecordsDiffScopeWithoutLineRanges(t *testing.T) {
 		},
 	}
 
-	report, err := buildReport("run-id", "repo-id", started, started.Add(time.Second), diff, []GateReport{{
-		Gate: "lint", Language: "go", Status: GatePassed,
+	report, err := ComposeReport("run-id", strings.Repeat("d", 40), started, started.Add(time.Second), diff, []GateReport{{
+		Gate: "lint", Language: "go", Blocking: []finding.Severity{finding.Error, finding.Warning}, FixPolicy: gate.ReportOnly, Status: GatePassed,
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -55,15 +55,15 @@ func TestBuildReportRecordsDiffScopeWithoutLineRanges(t *testing.T) {
 		ChangedFiles: diff.ChangedFiles,
 		ChangedLines: diff.ChangedLines,
 	}
-	if report.SchemaVersion != 2 || report.Diff != want {
-		t.Fatalf("report metadata = %#v, want schema 2 and %#v", report, want)
+	if report.SchemaVersion != ReportSchemaVersion || report.Diff != want {
+		t.Fatalf("report metadata = %#v, want schema 3 and %#v", report, want)
 	}
 
 	encoded, err := json.Marshal(report)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantJSON := `{"schema_version":2,"run_id":"run-id","repo_id":"repo-id","diff":{"base_ref":"origin/main","base_commit":"` + strings.Repeat("a", 40) + `","merge_base":"` + strings.Repeat("b", 40) + `","head":"` + strings.Repeat("c", 40) + `","changed_files":2,"changed_lines":3},"started_at":"2026-08-21T12:00:00Z","finished_at":"2026-08-21T12:00:01Z","verdict":"unverified","gates":[{"gate":"lint","language":"go","status":"passed","duration_ms":0}],"findings":[],"counts":{"errors":0,"warnings":0,"info":0,"occurrences":0}}`
+	wantJSON := `{"schema_version":3,"run_id":"run-id","repo_id":"` + strings.Repeat("d", 40) + `","diff":{"base_ref":"origin/main","base_commit":"` + strings.Repeat("a", 40) + `","merge_base":"` + strings.Repeat("b", 40) + `","head":"` + strings.Repeat("c", 40) + `","changed_files":2,"changed_lines":3},"started_at":"2026-08-21T12:00:00Z","finished_at":"2026-08-21T12:00:01Z","verdict":"unverified","gates":[{"gate":"lint","language":"go","blocking":["error","warning"],"fix_policy":"report-only","position":0,"status":"passed","duration_ms":0}],"findings":[],"counts":{"errors":0,"warnings":0,"info":0,"occurrences":0}}`
 	if got := string(encoded); got != wantJSON {
 		t.Fatalf("report JSON = %s, want %s", got, wantJSON)
 	}
@@ -76,13 +76,13 @@ func TestBuildReportRecordsDiffScopeWithoutLineRanges(t *testing.T) {
 	}
 }
 
-func TestBuildReportRejectsInvalidDiffBeforeProjection(t *testing.T) {
+func TestComposeReportRejectsInvalidDiffBeforeProjection(t *testing.T) {
 	diff := fixtureDiff()
 	diff.ChangedLines = 1
-	if _, err := buildReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime, diff, []GateReport{{
-		Gate: "lint", Language: "go", Status: GatePassed,
+	if _, err := ComposeReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime, diff, []GateReport{{
+		Gate: "lint", Language: "go", Blocking: []finding.Severity{finding.Error}, FixPolicy: gate.ReportOnly, Status: GatePassed,
 	}}); err == nil {
-		t.Fatal("buildReport accepted a diff whose changed-line count cannot be verified")
+		t.Fatal("ComposeReport accepted a diff whose changed-line count cannot be verified")
 	}
 }
 
@@ -630,6 +630,9 @@ func TestServicePersistsPassingRunBeforeReturningUnverified(t *testing.T) {
 	if report.Verdict != VerdictUnverified || report.Counts.Occurrences != 0 {
 		t.Fatalf("report = %#v", report)
 	}
+	if report.Ref.ID != report.RunID || report.Ref.Dir == "" || filepath.Base(report.Ref.Dir) != report.RunID {
+		t.Fatalf("run ref = %#v, report run ID = %q", report.Ref, report.RunID)
+	}
 	id, err := repoid.Resolve(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
@@ -640,6 +643,9 @@ func TestServicePersistsPassingRunBeforeReturningUnverified(t *testing.T) {
 	}
 	if persisted.RunID != report.RunID {
 		t.Fatalf("persisted run = %q, want %q", persisted.RunID, report.RunID)
+	}
+	if persisted.Ref.ID != persisted.RunID || persisted.Ref.Dir != report.Ref.Dir {
+		t.Fatalf("persisted ref = %#v, want %#v", persisted.Ref, report.Ref)
 	}
 }
 
@@ -758,12 +764,7 @@ func runFixtureService(t *testing.T, root string, paths config.Paths) (Report, s
 	if validateErr := validateReport(roundTrip, roundTrip.RunID); validateErr != nil {
 		t.Fatalf("round-trip report validation: %v", validateErr)
 	}
-	id, err := repoid.Resolve(context.Background(), root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := paths.RunDir(id, report.RunID)
-	return report, out.String(), dir, targetTree(t, root)
+	return report, out.String(), report.Ref.Dir, targetTree(t, root)
 }
 
 func resolveTestPaths(t *testing.T, configHome, stateHome, cacheHome string) config.Paths {

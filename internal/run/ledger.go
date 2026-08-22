@@ -20,6 +20,7 @@ import (
 	"unicode"
 
 	"github.com/joellarson/togi/internal/finding"
+	gatepkg "github.com/joellarson/togi/internal/gate"
 	"github.com/joellarson/togi/internal/repoid"
 )
 
@@ -468,7 +469,12 @@ func (ledger Ledger) Latest() (Report, error) {
 		return Report{}, err
 	}
 	defer func() { _ = runsRoot.Close() }()
-	return latestFromRunsRoot(runsRoot, ledger.RepoID)
+	report, err := latestFromRunsRoot(runsRoot, ledger.RepoID)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Ref = RunRef{ID: report.RunID, Dir: filepath.Join(ledger.RunsDir, report.RunID)}
+	return report, nil
 }
 
 func latestFromRunsRoot(runsRoot *os.Root, repoID string) (Report, error) {
@@ -547,6 +553,7 @@ func readCompleteReport(runRoot *os.Root, runID, repoID string) (Report, error) 
 	if report.RepoID != repoID {
 		return Report{}, errIncompleteRun
 	}
+	report.Ref = RunRef{ID: runID}
 	return report, nil
 }
 
@@ -560,6 +567,9 @@ func validateReport(report Report, runID string) error {
 			return err
 		}
 		flattened = append(flattened, gate.Findings...)
+		if index > 0 && report.Gates[index-1].Position == gate.Position {
+			return errors.New("report gate positions are duplicated")
+		}
 		if index > 0 && compareGateReports(report.Gates[index-1], gate) >= 0 {
 			return errors.New("report gates are duplicated or out of order")
 		}
@@ -568,7 +578,7 @@ func validateReport(report Report, runID string) error {
 }
 
 func validateReportHeader(report Report, runID string) error {
-	if report.SchemaVersion != 2 {
+	if report.SchemaVersion != ReportSchemaVersion {
 		return fmt.Errorf("unsupported report schema version %d", report.SchemaVersion)
 	}
 	if report.RunID != runID {
@@ -664,7 +674,7 @@ func validateReportSummary(report Report, flattened []finding.Finding) error {
 	if counts := countFindings(report.Findings); counts != report.Counts {
 		return fmt.Errorf("report counts are inconsistent: got %+v, want %+v", report.Counts, counts)
 	}
-	if verdict := verdictFor(report.Gates, report.Findings); verdict != report.Verdict {
+	if verdict := verdictFor(report.Gates); verdict != report.Verdict {
 		return fmt.Errorf("report verdict %q is inconsistent with %q", report.Verdict, verdict)
 	}
 	return nil
@@ -676,6 +686,27 @@ func validateGateReport(gate GateReport, index int) error {
 	}
 	if gate.DurationMS < 0 {
 		return fmt.Errorf("gate %d has negative duration", index)
+	}
+	if gate.Position < 0 {
+		return fmt.Errorf("gate %d has negative position", index)
+	}
+	if gate.Blocking == nil {
+		return fmt.Errorf("gate %d blocking severities are required", index)
+	}
+	seenBlocking := make(map[finding.Severity]struct{}, len(gate.Blocking))
+	for _, severity := range gate.Blocking {
+		if severity != finding.Error && severity != finding.Warning && severity != finding.Info {
+			return fmt.Errorf("gate %d has invalid blocking severity %q", index, severity)
+		}
+		if _, exists := seenBlocking[severity]; exists {
+			return fmt.Errorf("gate %d has duplicate blocking severity %q", index, severity)
+		}
+		seenBlocking[severity] = struct{}{}
+	}
+	switch gate.FixPolicy {
+	case gatepkg.AutofixOnly, gatepkg.AutofixThenLLM, gatepkg.LLMFix, gatepkg.ReportOnly:
+	default:
+		return fmt.Errorf("gate %d has invalid fix policy %q", index, gate.FixPolicy)
 	}
 	if err := validateGateStatus(gate, index); err != nil {
 		return err
@@ -851,7 +882,7 @@ func (run *RunLedger) WriteReport(report Report) error {
 }
 
 func prepareReport(report Report, runID, repoID string) (Report, error) {
-	if report.SchemaVersion != 2 {
+	if report.SchemaVersion != ReportSchemaVersion {
 		return report, fmt.Errorf("unsupported report schema version %d", report.SchemaVersion)
 	}
 	if report.RunID == "" {
@@ -889,8 +920,37 @@ func writeReportTemporary(temporary *os.File, report Report) error {
 	return nil
 }
 
-// WriteRaw atomically persists one captured tool stream.
-func (run *RunLedger) WriteRaw(gate, language, stream string, raw []byte) error {
+type ledgerRawSink struct {
+	run      *RunLedger
+	gate     string
+	language string
+}
+
+// RawSink validates and binds one gate identity before execution begins.
+func (run *RunLedger) RawSink(gate, language string) (RawSink, error) {
+	if run == nil || run.marker != run {
+		return nil, ErrUninitialized
+	}
+	if err := validateRawName(gate, language, "stdout"); err != nil {
+		return nil, err
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if run.closed || run.closing {
+		return nil, ErrClosed
+	}
+	return &ledgerRawSink{run: run, gate: gate, language: language}, nil
+}
+
+func (sink *ledgerRawSink) WriteRaw(stream string, raw []byte) error {
+	if sink == nil || sink.run == nil {
+		return ErrUninitialized
+	}
+	return sink.run.writeRaw(sink.gate, sink.language, stream, raw)
+}
+
+// writeRaw atomically persists one captured tool stream for a bound sink.
+func (run *RunLedger) writeRaw(gate, language, stream string, raw []byte) error {
 	if run == nil || run.marker != run {
 		return ErrUninitialized
 	}
@@ -899,8 +959,8 @@ func (run *RunLedger) WriteRaw(gate, language, stream string, raw []byte) error 
 	if run.closed || run.closing {
 		return ErrClosed
 	}
-	if err := validateRawName(gate, language, stream); err != nil {
-		return err
+	if stream != "stdout" && stream != "stderr" {
+		return fmt.Errorf("invalid raw output stream %q", stream)
 	}
 	temporary, temporaryName, err := createRootTemp(run.rawRoot, "raw")
 	if err != nil {

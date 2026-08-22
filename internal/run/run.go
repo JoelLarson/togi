@@ -76,19 +76,24 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 		}
 	}()
 	for index := range prepared.requests {
-		prepared.requests[index].RawStore = active
+		sink, sinkErr := active.RawSink(prepared.requests[index].Gate.Manifest.Name, prepared.requests[index].Binding.Language)
+		if sinkErr != nil {
+			return Report{}, fmt.Errorf("prepare raw sink: %w", sinkErr)
+		}
+		prepared.requests[index].RawSink = sink
 	}
 	if err := service.writeVerbose(opts.Verbose, prepared.requests); err != nil {
 		return Report{}, err
 	}
 	gateReports := Collect(ctx, service.Executor, prepared.requests, min(runtime.NumCPU(), defaultMaximumWorkers))
-	report, err = buildReport(active.runID, prepared.repository.Key(), startedAt, now().UTC(), prepared.diff, gateReports)
+	report, err = ComposeReport(active.runID, prepared.repository.Key(), startedAt, now().UTC(), prepared.diff, gateReports)
 	if err != nil {
 		return Report{}, err
 	}
 	if err := active.WriteReport(report); err != nil {
 		return report, fmt.Errorf("write report: %w", err)
 	}
+	report.Ref = RunRef{ID: active.runID, Dir: active.Dir}
 	closeErr := active.Close()
 	closed = closeErr == nil
 	if closeErr != nil {
@@ -122,10 +127,11 @@ func (service Service) writeVerbose(enabled bool, requests []Request) error {
 	return nil
 }
 
-func buildReport(runID, repoID string, startedAt, finishedAt time.Time, diff Diff, gateReports []GateReport) (Report, error) {
+func ComposeReport(runID, repoID string, startedAt, finishedAt time.Time, diff Diff, gateReports []GateReport) (Report, error) {
 	if err := validateDiff(diff); err != nil {
 		return Report{}, fmt.Errorf("validate report diff: %w", err)
 	}
+	gateReports = append([]GateReport(nil), gateReports...)
 	findings := make([]finding.Finding, 0)
 	for _, gateReport := range gateReports {
 		findings = append(findings, gateReport.Findings...)
@@ -136,7 +142,7 @@ func buildReport(runID, repoID string, startedAt, finishedAt time.Time, diff Dif
 	}
 	slices.SortFunc(gateReports, compareGateReports)
 	report := Report{
-		SchemaVersion: 2,
+		SchemaVersion: ReportSchemaVersion,
 		RunID:         runID,
 		RepoID:        repoID,
 		Diff:          diffReport(diff),
@@ -149,7 +155,10 @@ func buildReport(runID, repoID string, startedAt, finishedAt time.Time, diff Dif
 		report.FinishedAt = report.StartedAt
 	}
 	report.Counts = countFindings(grouped)
-	report.Verdict = verdictFor(gateReports, grouped)
+	report.Verdict = verdictFor(gateReports)
+	if err := validateReport(report, runID); err != nil {
+		return Report{}, fmt.Errorf("validate composed report: %w", err)
+	}
 	return report, nil
 }
 
@@ -428,7 +437,7 @@ func selectRequests(gates []gate.Gate, requested []string, root string) ([]Reque
 		if !ok {
 			continue
 		}
-		requests = append(requests, Request{Gate: candidate, Binding: binding, Root: root})
+		requests = append(requests, Request{Gate: candidate, Binding: binding, Position: len(requests), Root: root})
 	}
 	if len(requests) == 0 {
 		return nil, errors.New("no Go gates selected")
@@ -453,19 +462,26 @@ func countFindings(items []finding.Finding) Counts {
 	return counts
 }
 
-func verdictFor(gates []GateReport, items []finding.Finding) Verdict {
+func verdictFor(gates []GateReport) Verdict {
 	for _, gateReport := range gates {
 		if gateReport.Status == GateErrored {
 			return VerdictErrored
 		}
 	}
-	if len(items) > 0 {
-		return VerdictFindings
+	for _, gateReport := range gates {
+		for _, item := range gateReport.Findings {
+			if slices.Contains(gateReport.Blocking, item.Severity) {
+				return VerdictFindings
+			}
+		}
 	}
 	return VerdictUnverified
 }
 
 func compareGateReports(left, right GateReport) int {
+	if left.Position != right.Position {
+		return left.Position - right.Position
+	}
 	if left.Gate != right.Gate {
 		return strings.Compare(left.Gate, right.Gate)
 	}
