@@ -243,6 +243,8 @@ func validateExecution(parent context.Context, req Request) error {
 		return errors.New("execution context is required")
 	case !req.Gate.Valid() || !req.Binding.Valid():
 		return errors.New("gate was not compiled; load gates through gate.Compile")
+	case !req.Gate.Owns(req.Binding):
+		return errors.New("binding does not belong to gate")
 	case strings.TrimSpace(req.Root) == "":
 		return errors.New("repository root is required")
 	case isNilInterface(req.RawStore):

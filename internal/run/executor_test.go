@@ -882,6 +882,27 @@ func TestExecuteRejectsInvalidRuntimeInputs(t *testing.T) {
 	}
 }
 
+func TestExecuteRejectsBindingOwnedByAnotherGate(t *testing.T) {
+	root := t.TempDir()
+	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, "", "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}
+	firstGate, _ := compileGateFixture(t, gate.Manifest{Name: "first", Timeout: time.Second}, binding)
+	_, secondBinding := compileGateFixture(t, gate.Manifest{Name: "second", Timeout: time.Second}, binding)
+	store := &memoryRawStore{}
+	if !firstGate.Valid() || !secondBinding.Valid() {
+		t.Fatal("test requires independently valid gate and binding")
+	}
+
+	report := (Executor{Enrichers: enricher.NewRegistry()}).Execute(context.Background(), Request{
+		Gate: firstGate, Binding: secondBinding, Root: root, RawStore: store,
+	})
+	if report.Status != GateErrored || !strings.Contains(report.Error, "does not belong") {
+		t.Fatalf("report = %#v, want binding ownership error", report)
+	}
+	if len(store.writes) != 0 {
+		t.Fatalf("mismatched binding executed: writes=%#v", store.writes)
+	}
+}
+
 func streams(writes []rawWrite) []string {
 	result := make([]string, len(writes))
 	for index, write := range writes {

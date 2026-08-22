@@ -316,12 +316,186 @@ func TestCompileMintsValidityWitnesses(t *testing.T) {
 		t.Fatal(err)
 	}
 	compiledBinding := compiled.Bindings["go"]
-	if !compiled.Valid() || !compiledBinding.Valid() {
+	if !compiled.Valid() || !compiledBinding.Valid() || !compiled.Owns(compiledBinding) {
 		t.Fatalf("compiled validity = %v/%v, want true/true", compiled.Valid(), compiledBinding.Valid())
 	}
 	if _, err := compiledBinding.Normalize(normalizer.Context{}, nil); err != nil {
 		t.Fatalf("compiled binding Normalize() error = %v", err)
 	}
+}
+
+func TestCompileDefensivelyClonesCallerInput(t *testing.T) {
+	blocking := []finding.Severity{finding.Warning}
+	severityMap := map[string]finding.Severity{"warning": finding.Warning}
+	aliases := map[string]string{"golangci-lint/*": "lint-correctness"}
+	settings := map[string]any{"nested": []map[string]any{{"value": "original"}}}
+	manifest := Manifest{
+		Name: "fixture", Description: "fixture", CostClass: Fast, FixPolicy: ReportOnly,
+		Scope: Repo, Location: PointLocation, Blocking: blocking, Timeout: time.Second,
+	}
+	binding := Binding{
+		Language: "go", Tool: "fixture", Command: []string{"fixture"},
+		SuccessExitCodes: []int{0}, FindingExitCodes: []int{1}, Normalizer: "golangci-json",
+		Settings: settings, SeverityMap: severityMap, Aliases: aliases,
+		Version: Version{Command: []string{"fixture", "version"}, Pattern: `(.*)`, Constraint: ">=1.0.0"},
+	}
+	bindings := map[string]Binding{"go": binding}
+	compiled, err := Compile(manifest, bindings)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	blocking[0] = finding.Info
+	binding.Command[0] = "changed"
+	binding.SuccessExitCodes[0] = 2
+	binding.FindingExitCodes[0] = 3
+	binding.Version.Command[0] = "changed"
+	severityMap["warning"] = finding.Info
+	aliases["golangci-lint/*"] = "changed"
+	settings["nested"].([]map[string]any)[0]["value"] = "changed"
+	delete(bindings, "go")
+
+	got := compiled.Bindings["go"]
+	if !compiled.Valid() || !got.Valid() {
+		t.Fatalf("compiled values became invalid after caller mutation: gate=%v binding=%v", compiled.Valid(), got.Valid())
+	}
+	if compiled.Manifest.Blocking[0] != finding.Warning || got.Command[0] != "fixture" || got.SuccessExitCodes[0] != 0 || got.FindingExitCodes[0] != 1 || got.Version.Command[0] != "fixture" {
+		t.Fatalf("compiled slices changed through caller aliases: manifest=%#v binding=%#v", compiled.Manifest, got)
+	}
+	if got.SeverityMap["warning"] != finding.Warning || got.Aliases["golangci-lint/*"] != "lint-correctness" {
+		t.Fatalf("compiled maps changed through caller aliases: severity=%v aliases=%v", got.SeverityMap, got.Aliases)
+	}
+	if nested := got.Settings["nested"].([]map[string]any)[0]["value"]; nested != "original" {
+		t.Fatalf("compiled nested setting = %v, want original", nested)
+	}
+
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "source.go"), "package fixture\n")
+	raw := []byte(`{"Issues":[{"FromLinter":"check","Text":"message","Severity":"warning","Pos":{"Filename":"source.go","Line":1}}]}`)
+	findings, err := got.Normalize(normalizer.Context{Gate: "fixture", Root: root}, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].Severity != finding.Warning {
+		t.Fatalf("normalized findings = %#v, want caller-independent warning", findings)
+	}
+
+	started := make(chan struct{})
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		severityMap["warning"] = finding.Info
+		close(started)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				severityMap["warning"] = finding.Warning
+				severityMap["warning"] = finding.Info
+			}
+		}
+	}()
+	<-started
+	for range 25 {
+		findings, err = got.Normalize(normalizer.Context{Gate: "fixture", Root: root}, raw)
+		if err != nil || len(findings) != 1 || findings[0].Severity != finding.Warning {
+			close(stop)
+			<-stopped
+			t.Fatalf("concurrent caller mutation changed compiled normalizer: findings=%#v error=%v", findings, err)
+		}
+	}
+	close(stop)
+	<-stopped
+}
+
+func TestCompiledValidityDetectsReturnedValueMutation(t *testing.T) {
+	compile := func(t *testing.T) (Gate, Binding) {
+		t.Helper()
+		manifest := Manifest{
+			Name: "fixture", Description: "fixture", CostClass: Fast, FixPolicy: ReportOnly,
+			Scope: Repo, Location: PointLocation, Blocking: []finding.Severity{finding.Warning}, Timeout: time.Second,
+		}
+		binding := Binding{
+			Language: "go", Tool: "fixture", Command: []string{"fixture"},
+			SuccessExitCodes: []int{0}, FindingExitCodes: []int{1}, Normalizer: "golangci-json",
+			Settings:    map[string]any{"nested": map[string]any{"value": "original"}},
+			SeverityMap: map[string]finding.Severity{"warning": finding.Warning},
+			Aliases:     map[string]string{"golangci-lint/*": "lint-correctness"},
+		}
+		compiled, err := Compile(manifest, map[string]Binding{"go": binding})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return compiled, compiled.Bindings["go"]
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*Binding)
+	}{
+		{name: "tool", mutate: func(binding *Binding) { binding.Tool = "changed" }},
+		{name: "language", mutate: func(binding *Binding) { binding.Language = "rust" }},
+		{name: "command", mutate: func(binding *Binding) { binding.Command[0] = "changed" }},
+		{name: "success exits", mutate: func(binding *Binding) { binding.SuccessExitCodes[0] = 2 }},
+		{name: "finding exits", mutate: func(binding *Binding) { binding.FindingExitCodes[0] = 3 }},
+		{name: "normalizer", mutate: func(binding *Binding) { binding.Normalizer = "changed" }},
+		{name: "rule ID", mutate: func(binding *Binding) { binding.RuleID = "changed" }},
+		{name: "message", mutate: func(binding *Binding) { binding.Message = "changed" }},
+		{name: "settings", mutate: func(binding *Binding) { binding.Settings["nested"].(map[string]any)["value"] = "changed" }},
+		{name: "severity map", mutate: func(binding *Binding) { binding.SeverityMap["warning"] = finding.Info }},
+		{name: "aliases", mutate: func(binding *Binding) { binding.Aliases["golangci-lint/*"] = "changed" }},
+		{name: "version", mutate: func(binding *Binding) {
+			binding.Version = Version{Command: []string{"changed"}, Pattern: `(.*)`, Constraint: ">=1.0.0"}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			compiled, binding := compile(t)
+			test.mutate(&binding)
+			if binding.Valid() {
+				t.Fatal("mutated returned binding remains valid")
+			}
+			if _, err := binding.Normalize(normalizer.Context{}, nil); err == nil {
+				t.Fatal("mutated returned binding normalized output")
+			}
+			_ = compiled
+		})
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*Manifest)
+	}{
+		{name: "name", mutate: func(manifest *Manifest) { manifest.Name = "changed" }},
+		{name: "scope", mutate: func(manifest *Manifest) { manifest.Scope = Diff }},
+		{name: "location", mutate: func(manifest *Manifest) { manifest.Location = EntityLocation }},
+		{name: "blocking", mutate: func(manifest *Manifest) { manifest.Blocking[0] = finding.Info }},
+		{name: "timeout", mutate: func(manifest *Manifest) { manifest.Timeout = 2 * time.Second }},
+	} {
+		t.Run("manifest "+test.name, func(t *testing.T) {
+			compiled, _ := compile(t)
+			test.mutate(&compiled.Manifest)
+			if compiled.Valid() {
+				t.Fatal("gate with mutated manifest remains valid")
+			}
+		})
+	}
+	t.Run("binding map", func(t *testing.T) {
+		compiled, _ := compile(t)
+		delete(compiled.Bindings, "go")
+		if compiled.Valid() {
+			t.Fatal("gate with mutated binding map remains valid")
+		}
+	})
+	t.Run("binding value", func(t *testing.T) {
+		compiled, binding := compile(t)
+		binding.Tool = "changed"
+		compiled.Bindings["go"] = binding
+		if compiled.Valid() {
+			t.Fatal("gate with mutated binding value remains valid")
+		}
+	})
 }
 
 func TestExitCodeDefaultsAndOptionalFindingExits(t *testing.T) {

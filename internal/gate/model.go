@@ -2,6 +2,7 @@ package gate
 
 import (
 	"errors"
+	"reflect"
 	"sort"
 	"time"
 
@@ -82,16 +83,24 @@ type Binding struct {
 	Aliases          map[string]string
 
 	compiled normalizer.Normalizer
-	valid    bool
+	owner    *ownership
+	snapshot *bindingSnapshot
 }
 
-// Valid reports whether this binding was minted by Compile.
-func (b Binding) Valid() bool { return b.valid }
+type ownership struct{ marker byte }
+
+type bindingSnapshot struct{ wire Binding }
+
+// Valid reports whether this binding was minted by Compile and its exported
+// configuration still matches the state that was compiled.
+func (b Binding) Valid() bool {
+	return b.owner != nil && b.snapshot != nil && b.compiled != nil && reflect.DeepEqual(cloneBindingState(b), b.snapshot.wire)
+}
 
 // Normalize converts raw tool output into findings via the binding's
 // compiled normalizer.
 func (b Binding) Normalize(ctx normalizer.Context, raw []byte) ([]finding.Finding, error) {
-	if !b.valid || b.compiled == nil {
+	if !b.Valid() {
 		return nil, errors.New("binding is not compiled")
 	}
 	return b.compiled.Normalize(ctx, raw)
@@ -102,11 +111,34 @@ type Gate struct {
 	Manifest Manifest
 	Bindings map[string]Binding
 
-	valid bool
+	owner            *ownership
+	manifestSnapshot Manifest
+	bindingSnapshots map[string]*bindingSnapshot
 }
 
-// Valid reports whether this gate was minted by Compile.
-func (g Gate) Valid() bool { return g.valid }
+// Valid reports whether this gate was minted by Compile and its exported
+// configuration still matches the state that was compiled.
+func (g Gate) Valid() bool {
+	if g.owner == nil || !reflect.DeepEqual(g.Manifest, g.manifestSnapshot) || len(g.Bindings) != len(g.bindingSnapshots) {
+		return false
+	}
+	for language, snapshot := range g.bindingSnapshots {
+		binding, ok := g.Bindings[language]
+		if !ok || binding.Language != language || binding.owner != g.owner || binding.snapshot != snapshot || !binding.Valid() {
+			return false
+		}
+	}
+	return true
+}
+
+// Owns reports whether a compiled binding belongs to this gate.
+func (g Gate) Owns(binding Binding) bool {
+	if g.owner == nil || binding.owner != g.owner || binding.snapshot == nil {
+		return false
+	}
+	snapshot, ok := g.bindingSnapshots[binding.Language]
+	return ok && snapshot == binding.snapshot
+}
 
 // BindingLanguages returns a gate's binding languages in stable order.
 func (g Gate) BindingLanguages() []string {

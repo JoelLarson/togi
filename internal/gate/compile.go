@@ -3,6 +3,7 @@ package gate
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -28,9 +29,11 @@ func Compile(manifest Manifest, bindings map[string]Binding) (Gate, error) {
 	}
 	sort.Strings(languages)
 
+	owner := &ownership{marker: 1}
 	compiled := make(map[string]Binding, len(bindings))
+	snapshots := make(map[string]*bindingSnapshot, len(bindings))
 	for _, language := range languages {
-		binding := bindings[language]
+		binding := cloneBindingState(bindings[language])
 		if binding.Language != language {
 			return Gate{}, fmt.Errorf("binding %q declares language %q", language, binding.Language)
 		}
@@ -41,16 +44,135 @@ func Compile(manifest Manifest, bindings map[string]Binding) (Gate, error) {
 			Language:    binding.Language,
 			RuleID:      binding.RuleID,
 			Message:     binding.Message,
-			SeverityMap: binding.SeverityMap,
+			SeverityMap: cloneSeverityMap(binding.SeverityMap),
 		})
 		if err != nil {
 			return Gate{}, fmt.Errorf("binding %s: %w", language, err)
 		}
+		snapshot := &bindingSnapshot{wire: cloneBindingState(binding)}
 		binding.compiled = parser
-		binding.valid = true
+		binding.owner = owner
+		binding.snapshot = snapshot
 		compiled[language] = binding
+		snapshots[language] = snapshot
 	}
-	return Gate{Manifest: manifest, Bindings: compiled, valid: true}, nil
+	compiledManifest := cloneManifest(manifest)
+	return Gate{
+		Manifest: compiledManifest, Bindings: compiled, owner: owner,
+		manifestSnapshot: cloneManifest(compiledManifest), bindingSnapshots: snapshots,
+	}, nil
+}
+
+func cloneManifest(manifest Manifest) Manifest {
+	manifest.Blocking = cloneSlice(manifest.Blocking)
+	return manifest
+}
+
+func cloneBindingState(binding Binding) Binding {
+	binding.Command = cloneSlice(binding.Command)
+	binding.SuccessExitCodes = cloneSlice(binding.SuccessExitCodes)
+	binding.FindingExitCodes = cloneSlice(binding.FindingExitCodes)
+	binding.Settings = cloneSettings(binding.Settings)
+	binding.SeverityMap = cloneSeverityMap(binding.SeverityMap)
+	binding.Version.Command = cloneSlice(binding.Version.Command)
+	binding.Aliases = cloneAliases(binding.Aliases)
+	binding.compiled = nil
+	binding.owner = nil
+	binding.snapshot = nil
+	return binding
+}
+
+func cloneSlice[T any](values []T) []T {
+	if values == nil {
+		return nil
+	}
+	return append(make([]T, 0, len(values)), values...)
+}
+
+func cloneSettings(settings map[string]any) map[string]any {
+	if settings == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(settings))
+	for key, value := range settings {
+		cloned[key] = cloneSettingValue(value)
+	}
+	return cloned
+}
+
+func cloneSettingValue(value any) any {
+	if value == nil {
+		return nil
+	}
+	return cloneSettingReflect(reflect.ValueOf(value)).Interface()
+}
+
+func cloneSettingReflect(value reflect.Value) reflect.Value {
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.New(value.Type()).Elem()
+		cloned.Set(cloneSettingReflect(value.Elem()))
+		return cloned
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iterator := value.MapRange()
+		for iterator.Next() {
+			cloned.SetMapIndex(iterator.Key(), cloneSettingReflect(iterator.Value()))
+		}
+		return cloned
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.New(value.Type().Elem())
+		cloned.Elem().Set(cloneSettingReflect(value.Elem()))
+		return cloned
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		cloned := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for index := range value.Len() {
+			cloned.Index(index).Set(cloneSettingReflect(value.Index(index)))
+		}
+		return cloned
+	case reflect.Array:
+		cloned := reflect.New(value.Type()).Elem()
+		for index := range value.Len() {
+			cloned.Index(index).Set(cloneSettingReflect(value.Index(index)))
+		}
+		return cloned
+	default:
+		return value
+	}
+}
+
+func cloneSeverityMap(severities map[string]finding.Severity) map[string]finding.Severity {
+	if severities == nil {
+		return nil
+	}
+	cloned := make(map[string]finding.Severity, len(severities))
+	for source, severity := range severities {
+		cloned[source] = severity
+	}
+	return cloned
+}
+
+func cloneAliases(aliases map[string]string) map[string]string {
+	if aliases == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(aliases))
+	for ruleID, page := range aliases {
+		cloned[ruleID] = page
+	}
+	return cloned
 }
 
 func validateManifest(manifest Manifest) error {
