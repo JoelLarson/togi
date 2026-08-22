@@ -8,7 +8,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/joellarson/togi/internal/finding"
 )
@@ -42,6 +45,72 @@ func TestResolveDiffDetectsOriginHeadAndChangedLines(t *testing.T) {
 	assertFullObjectID(t, got.Head)
 }
 
+func TestResolveDiffIgnoresHostileGitEnvironmentWithoutRefreshingIndex(t *testing.T) {
+	target := newDiffTestRepo(t)
+	writeDiffTestFile(t, target, "target.go", "base\n")
+	base := commitDiffTestRepo(t, target, "target base")
+	writeDiffTestFile(t, target, "target.go", "feature\n")
+	wantHead := commitDiffTestRepo(t, target, "target feature")
+
+	foreign := newDiffTestRepo(t)
+	writeDiffTestFile(t, foreign, "foreign.go", "foreign\n")
+	commitDiffTestRepo(t, foreign, "foreign")
+
+	tracked := filepath.Join(target, "target.go")
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(tracked, future, future); err != nil {
+		t.Fatal(err)
+	}
+	index := filepath.Join(target, ".git", "index")
+	beforeIndex, err := os.ReadFile(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeFile, err := os.ReadFile(tracked)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
+	t.Setenv("GIT_WORK_TREE", foreign)
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(foreign, ".git", "index"))
+	t.Setenv("GIT_OBJECT_DIRECTORY", filepath.Join(foreign, ".git", "objects"))
+	t.Setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", filepath.Join(foreign, ".git", "objects"))
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "diff.interHunkContext")
+	t.Setenv("GIT_CONFIG_VALUE_0", "999")
+
+	got, err := resolveDiff(context.Background(), target, base)
+	if err != nil {
+		t.Fatalf("resolveDiff() error = %v", err)
+	}
+	if got.Head != wantHead || got.BaseCommit != base {
+		t.Fatalf("resolveDiff() commits = %#v, want target HEAD %s and base %s", got, wantHead, base)
+	}
+	afterIndex, err := os.ReadFile(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Stat(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterFile, err := os.ReadFile(tracked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(afterIndex, beforeIndex) || !afterInfo.ModTime().Equal(beforeInfo.ModTime()) {
+		t.Fatal("read-only diff resolution refreshed the target index")
+	}
+	if !reflect.DeepEqual(afterFile, beforeFile) {
+		t.Fatal("read-only diff resolution changed the target worktree")
+	}
+}
+
 func TestResolveDiffExplicitBaseTakesPrecedence(t *testing.T) {
 	repo := newDiffTestRepo(t)
 	writeDiffTestFile(t, repo, "file.go", "base\n")
@@ -59,6 +128,61 @@ func TestResolveDiffExplicitBaseTakesPrecedence(t *testing.T) {
 	}
 	if got.BaseRef != "comparison" || got.BaseCommit != explicit || got.MergeBase != explicit {
 		t.Fatalf("resolveDiff() = %#v, want explicit comparison base %s", got, explicit)
+	}
+}
+
+func TestResolveDiffUsesMergeBaseAcrossDivergedHistory(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "one\ntwo\nthree\n")
+	common := commitDiffTestRepo(t, repo, "common")
+	gitDiffTest(t, repo, "checkout", "-b", "comparison")
+	writeDiffTestFile(t, repo, "file.go", "BASE\ntwo\nthree\n")
+	baseTip := commitDiffTestRepo(t, repo, "base-only change")
+	gitDiffTest(t, repo, "checkout", "-b", "feature", common)
+	writeDiffTestFile(t, repo, "file.go", "one\ntwo\nFEATURE\n")
+	head := commitDiffTestRepo(t, repo, "feature-only change")
+
+	got, err := resolveDiff(context.Background(), repo, "comparison")
+	if err != nil {
+		t.Fatalf("resolveDiff() error = %v", err)
+	}
+	want := finding.ChangedLines{"file.go": {{Start: 3, End: 3}}}
+	if got.BaseCommit != baseTip || got.MergeBase != common || got.Head != head || !reflect.DeepEqual(got.Lines, want) {
+		t.Fatalf("resolveDiff() = %#v, want base tip %s, merge base %s, head %s, lines %#v", got, baseTip, common, head, want)
+	}
+}
+
+func TestResolveDiffSupportsSHA256ObjectIDs(t *testing.T) {
+	repo := t.TempDir()
+	cmd := exec.Command("git", "init", "--object-format=sha256", "-b", "main")
+	cmd.Dir = repo
+	cmd.Env = diffTestGitEnvironment()
+	if output, err := cmd.CombinedOutput(); err != nil {
+		message := string(output)
+		if strings.Contains(message, "unknown value") || strings.Contains(message, "unsupported") || strings.Contains(message, "invalid object format") {
+			t.Skipf("Git SHA-256 repositories unsupported: %s", output)
+		}
+		t.Fatalf("initialize SHA-256 repository: %v: %s", err, output)
+	}
+	gitDiffTest(t, repo, "config", "user.name", "Togi Tests")
+	gitDiffTest(t, repo, "config", "user.email", "togi@example.invalid")
+	writeDiffTestFile(t, repo, "file.go", "base\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	writeDiffTestFile(t, repo, "file.go", "feature\n")
+	head := commitDiffTestRepo(t, repo, "feature")
+
+	got, err := resolveDiff(context.Background(), repo, base)
+	if err != nil {
+		t.Fatalf("resolveDiff() error = %v", err)
+	}
+	for name, objectID := range map[string]string{"base": got.BaseCommit, "merge base": got.MergeBase, "head": got.Head} {
+		if len(objectID) != 64 {
+			t.Fatalf("%s object ID = %q, want 64 hexadecimal characters", name, objectID)
+		}
+		assertFullObjectID(t, objectID)
+	}
+	if got.BaseCommit != base || got.MergeBase != base || got.Head != head {
+		t.Fatalf("resolveDiff() commits = %#v, want SHA-256 base %s and head %s", got, base, head)
 	}
 }
 
@@ -88,6 +212,56 @@ func TestResolveDiffRejectsInvalidBasesSafely(t *testing.T) {
 				t.Fatalf("resolveDiff(%q) exposed command output: %v", base, err)
 			}
 		})
+	}
+}
+
+func TestResolveDiffRejectsAnnotatedTagToNonCommit(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "base\n")
+	commitDiffTestRepo(t, repo, "base")
+	blob := gitDiffTest(t, repo, "hash-object", "file.go")
+	gitDiffTest(t, repo, "tag", "-a", "blob-tag", "-m", "not a commit", blob)
+
+	_, err := resolveDiff(context.Background(), repo, "blob-tag")
+	if err == nil || !strings.Contains(err.Error(), "commit") {
+		t.Fatalf("resolveDiff() error = %v, want non-commit base rejection", err)
+	}
+}
+
+func TestResolveDiffRejectsUnbornHead(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	_, err := resolveDiff(context.Background(), repo, "main")
+	if err == nil || !strings.Contains(err.Error(), "HEAD") {
+		t.Fatalf("resolveDiff() error = %v, want invalid HEAD diagnostic", err)
+	}
+}
+
+func TestResolveDiffRejectsInvalidHeadWithoutExposingContents(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "base\n")
+	commitDiffTestRepo(t, repo, "base")
+	const invalid = "invalid-head-secret"
+	if err := os.WriteFile(filepath.Join(repo, ".git", "HEAD"), []byte(invalid+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := resolveDiff(context.Background(), repo, "main")
+	if err == nil || strings.Contains(err.Error(), invalid) {
+		t.Fatalf("resolveDiff() error = %v, want redacted invalid-HEAD rejection", err)
+	}
+}
+
+func TestDiffGitOutputBoundsAndRedactsOutput(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "base\n")
+	commit := commitDiffTestRepo(t, repo, "base")
+
+	if _, err := diffGitOutput(context.Background(), repo, 32, "rev-parse", "HEAD"); err == nil || !strings.Contains(err.Error(), "exceeded") || strings.Contains(err.Error(), commit) {
+		t.Fatalf("bounded Git output error = %v, want redacted size diagnostic", err)
+	}
+	const secret = "missing-secret-ref"
+	if _, err := diffGitOutput(context.Background(), repo, 1024, "show", secret); err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("failed Git command error = %v, want redacted stderr and arguments", err)
 	}
 }
 
@@ -165,11 +339,72 @@ func TestResolveDiffUsesRenameDestinationAndNULSafePaths(t *testing.T) {
 		t.Fatalf("resolveDiff() error = %v", err)
 	}
 	want := finding.ChangedLines{
-		"new name.go":  {{Start: 1, End: 1}},
+		"new name.go":  {},
 		"tab\tname.go": {{Start: 1, End: 1}},
 	}
-	if got.ChangedFiles != 2 || got.ChangedLines != 2 || !reflect.DeepEqual(got.Lines, want) {
+	if got.ChangedFiles != 2 || got.ChangedLines != 1 || !reflect.DeepEqual(got.Lines, want) {
 		t.Fatalf("resolveDiff() = %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveDiffRenameWithEditKeepsOnlyEditedDestinationLine(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "old.go", "one\ntwo\nthree\nfour\nfive\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	if err := os.Rename(filepath.Join(repo, "old.go"), filepath.Join(repo, "new.go")); err != nil {
+		t.Fatal(err)
+	}
+	writeDiffTestFile(t, repo, "new.go", "one\ntwo\nTHREE\nfour\nfive\n")
+	commitDiffTestRepo(t, repo, "rename with edit")
+
+	got, err := resolveDiff(context.Background(), repo, base)
+	if err != nil {
+		t.Fatalf("resolveDiff() error = %v", err)
+	}
+	want := finding.ChangedLines{"new.go": {{Start: 3, End: 3}}}
+	if got.ChangedFiles != 1 || got.ChangedLines != 1 || !reflect.DeepEqual(got.Lines, want) {
+		t.Fatalf("resolveDiff() = %#v, want only destination line 3", got)
+	}
+}
+
+func TestResolveDiffUsesLiteralPathspecs(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	const magicName = ":(glob)*.go"
+	writeDiffTestFile(t, repo, magicName, "one\ntwo\nthree\n")
+	writeDiffTestFile(t, repo, "victim.go", "one\ntwo\nthree\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	writeDiffTestFile(t, repo, magicName, "one\ntwo\nTHREE\n")
+	writeDiffTestFile(t, repo, "victim.go", "ONE\ntwo\nthree\n")
+	commitDiffTestRepo(t, repo, "feature")
+
+	got, err := resolveDiff(context.Background(), repo, base)
+	if err != nil {
+		t.Fatalf("resolveDiff() error = %v", err)
+	}
+	want := finding.ChangedLines{
+		magicName:   {{Start: 3, End: 3}},
+		"victim.go": {{Start: 1, End: 1}},
+	}
+	if got.ChangedLines != 2 || !reflect.DeepEqual(got.Lines, want) {
+		t.Fatalf("resolveDiff() = %#v, want literal-path scopes %#v", got, want)
+	}
+}
+
+func TestResolveDiffOverridesInterHunkContext(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "one\ntwo\nthree\nfour\nfive\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	writeDiffTestFile(t, repo, "file.go", "one\nTWO\nthree\nFOUR\nfive\n")
+	commitDiffTestRepo(t, repo, "feature")
+	gitDiffTest(t, repo, "config", "diff.interHunkContext", "99")
+
+	got, err := resolveDiff(context.Background(), repo, base)
+	if err != nil {
+		t.Fatalf("resolveDiff() error = %v", err)
+	}
+	want := finding.ChangedLines{"file.go": {{Start: 2, End: 2}, {Start: 4, End: 4}}}
+	if got.ChangedLines != 2 || !reflect.DeepEqual(got.Lines, want) {
+		t.Fatalf("resolveDiff() = %#v, want separate line sites %#v", got, want)
 	}
 }
 
@@ -221,6 +456,7 @@ func TestResolveDiffRejectsDirtyWorktreeWithoutEchoingStatus(t *testing.T) {
 			commitDiffTestRepo(t, submodule, "submodule base")
 			gitDiffTest(t, repo, "-c", "protocol.file.allow=always", "submodule", "add", submodule, "nested")
 			commitDiffTestRepo(t, repo, "add submodule")
+			gitDiffTest(t, repo, "config", "submodule.nested.ignore", "all")
 			writeDiffTestFile(t, filepath.Join(repo, "nested"), "nested.go", "dirty secret\n")
 		}},
 	} {
@@ -267,11 +503,11 @@ func TestMergeLineRangesSortsAndCombinesAdjacentAndOverlapping(t *testing.T) {
 func TestDeletionAnchorUsesFinalCurrentLineAndRejectsSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	writeDiffTestFile(t, root, "file.go", "one\ntwo\nthree")
-	got, err := deletionAnchor(root, "file.go", 9)
+	got, err := deletionAnchor(context.Background(), root, "file.go", 9)
 	if err != nil || got != 3 {
 		t.Fatalf("deletionAnchor() = %d, %v, want 3", got, err)
 	}
-	if got, err := deletionAnchor(root, "deleted.go", 1); err != nil || got != 0 {
+	if got, err := deletionAnchor(context.Background(), root, "deleted.go", 1); err != nil || got != 0 {
 		t.Fatalf("deletionAnchor(deleted file) = %d, %v, want no anchor", got, err)
 	}
 
@@ -282,8 +518,41 @@ func TestDeletionAnchorUsesFinalCurrentLineAndRejectsSymlinkEscape(t *testing.T)
 	if err := os.Symlink(outside, filepath.Join(root, "escape.go")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if _, err := deletionAnchor(root, "escape.go", 1); err == nil || !strings.Contains(err.Error(), "repository") {
+	if _, err := deletionAnchor(context.Background(), root, "escape.go", 1); err == nil || !strings.Contains(err.Error(), "repository") {
 		t.Fatalf("deletionAnchor(symlink escape) error = %v", err)
+	}
+}
+
+func TestDeletionAnchorHonorsCancellationDuringScan(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "large.go")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(128 << 10); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := newCancelOnErrCallContext(3)
+	if _, err := deletionAnchor(ctx, root, "large.go", 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("deletionAnchor() error = %v, want cancellation during scan", err)
+	}
+}
+
+func TestResolveDiffChecksCancellationBeforeSuccess(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, "file.go", "base\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	writeDiffTestFile(t, repo, "file.go", "feature\n")
+	commitDiffTestRepo(t, repo, "feature")
+
+	ctx := newCancelOnErrCallContext(8)
+	if _, err := resolveDiff(ctx, repo, base); !errors.Is(err, context.Canceled) {
+		t.Fatalf("resolveDiff() error = %v after %d context checks, want final cancellation", err, ctx.calls.Load())
 	}
 }
 
@@ -340,7 +609,7 @@ func gitDiffTest(t *testing.T, repo string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = repo
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+	cmd.Env = diffTestGitEnvironment()
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v: %s", args, err, output)
@@ -352,10 +621,14 @@ func gitDiffTestWantError(t *testing.T, repo string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = repo
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+	cmd.Env = diffTestGitEnvironment()
 	if output, err := cmd.CombinedOutput(); err == nil {
 		t.Fatalf("git %v succeeded, want failure: %s", args, output)
 	}
+}
+
+func diffTestGitEnvironment() []string {
+	return append(os.Environ(), "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
 }
 
 func assertFullObjectID(t *testing.T, value string) {
@@ -368,4 +641,26 @@ func assertFullObjectID(t *testing.T, value string) {
 			t.Fatalf("object ID %q is not lowercase hexadecimal", value)
 		}
 	}
+}
+
+type cancelOnErrCallContext struct {
+	cancelAt int32
+	calls    atomic.Int32
+	done     chan struct{}
+	once     sync.Once
+}
+
+func (*cancelOnErrCallContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (ctx *cancelOnErrCallContext) Done() <-chan struct{}   { return ctx.done }
+func (*cancelOnErrCallContext) Value(any) any               { return nil }
+func (ctx *cancelOnErrCallContext) Err() error {
+	if ctx.calls.Add(1) >= ctx.cancelAt {
+		ctx.once.Do(func() { close(ctx.done) })
+		return context.Canceled
+	}
+	return nil
+}
+
+func newCancelOnErrCallContext(cancelAt int32) *cancelOnErrCallContext {
+	return &cancelOnErrCallContext{cancelAt: cancelAt, done: make(chan struct{})}
 }

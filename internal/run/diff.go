@@ -54,7 +54,7 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 	}
 
 	status, err := diffGitOutput(ctx, canonicalRoot, gitStatusOutputLimit,
-		"status", "--porcelain=v1", "-z", "--untracked-files=all")
+		"status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
 		return Diff{}, fmt.Errorf("inspect repository cleanliness: %w", err)
 	}
@@ -103,11 +103,11 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 	}
 
 	pathOutput, err := diffGitOutput(ctx, canonicalRoot, gitPathsOutputLimit,
-		"diff", "--name-only", "--diff-filter=ACMRTUXB", "--no-ext-diff", "--find-renames", "-z", mergeBase, head, "--")
+		"diff", "--name-status", "--diff-filter=ACMRTUXB", "--no-ext-diff", "--find-renames", "-z", mergeBase, head, "--")
 	if err != nil {
 		return Diff{}, fmt.Errorf("list changed paths: %w", err)
 	}
-	paths, err := parseDiffPaths(canonicalRoot, pathOutput)
+	paths, err := parseChangedPaths(canonicalRoot, pathOutput)
 	if err != nil {
 		return Diff{}, fmt.Errorf("parse changed paths: %w", err)
 	}
@@ -115,19 +115,26 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 	lines := make(finding.ChangedLines, len(paths))
 	changedLineCount := 0
 	for _, path := range paths {
-		patch, err := diffGitOutput(ctx, canonicalRoot, gitDiffOutputLimit,
-			"diff", "--unified=0", "--no-color", "--no-ext-diff", "--find-renames", mergeBase, head, "--", path)
+		args := []string{"diff", "--unified=0", "--inter-hunk-context=0", "--no-color", "--no-ext-diff", "--find-renames", mergeBase, head, "--"}
+		if path.previous != "" {
+			args = append(args, literalPathspec(path.previous))
+		}
+		args = append(args, literalPathspec(path.current))
+		patch, err := diffGitOutput(ctx, canonicalRoot, gitDiffOutputLimit, args...)
 		if err != nil {
 			return Diff{}, fmt.Errorf("read changed-line ranges: %w", err)
 		}
-		ranges, err := parseDiffHunks(canonicalRoot, path, patch)
+		ranges, err := parseDiffHunks(ctx, canonicalRoot, path.current, patch)
 		if err != nil {
 			return Diff{}, fmt.Errorf("parse changed-line ranges: %w", err)
 		}
-		lines[path] = ranges
+		lines[path.current] = ranges
 		for _, lineRange := range ranges {
 			changedLineCount += lineRange.End - lineRange.Start + 1
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return Diff{}, fmt.Errorf("resolve committed diff: %w", err)
 	}
 
 	return Diff{
@@ -139,6 +146,11 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 		ChangedLines: changedLineCount,
 		Lines:        lines,
 	}, nil
+}
+
+type changedPath struct {
+	previous string
+	current  string
 }
 
 func canonicalDiffRoot(root string) (string, error) {
@@ -213,31 +225,63 @@ func validateRequestedBase(base string) error {
 	return nil
 }
 
-func parseDiffPaths(root string, output []byte) ([]string, error) {
+func parseChangedPaths(root string, output []byte) ([]changedPath, error) {
 	if len(output) == 0 {
-		return []string{}, nil
+		return []changedPath{}, nil
 	}
 	if output[len(output)-1] != 0 {
 		return nil, errors.New("Git returned unterminated changed-path output")
 	}
 	records := bytes.Split(output[:len(output)-1], []byte{0})
-	paths := make([]string, 0, len(records))
+	paths := make([]changedPath, 0, len(records)/2)
 	seen := make(map[string]struct{}, len(records))
-	for _, record := range records {
-		if len(record) == 0 || !utf8.Valid(record) {
-			return nil, errors.New("Git returned an invalid changed path")
+	for index := 0; index < len(records); {
+		status := string(records[index])
+		index++
+		pathCount, err := changedPathCount(status)
+		if err != nil || index+pathCount > len(records) {
+			return nil, errors.New("Git returned malformed changed-path status")
 		}
-		path := string(record)
-		if err := validateDiffPath(root, path); err != nil {
-			return nil, err
+		names := make([]string, pathCount)
+		for nameIndex := range names {
+			record := records[index+nameIndex]
+			if len(record) == 0 || !utf8.Valid(record) {
+				return nil, errors.New("Git returned an invalid changed path")
+			}
+			names[nameIndex] = string(record)
+			if err := validateDiffPath(root, names[nameIndex]); err != nil {
+				return nil, err
+			}
 		}
-		if _, exists := seen[path]; exists {
+		index += pathCount
+		path := changedPath{current: names[len(names)-1]}
+		if len(names) == 2 {
+			path.previous = names[0]
+		}
+		if _, exists := seen[path.current]; exists {
 			return nil, errors.New("Git returned a duplicate changed path")
 		}
-		seen[path] = struct{}{}
+		seen[path.current] = struct{}{}
 		paths = append(paths, path)
 	}
 	return paths, nil
+}
+
+func changedPathCount(status string) (int, error) {
+	if len(status) == 1 && strings.ContainsRune("AMTUXB", rune(status[0])) {
+		return 1, nil
+	}
+	if len(status) >= 2 && (status[0] == 'R' || status[0] == 'C') {
+		score, err := strconv.Atoi(status[1:])
+		if err == nil && score >= 0 && score <= 100 {
+			return 2, nil
+		}
+	}
+	return 0, errors.New("invalid changed-path status")
+}
+
+func literalPathspec(path string) string {
+	return ":(literal)" + path
 }
 
 func validateDiffPath(root, path string) error {
@@ -260,7 +304,7 @@ func isWindowsDiffAbsolute(path string) bool {
 	return len(path) >= 3 && ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) && path[1] == ':' && path[2] == '/'
 }
 
-func parseDiffHunks(root, path string, patch []byte) ([]finding.LineRange, error) {
+func parseDiffHunks(ctx context.Context, root, path string, patch []byte) ([]finding.LineRange, error) {
 	if len(patch) == 0 {
 		return []finding.LineRange{}, nil
 	}
@@ -288,7 +332,7 @@ func parseDiffHunks(root, path string, patch []byte) ([]finding.LineRange, error
 			}
 		}
 		if count == 0 {
-			anchor, err := deletionAnchor(root, path, start)
+			anchor, err := deletionAnchor(ctx, root, path, start)
 			if err != nil {
 				return nil, err
 			}
@@ -329,7 +373,13 @@ func mergeLineRanges(ranges []finding.LineRange) []finding.LineRange {
 	return merged[:write+1]
 }
 
-func deletionAnchor(root, path string, requested int) (int, error) {
+func deletionAnchor(ctx context.Context, root, path string, requested int) (int, error) {
+	if ctx == nil {
+		return 0, errors.New("deletion anchor context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	currentPath, exists, err := safeCurrentPath(root, path)
 	if err != nil {
 		return 0, err
@@ -343,9 +393,9 @@ func deletionAnchor(root, path string, requested int) (int, error) {
 	}
 	defer file.Close()
 
-	lineCount, err := countFileLines(file)
+	lineCount, err := countFileLines(ctx, file)
 	if err != nil {
-		return 0, errors.New("read current repository file for deletion anchor")
+		return 0, fmt.Errorf("read current repository file for deletion anchor: %w", err)
 	}
 	if lineCount == 0 {
 		return 0, nil
@@ -399,12 +449,15 @@ func pathWithinRoot(root, path string) bool {
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
 }
 
-func countFileLines(reader io.Reader) (int, error) {
+func countFileLines(ctx context.Context, reader io.Reader) (int, error) {
 	buffer := make([]byte, 32<<10)
 	lines := 0
 	hasData := false
 	last := byte('\n')
 	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		read, err := reader.Read(buffer)
 		if read > 0 {
 			hasData = true
@@ -418,6 +471,9 @@ func countFileLines(reader io.Reader) (int, error) {
 			return 0, err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if hasData && last != '\n' {
 		lines++
 	}
@@ -430,7 +486,7 @@ func diffGitOutput(ctx context.Context, root string, limit int, args ...string) 
 	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+	cmd.Env = diffGitEnvironment()
 	stdout := newBoundedBuffer(limit, []byte("[output truncated]"))
 	stderr := newBoundedBuffer(gitReferenceOutputLimit, []byte("[output truncated]"))
 	cmd.Stdout = stdout
@@ -445,4 +501,22 @@ func diffGitOutput(ctx context.Context, root string, limit int, args ...string) 
 		return nil, errors.New("Git command output exceeded its limit")
 	}
 	return append([]byte(nil), stdout.Bytes()...), nil
+}
+
+func diffGitEnvironment() []string {
+	environment := make([]string, 0, len(os.Environ())+5)
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(strings.ToUpper(name), "GIT_") {
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	return append(environment,
+		"LC_ALL=C",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_OPTIONAL_LOCKS=0",
+	)
 }
