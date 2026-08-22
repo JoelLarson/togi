@@ -60,6 +60,96 @@ func TestResolveDiffNeutralizesExecutableGitConfiguration(t *testing.T) {
 	}
 }
 
+func TestResolveDiffRejectsGitConversionFiltersBeforeExecution(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		configure func(*testing.T, string, string, string)
+	}{
+		{name: "clean", configure: func(t *testing.T, repo, command, _ string) {
+			gitDiffTest(t, repo, "config", "filter.marker.clean", command)
+		}},
+		{name: "process", configure: func(t *testing.T, repo, command, _ string) {
+			gitDiffTest(t, repo, "config", "filter.marker.process", command)
+		}},
+		{name: "included clean", configure: func(t *testing.T, repo, command, include string) {
+			contents := "[filter \"marker\"]\n\tclean = " + command + "\n"
+			if err := os.WriteFile(include, []byte(contents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			gitDiffTest(t, repo, "config", "include.path", include)
+		}},
+		{name: "worktree clean", configure: func(t *testing.T, repo, command, _ string) {
+			gitDiffTest(t, repo, "config", "extensions.worktreeConfig", "true")
+			gitDiffTest(t, repo, "config", "--worktree", "filter.marker.clean", command)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := newDiffTestRepo(t)
+			writeDiffTestFile(t, repo, ".gitattributes", "*.go filter=marker\n")
+			writeDiffTestFile(t, repo, "file.go", "base\n")
+			base := commitDiffTestRepo(t, repo, "base")
+			writeDiffTestFile(t, repo, "file.go", "feature\n")
+			commitDiffTestRepo(t, repo, "feature")
+			marker := filepath.Join(t.TempDir(), "executed")
+			const secret = "conversion-filter-secret"
+			command := helperBinary(t) + " mark " + marker + " " + secret
+			test.configure(t, repo, command, filepath.Join(t.TempDir(), "included-config"))
+
+			_, err := resolveDiff(context.Background(), repo, base)
+			if err == nil || !strings.Contains(err.Error(), "Git conversion filters") {
+				t.Fatalf("resolveDiff() error = %v, want conversion-filter diagnostic", err)
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), command) {
+				t.Fatalf("resolveDiff() exposed conversion command: %v", err)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("conversion filter executed: %v", err)
+			}
+		})
+	}
+}
+
+func TestResolveDiffAllowsSmudgeOnlyGitFilter(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, ".gitattributes", "*.go filter=marker\n")
+	writeDiffTestFile(t, repo, "file.go", "base\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	writeDiffTestFile(t, repo, "file.go", "feature\n")
+	commitDiffTestRepo(t, repo, "feature")
+	marker := filepath.Join(t.TempDir(), "executed")
+	gitDiffTest(t, repo, "config", "filter.marker.smudge", helperBinary(t)+" mark "+marker)
+
+	got, err := resolveDiff(context.Background(), repo, base)
+	if err != nil {
+		t.Fatalf("resolveDiff() error = %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("smudge-only filter executed: %v", err)
+	}
+	want := finding.ChangedLines{"file.go": {{Start: 1, End: 1}}}
+	if !reflect.DeepEqual(got.Lines, want) {
+		t.Fatalf("resolveDiff() lines = %#v, want %#v", got.Lines, want)
+	}
+}
+
+func TestResolveDiffDoesNotClassifyRequiredOnlyAsConversionCommand(t *testing.T) {
+	repo := newDiffTestRepo(t)
+	writeDiffTestFile(t, repo, ".gitattributes", "*.go filter=marker\n")
+	writeDiffTestFile(t, repo, "file.go", "base\n")
+	base := commitDiffTestRepo(t, repo, "base")
+	writeDiffTestFile(t, repo, "file.go", "feature\n")
+	commitDiffTestRepo(t, repo, "feature")
+	gitDiffTest(t, repo, "config", "filter.marker.required", "true")
+
+	_, err := resolveDiff(context.Background(), repo, base)
+	if err == nil {
+		t.Fatal("resolveDiff() error = nil, want Git status failure for missing required driver")
+	}
+	if strings.Contains(err.Error(), "Git conversion filters") {
+		t.Fatalf("required-only field classified as a conversion command: %v", err)
+	}
+}
+
 func TestResolveDiffNeutralizesLocalAttributesFile(t *testing.T) {
 	repo := newDiffTestRepo(t)
 	writeDiffTestFile(t, repo, "file.go", "base\n")

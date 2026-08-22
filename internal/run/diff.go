@@ -59,6 +59,9 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 	if err := checkLocalAttributes(localAttributes); err != nil {
 		return Diff{}, err
 	}
+	if err := rejectGitConversionFilters(ctx, canonicalRoot); err != nil {
+		return Diff{}, err
+	}
 
 	status, err := diffGitOutput(ctx, canonicalRoot, gitStatusOutputLimit,
 		"status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none")
@@ -147,6 +150,9 @@ func resolveDiff(ctx context.Context, root, requestedBase string) (Diff, error) 
 		for _, lineRange := range ranges {
 			changedLineCount += lineRange.End - lineRange.Start + 1
 		}
+	}
+	if err := rejectGitConversionFilters(ctx, canonicalRoot); err != nil {
+		return Diff{}, err
 	}
 	if err := checkLocalAttributes(localAttributes); err != nil {
 		return Diff{}, err
@@ -266,6 +272,24 @@ func checkLocalAttributes(attributes localAttributesPath) error {
 		return errors.New("local Git attributes must be absent or an empty regular file")
 	}
 	return validateLocalAttributesParent(attributes)
+}
+
+func rejectGitConversionFilters(ctx context.Context, root string) error {
+	output, err := diffGitOutput(ctx, root, gitReferenceOutputLimit,
+		"config", "--includes", "--name-only", "--null", "--get-regexp", `^filter\..*\.(clean|process)$`)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("inspect Git conversion filters: %w", err)
+		}
+		if exitCode, exited := commandExitCode(err); exited && exitCode == 1 {
+			return nil
+		}
+		return fmt.Errorf("inspect Git conversion filters: %w", err)
+	}
+	if len(output) != 0 {
+		return errors.New("Git conversion filters are not allowed during diff resolution")
+	}
+	return nil
 }
 
 func validateLocalAttributesParent(attributes localAttributesPath) error {
