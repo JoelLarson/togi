@@ -206,12 +206,12 @@ func TestServiceRejectsUnsafeWiringBeforeRepositoryResolution(t *testing.T) {
 		name    string
 		service Service
 	}{
-		{name: "empty paths", service: Service{Executor: validExecutor, Stdout: io.Discard, Diff: fixtureDiff()}},
-		{name: "relative config", service: Service{Paths: config.Paths{Config: "config", State: validPaths.State}, Executor: validExecutor, Stdout: io.Discard, Diff: fixtureDiff()}},
-		{name: "relative state", service: Service{Paths: config.Paths{Config: validPaths.Config, State: "state"}, Executor: validExecutor, Stdout: io.Discard, Diff: fixtureDiff()}},
-		{name: "empty registry", service: Service{Paths: validPaths, Executor: Executor{Enricher: enricher.Noop{}}, Stdout: io.Discard, Diff: fixtureDiff()}},
-		{name: "empty enricher", service: Service{Paths: validPaths, Executor: Executor{Registry: normalizer.NewRegistry()}, Stdout: io.Discard, Diff: fixtureDiff()}},
-		{name: "empty output", service: Service{Paths: validPaths, Executor: validExecutor, Diff: fixtureDiff()}},
+		{name: "empty paths", service: Service{Executor: validExecutor, Stdout: io.Discard}},
+		{name: "relative config", service: Service{Paths: config.Paths{Config: "config", State: validPaths.State}, Executor: validExecutor, Stdout: io.Discard}},
+		{name: "relative state", service: Service{Paths: config.Paths{Config: validPaths.Config, State: "state"}, Executor: validExecutor, Stdout: io.Discard}},
+		{name: "empty registry", service: Service{Paths: validPaths, Executor: Executor{Enricher: enricher.Noop{}}, Stdout: io.Discard}},
+		{name: "empty enricher", service: Service{Paths: validPaths, Executor: Executor{Registry: normalizer.NewRegistry()}, Stdout: io.Discard}},
+		{name: "empty output", service: Service{Paths: validPaths, Executor: validExecutor}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
@@ -230,39 +230,125 @@ func TestServiceRejectsUnsafeWiringBeforeRepositoryResolution(t *testing.T) {
 	}
 }
 
-func TestServiceRejectsInvalidDiffBeforeRepositoryResolutionOrSideEffects(t *testing.T) {
+func TestServiceResolvesExplicitAndDefaultBase(t *testing.T) {
 	root, paths := fixtureRepository(t)
-	marker := filepath.Join(t.TempDir(), "executed")
-	writeFixtureGateCommand(t, paths.GateOverrides(), "lint", []string{helperBinary(t), "active", marker, "1ms", marker + ".done"})
+	writeFixtureGate(t, paths.GateOverrides(), "lint", fixtureJSON("lint.go", 2, "golangci-lint/errcheck", "unchecked"), false)
+	base := gitFixture(t, root, "rev-parse", "refs/remotes/origin/main")
+
+	defaultReport, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}})
+	assertVerdictError(t, err)
+	if defaultReport.Diff.BaseRef != "origin/main" || defaultReport.Diff.BaseCommit != base {
+		t.Fatalf("default diff = %#v, want origin/main at %s", defaultReport.Diff, base)
+	}
+
+	explicitReport, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, Base: base, GateNames: []string{"lint"}})
+	assertVerdictError(t, err)
+	if explicitReport.Diff.BaseRef != base || explicitReport.Diff.BaseCommit != base {
+		t.Fatalf("explicit diff = %#v, want exact base %s", explicitReport.Diff, base)
+	}
+	if explicitReport.Diff.MergeBase != defaultReport.Diff.MergeBase || explicitReport.Diff.Head != defaultReport.Diff.Head {
+		t.Fatalf("resolved commits differ: default %#v explicit %#v", defaultReport.Diff, explicitReport.Diff)
+	}
+}
+
+func TestServiceRejectsInvalidDiffInputsBeforeLedgerOrGates(t *testing.T) {
 	for _, test := range []struct {
-		name string
-		diff Diff
+		name    string
+		base    string
+		want    string
+		prepare func(*testing.T, string)
 	}{
-		{name: "zero diff", diff: Diff{}},
-		{name: "missing lines", diff: func() Diff { diff := fixtureDiff(); diff.Lines = nil; return diff }()},
-		{name: "false counts", diff: func() Diff { diff := fixtureDiff(); diff.ChangedLines = 1; return diff }()},
+		{name: "unstaged", want: "worktree must be clean", prepare: func(t *testing.T, root string) {
+			writeDiffTestFile(t, root, "lint.go", "package fixture\nvar lint = 2\n")
+		}},
+		{name: "staged", want: "worktree must be clean", prepare: func(t *testing.T, root string) {
+			writeDiffTestFile(t, root, "lint.go", "package fixture\nvar lint = 2\n")
+			gitFixture(t, root, "add", "lint.go")
+		}},
+		{name: "untracked", want: "worktree must be clean", prepare: func(t *testing.T, root string) { writeDiffTestFile(t, root, "pending.go", "package fixture\n") }},
+		{name: "submodule", want: "repositories containing submodules are unsupported", prepare: func(t *testing.T, root string) {
+			head := gitFixture(t, root, "rev-parse", "HEAD")
+			gitFixture(t, root, "update-index", "--add", "--cacheinfo", "160000,"+head+",vendor/sub")
+			gitFixture(t, root, "-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-m", "track gitlink")
+		}},
+		{name: "missing default", want: "pass --base", prepare: func(t *testing.T, root string) {
+			gitFixture(t, root, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+		}},
+		{name: "invalid base", base: "bad\nref", want: "base revision is invalid"},
+		{name: "unresolved base", base: "refs/heads/missing", want: "selected revision is not a commit"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			resolved := false
-			service := fixtureService(paths, new(bytes.Buffer))
-			service.Diff = test.diff
-			service.ResolveRepo = func(context.Context, string) (repoid.ID, error) {
-				resolved = true
-				return repoid.ID{}, nil
+			root, paths := fixtureRepository(t)
+			marker := filepath.Join(t.TempDir(), "executed")
+			writeFixtureGateCommand(t, paths.GateOverrides(), "lint", []string{helperBinary(t), "active", marker, "1ms", marker + ".done"})
+			if test.prepare != nil {
+				test.prepare(t, root)
 			}
-			if _, err := service.Run(context.Background(), Options{Root: root}); err == nil {
-				t.Fatal("Run accepted invalid diff")
+			_, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, Base: test.base, GateNames: []string{"lint"}})
+			if err == nil {
+				t.Fatal("Run succeeded")
 			}
-			if resolved {
-				t.Fatal("Run resolved the repository before rejecting its diff")
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Run error = %v, want %q", err, test.want)
 			}
-			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("gate command ran: %v", err)
+			if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("gate helper executed: %v", statErr)
 			}
-			if _, err := os.Stat(paths.State); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("state or raw output was created: %v", err)
+			if _, statErr := os.Stat(paths.State); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("ledger state created: %v", statErr)
 			}
 		})
+	}
+}
+
+func TestServiceScopesCommittedFindingsAndProducesStableMetadata(t *testing.T) {
+	root, paths, base, head := scopedFixtureRepository(t)
+	writeScopedFixtureGate(t, paths.GateOverrides(), "entity", gate.Diff, gate.EntityLocation, fixtureJSON("scope.go", 3, "fixture/entity", "entity finding"))
+	writeScopedFixtureGate(t, paths.GateOverrides(), "point", gate.Diff, gate.PointLocation, fixtureJSON("scope.go", 3, "fixture/point", "point finding"))
+	writeScopedFixtureGate(t, paths.GateOverrides(), "repository", gate.Repo, gate.PointLocation, fixtureJSON("scope.go", 3, "fixture/repository", "repository finding"))
+	baseline := targetTree(t, root)
+
+	runOnce := func() Report {
+		service := fixtureService(paths, new(bytes.Buffer))
+		service.Executor.Enricher = enricher.Go{}
+		report, err := service.Run(context.Background(), Options{
+			Root: root, GateNames: []string{"entity", "point", "repository"}, ReportOnly: true, NoColor: true,
+		})
+		assertVerdictError(t, err)
+		return report
+	}
+	first := runOnce()
+	second := runOnce()
+
+	wantDiff := DiffReport{BaseRef: "origin/main", BaseCommit: base, MergeBase: base, Head: head, ChangedFiles: 1, ChangedLines: 1}
+	if first.Diff != wantDiff || second.Diff != wantDiff {
+		t.Fatalf("diff metadata:\nfirst  %#v\nsecond %#v\nwant   %#v", first.Diff, second.Diff, wantDiff)
+	}
+	if got, want := findingKeys(first.Findings), findingKeys(second.Findings); !reflect.DeepEqual(got, want) {
+		t.Fatalf("fingerprints changed across runs:\n%v\n%v", got, want)
+	}
+	if len(first.Findings) != 2 {
+		t.Fatalf("findings = %#v, want entity and repository findings", first.Findings)
+	}
+	if gateByName(t, first, "entity").Status != GateFindings || gateByName(t, first, "point").Status != GatePassed || gateByName(t, first, "repository").Status != GateFindings {
+		t.Fatalf("gate reports = %#v", first.Gates)
+	}
+	for _, item := range first.Findings {
+		switch item.Gate {
+		case "entity":
+			if item.Line != 3 || item.EndLine != 5 {
+				t.Fatalf("entity location = %d-%d, want 3-5", item.Line, item.EndLine)
+			}
+		case "repository":
+			if item.Line != 3 || item.EndLine != 0 {
+				t.Fatalf("repository location = %d-%d, want point at 3", item.Line, item.EndLine)
+			}
+		default:
+			t.Fatalf("unexpected surviving finding %#v", item)
+		}
+	}
+	if after := targetTree(t, root); !reflect.DeepEqual(after, baseline) {
+		t.Fatalf("target repository changed:\nbefore %v\nafter  %v", baseline, after)
 	}
 }
 
@@ -276,7 +362,7 @@ func TestServiceRejectsUnsafeInjectedRepositoryIdentityBeforeStateUse(t *testing
 		{Key: "key", Directory: " ", Root: root},
 		{Key: "key", Directory: "bad:name", Root: root},
 	} {
-		service := Service{Paths: paths, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: io.Discard, Diff: fixtureDiff(), ResolveRepo: func(context.Context, string) (repoid.ID, error) { return id, nil }}
+		service := Service{Paths: paths, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: io.Discard, ResolveRepo: func(context.Context, string) (repoid.ID, error) { return id, nil }}
 		if _, err := service.Run(context.Background(), Options{}); err == nil {
 			t.Fatalf("Run accepted identity %#v", id)
 		}
@@ -332,7 +418,7 @@ func TestServiceRejectsRepositoryStateInsideTargetWithoutSideEffects(t *testing.
 				t.Fatal(err)
 			}
 			paths := config.Paths{Config: filepath.Join(t.TempDir(), "config"), State: tc.state(t, root)}
-			service := Service{Paths: paths, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: io.Discard, Diff: fixtureDiff()}
+			service := Service{Paths: paths, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: io.Discard}
 			if _, err := service.Run(context.Background(), Options{Root: root}); err == nil || !strings.Contains(err.Error(), "target repository") {
 				t.Fatalf("Run error = %v", err)
 			}
@@ -539,8 +625,34 @@ func fixtureRepository(t *testing.T) (string, config.Paths) {
 			t.Fatalf("git %v: %v: %s", args, err, output)
 		}
 	}
+	baseCommit := gitFixture(t, root, "rev-parse", "HEAD")
+	gitFixture(t, root, "update-ref", "refs/remotes/origin/main", baseCommit)
+	gitFixture(t, root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	writeDiffTestFile(t, root, "feature.go", "package fixture\nvar feature = true\n")
+	gitFixture(t, root, "add", "feature.go")
+	gitFixture(t, root, "-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-qm", "feature")
 	base := t.TempDir()
 	return root, config.Paths{Config: filepath.Join(base, "config"), State: filepath.Join(base, "state"), Cache: filepath.Join(base, "cache")}
+}
+
+func scopedFixtureRepository(t *testing.T) (root string, paths config.Paths, base, head string) {
+	t.Helper()
+	root = t.TempDir()
+	gitFixture(t, root, "init", "-q")
+	gitFixture(t, root, "symbolic-ref", "HEAD", "refs/heads/feature")
+	writeDiffTestFile(t, root, "scope.go", "package fixture\n\nfunc complexity() int {\n\treturn 1\n}\n")
+	gitFixture(t, root, "add", "scope.go")
+	gitFixture(t, root, "-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-qm", "base")
+	base = gitFixture(t, root, "rev-parse", "HEAD")
+	gitFixture(t, root, "update-ref", "refs/remotes/origin/main", base)
+	gitFixture(t, root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+	writeDiffTestFile(t, root, "scope.go", "package fixture\n\nfunc complexity() int {\n\treturn 2\n}\n")
+	gitFixture(t, root, "add", "scope.go")
+	gitFixture(t, root, "-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-qm", "feature")
+	head = gitFixture(t, root, "rev-parse", "HEAD")
+	storage := t.TempDir()
+	paths = config.Paths{Config: filepath.Join(storage, "config"), State: filepath.Join(storage, "state"), Cache: filepath.Join(storage, "cache")}
+	return root, paths, base, head
 }
 
 func fixtureService(paths config.Paths, output *bytes.Buffer) Service {
@@ -549,7 +661,26 @@ func fixtureService(paths config.Paths, output *bytes.Buffer) Service {
 		Loader:   gate.Loader{OverrideDir: paths.GateOverrides()},
 		Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}},
 		Stdout:   output,
-		Diff:     fixtureDiff(),
+	}
+}
+
+func gitFixture(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = root
+	command.Env = diffTestGitEnvironment()
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func assertVerdictError(t *testing.T, err error) {
+	t.Helper()
+	var exitErr *ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("Run error = %v, want verdict ExitError", err)
 	}
 }
 
@@ -614,6 +745,27 @@ func writeFixtureGateCommand(t *testing.T, override, name string, command []stri
 		t.Fatal(err)
 	}
 	manifest := fmt.Sprintf("name = %q\ndescription = %q\ncost_class = \"fast\"\nfix_policy = \"report-only\"\nscope = \"repo\"\nblocking = [\"error\", \"warning\"]\ntimeout = \"5s\"\n", name, name)
+	if err := os.WriteFile(filepath.Join(override, name, "gate.toml"), []byte(manifest), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := fmt.Sprintf("language = \"go\"\ntool = \"fixture\"\ncommand = %s\nsuccess_exit_codes = [0]\nfinding_exit_codes = [1]\nnormalizer = \"golangci-json\"\n[severity_map]\nwarning = \"warning\"\ndefault = \"warning\"\n", encoded)
+	if err := os.WriteFile(filepath.Join(dir, "binding.toml"), []byte(binding), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeScopedFixtureGate(t *testing.T, override, name string, scope gate.Scope, location gate.Location, output string) {
+	t.Helper()
+	command := []string{helperBinary(t), "emit", fmt.Sprintf("%q", output), fmt.Sprintf("%q", ""), "1"}
+	dir := filepath.Join(override, name, "go")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fmt.Sprintf("name = %q\ndescription = %q\ncost_class = \"fast\"\nfix_policy = \"report-only\"\nscope = %q\nlocation = %q\nblocking = [\"error\", \"warning\"]\ntimeout = \"5s\"\n", name, name, scope, location)
 	if err := os.WriteFile(filepath.Join(override, name, "gate.toml"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}

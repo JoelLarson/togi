@@ -15,7 +15,7 @@ const (
 	GateErrored  GateStatus = "errored"
 )
 
-// Verdict describes the overall outcome of a phase-one run.
+// Verdict describes the overall outcome of a run.
 type Verdict string
 
 const (

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/joellarson/togi/internal/enricher"
 	runpkg "github.com/joellarson/togi/internal/run"
 )
 
@@ -45,24 +46,24 @@ func (service *fakeService) Status(_ context.Context, root string, noColor bool)
 	return runpkg.Report{}, service.statusErr
 }
 
-func TestRunCommandPassesPhaseOneFlags(t *testing.T) {
+func TestRunCommandPassesFlags(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	service := &fakeService{runErr: &runpkg.ExitError{Code: 4, Err: errors.New("errored")}}
 	cmd := newRootCommandWithService(streams{out: &stdout, err: &stderr}, service)
-	cmd.SetArgs([]string{"run", "--report-only", "--gate", "lint", "--gate", "complexity", "--verbose", "--no-color"})
+	cmd.SetArgs([]string{"run", "--base", "refs/heads/main", "--report-only", "--gate", "lint", "--gate", "complexity", "--verbose", "--no-color"})
 	err := cmd.Execute()
 	var exitErr *runpkg.ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 4 {
 		t.Fatalf("Execute error = %v", err)
 	}
-	want := runpkg.Options{Root: ".", GateNames: []string{"lint", "complexity"}, ReportOnly: true, Verbose: true, NoColor: true}
+	want := runpkg.Options{Root: ".", Base: "refs/heads/main", GateNames: []string{"lint", "complexity"}, ReportOnly: true, Verbose: true, NoColor: true}
 	if got := service.runOptions; !reflect.DeepEqual(got, want) {
 		t.Fatalf("options = %#v, want %#v", got, want)
 	}
 }
 
-func TestRunCommandRejectsBaseAndArguments(t *testing.T) {
-	for _, args := range [][]string{{"run", "--base", "main"}, {"run", "extra"}} {
+func TestRunCommandRejectsArguments(t *testing.T) {
+	for _, args := range [][]string{{"run", "extra"}} {
 		service := &fakeService{}
 		cmd := newRootCommandWithService(streams{out: io.Discard, err: io.Discard}, service)
 		cmd.SetArgs(args)
@@ -70,9 +71,17 @@ func TestRunCommandRejectsBaseAndArguments(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%v unexpectedly succeeded", args)
 		}
-		if args[1] == "--base" && !strings.Contains(err.Error(), "phase 1") {
-			t.Fatalf("base error = %v", err)
-		}
+	}
+}
+
+func TestDefaultServiceUsesGoEnricher(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	service, err := defaultService(streams{out: io.Discard, err: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := service.Executor.Enricher.(enricher.Go); !ok {
+		t.Fatalf("enricher = %T, want enricher.Go", service.Executor.Enricher)
 	}
 }
 

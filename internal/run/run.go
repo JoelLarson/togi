@@ -18,9 +18,10 @@ import (
 	"github.com/joellarson/togi/internal/repoid"
 )
 
-// Options controls one phase-one report-only run.
+// Options controls one report-only run.
 type Options struct {
 	Root       string
+	Base       string
 	GateNames  []string
 	ReportOnly bool
 	Verbose    bool
@@ -36,9 +37,6 @@ type Service struct {
 	VerboseOut io.Writer
 	Now        func() time.Time
 	Random     io.Reader
-
-	// Diff is the already-resolved scope recorded by this run. Resolution is wired separately.
-	Diff Diff
 
 	// GOOS and ResolveRepo are narrow seams for boundary and orchestration tests.
 	GOOS        string
@@ -56,7 +54,7 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 	if ctx == nil {
 		return Report{}, errors.New("run context is required")
 	}
-	repository, repoState, requests, err := service.prepareRun(ctx, opts)
+	prepared, err := service.prepareRun(ctx, opts)
 	if err != nil {
 		return Report{}, err
 	}
@@ -66,7 +64,7 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 		now = time.Now
 	}
 	startedAt := now().UTC()
-	ledger := Ledger{RepoState: repoState, Now: func() time.Time { return startedAt }, Random: service.Random}
+	ledger := Ledger{RepoState: prepared.repoState, Now: func() time.Time { return startedAt }, Random: service.Random}
 	active, err := ledger.Start()
 	if err != nil {
 		return Report{}, fmt.Errorf("start run ledger: %w", err)
@@ -77,14 +75,14 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 			resultErr = errors.Join(resultErr, active.Close())
 		}
 	}()
-	for index := range requests {
-		requests[index].RawStore = active
+	for index := range prepared.requests {
+		prepared.requests[index].RawStore = active
 	}
-	if err := service.writeVerbose(opts.Verbose, requests); err != nil {
+	if err := service.writeVerbose(opts.Verbose, prepared.requests); err != nil {
 		return Report{}, err
 	}
-	gateReports := Collect(ctx, service.Executor, requests, min(runtime.NumCPU(), defaultMaximumWorkers))
-	report, err = buildReport(active.runID, repository.Key, startedAt, now().UTC(), service.Diff, gateReports)
+	gateReports := Collect(ctx, service.Executor, prepared.requests, min(runtime.NumCPU(), defaultMaximumWorkers))
+	report, err = buildReport(active.runID, prepared.repository.Key, startedAt, now().UTC(), prepared.diff, gateReports)
 	if err != nil {
 		return Report{}, err
 	}
@@ -202,7 +200,14 @@ func diffReport(diff Diff) DiffReport {
 	}
 }
 
-func (service Service) prepareRun(ctx context.Context, opts Options) (repoid.ID, string, []Request, error) {
+type preparedRun struct {
+	repository repoid.ID
+	repoState  string
+	diff       Diff
+	requests   []Request
+}
+
+func (service Service) prepareRun(ctx context.Context, opts Options) (preparedRun, error) {
 	root := opts.Root
 	if root == "" {
 		root = "."
@@ -213,14 +218,21 @@ func (service Service) prepareRun(ctx context.Context, opts Options) (repoid.ID,
 	}
 	repository, err := resolve(ctx, root)
 	if err != nil {
-		return repoid.ID{}, "", nil, fmt.Errorf("resolve repository identity: %w", err)
+		return preparedRun{}, fmt.Errorf("resolve repository identity: %w", err)
 	}
 	if err := validateRepositoryID(repository); err != nil {
-		return repoid.ID{}, "", nil, fmt.Errorf("validate repository identity: %w", err)
+		return preparedRun{}, fmt.Errorf("validate repository identity: %w", err)
 	}
 	repoState := service.Paths.RepoState(repository.Directory)
 	if err := validateExternalRepoState(repository.Root, repoState); err != nil {
-		return repoid.ID{}, "", nil, err
+		return preparedRun{}, err
+	}
+	diff, err := resolveDiff(ctx, repository.Root, opts.Base)
+	if err != nil {
+		return preparedRun{}, fmt.Errorf("resolve diff scope: %w", err)
+	}
+	if err := validateDiff(diff); err != nil {
+		return preparedRun{}, fmt.Errorf("validate diff scope: %w", err)
 	}
 	loader := service.Loader
 	if loader.OverrideDir == "" {
@@ -228,10 +240,18 @@ func (service Service) prepareRun(ctx context.Context, opts Options) (repoid.ID,
 	}
 	loaded, err := loader.LoadAll()
 	if err != nil {
-		return repoid.ID{}, "", nil, fmt.Errorf("load gates: %w", err)
+		return preparedRun{}, fmt.Errorf("load gates: %w", err)
 	}
 	requests, err := selectRequests(loaded, opts.GateNames, repository.Root)
-	return repository, repoState, requests, err
+	if err != nil {
+		return preparedRun{}, err
+	}
+	for index := range requests {
+		if executionScope(requests[index].Gate.Manifest.Scope) == gate.Diff {
+			requests[index].ChangedLines = diff.Lines
+		}
+	}
+	return preparedRun{repository: repository, repoState: repoState, diff: diff, requests: requests}, nil
 }
 
 // Status renders the newest complete report without loading or executing gates.
@@ -295,9 +315,6 @@ func (service Service) validateRun() error {
 	}
 	if isNilInterface(service.Stdout) {
 		return errors.New("report output is required")
-	}
-	if err := validateDiff(service.Diff); err != nil {
-		return fmt.Errorf("service diff is invalid: %w", err)
 	}
 	return nil
 }

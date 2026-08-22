@@ -56,7 +56,7 @@ func defaultService(s streams) (runpkg.Service, error) {
 	return runpkg.Service{
 		Paths:      paths,
 		Loader:     gate.Loader{OverrideDir: paths.GateOverrides()},
-		Executor:   runpkg.Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}},
+		Executor:   runpkg.Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Go{}},
 		Stdout:     s.out,
 		VerboseOut: s.err,
 	}, nil
@@ -101,11 +101,9 @@ func newRunCommand(service commandService) *cobra.Command {
 		Short: "Run the configured quality gates",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if flags.base != "" {
-				return fmt.Errorf("--base is unavailable in phase 1 because diff scoping is not implemented")
-			}
 			_, err := service.Run(cmd.Context(), runpkg.Options{
 				Root:       ".",
+				Base:       flags.base,
 				GateNames:  append([]string(nil), flags.gates...),
 				ReportOnly: flags.reportOnly,
 				Verbose:    flags.verbose,
