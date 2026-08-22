@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1092,9 +1093,10 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	wanted := Report{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		RunID:         "20260821T120200.000000000Z-0002",
 		RepoID:        "repo-id",
+		Diff:          completeReportFixture("").Diff,
 		StartedAt:     time.Date(2026, time.August, 21, 12, 2, 0, 0, time.UTC),
 		FinishedAt:    time.Date(2026, time.August, 21, 12, 2, 5, 0, time.UTC),
 		Verdict:       VerdictErrored,
@@ -1160,8 +1162,8 @@ func TestLatestSortsSameSecondRunsByNanoseconds(t *testing.T) {
 	if err := os.Mkdir(runsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	older := Report{SchemaVersion: 1, RunID: "20260821T120000.100000000Z-ffff"}
-	newer := Report{SchemaVersion: 1, RunID: "20260821T120000.900000000Z-0000"}
+	older := Report{SchemaVersion: 2, RunID: "20260821T120000.100000000Z-ffff"}
+	newer := Report{SchemaVersion: 2, RunID: "20260821T120000.900000000Z-0000"}
 	writeReportFixture(t, runsDir, newer)
 	writeReportFixture(t, runsDir, older)
 
@@ -1183,7 +1185,7 @@ func TestLatestReadRemainsAnchoredAfterRunsDirectoryReplacement(t *testing.T) {
 	if err := os.Mkdir(runsPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	wanted := Report{SchemaVersion: 1, RunID: "20260821T120000.100000000Z-0000"}
+	wanted := Report{SchemaVersion: 2, RunID: "20260821T120000.100000000Z-0000"}
 	writeReportFixture(t, runsPath, wanted)
 	runsRoot, err := os.OpenRoot(runsPath)
 	if err != nil {
@@ -1412,7 +1414,12 @@ func TestWriteReportRejectsInvalidReportsWithoutArtifacts(t *testing.T) {
 	}{
 		{name: "schema", report: func(runID string) Report {
 			report := completeReportFixture(runID)
-			report.SchemaVersion = 2
+			report.SchemaVersion = 1
+			return report
+		}},
+		{name: "future schema", report: func(runID string) Report {
+			report := completeReportFixture(runID)
+			report.SchemaVersion = 3
 			return report
 		}},
 		{name: "run ID", report: func(runID string) Report {
@@ -1472,6 +1479,81 @@ func TestWriteReportRejectsInvalidReportsWithoutArtifacts(t *testing.T) {
 				t.Fatalf("invalid report left temporary files: %v", matches)
 			}
 		})
+	}
+}
+
+func TestValidateReportRejectsMissingAndMalformedDiffMetadata(t *testing.T) {
+	valid := completeReportFixture("20260821T120000.000000000Z-0000")
+	for _, test := range []struct {
+		name   string
+		mutate func(*Report)
+	}{
+		{name: "missing base ref", mutate: func(report *Report) { report.Diff.BaseRef = "" }},
+		{name: "blank base ref", mutate: func(report *Report) { report.Diff.BaseRef = " \t" }},
+		{name: "control base ref", mutate: func(report *Report) { report.Diff.BaseRef = "main\nbranch" }},
+		{name: "unicode control base ref", mutate: func(report *Report) { report.Diff.BaseRef = "main\u0085branch" }},
+		{name: "missing base commit", mutate: func(report *Report) { report.Diff.BaseCommit = "" }},
+		{name: "malformed base commit", mutate: func(report *Report) { report.Diff.BaseCommit = strings.Repeat("a", 39) }},
+		{name: "missing merge base", mutate: func(report *Report) { report.Diff.MergeBase = "" }},
+		{name: "malformed merge base", mutate: func(report *Report) { report.Diff.MergeBase = strings.ToUpper(report.Diff.MergeBase) }},
+		{name: "missing head", mutate: func(report *Report) { report.Diff.Head = "" }},
+		{name: "malformed head", mutate: func(report *Report) { report.Diff.Head = strings.Repeat("g", 40) }},
+		{name: "mixed object ID lengths", mutate: func(report *Report) { report.Diff.Head = strings.Repeat("c", 64) }},
+		{name: "negative file count", mutate: func(report *Report) { report.Diff.ChangedFiles = -1 }},
+		{name: "negative line count", mutate: func(report *Report) { report.Diff.ChangedLines = -1 }},
+		{name: "zero files with lines", mutate: func(report *Report) { report.Diff.ChangedFiles, report.Diff.ChangedLines = 0, 1 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			report := valid
+			test.mutate(&report)
+			if err := validateReport(report, report.RunID); err == nil {
+				t.Fatal("validateReport accepted invalid diff metadata")
+			}
+		})
+	}
+}
+
+func TestValidateReportAcceptsZeroAndBinaryDiffCounts(t *testing.T) {
+	for _, diff := range []DiffReport{
+		{BaseRef: "origin/main", BaseCommit: strings.Repeat("a", 40), MergeBase: strings.Repeat("b", 40), Head: strings.Repeat("c", 40)},
+		{BaseRef: "origin/main", BaseCommit: strings.Repeat("a", 40), MergeBase: strings.Repeat("b", 40), Head: strings.Repeat("c", 40), ChangedFiles: 1},
+	} {
+		report := completeReportFixture("20260821T120000.000000000Z-0000")
+		report.Diff = diff
+		if err := validateReport(report, report.RunID); err != nil {
+			t.Fatalf("validateReport(%#v): %v", diff, err)
+		}
+	}
+}
+
+func TestLatestSkipsSchemaOneReports(t *testing.T) {
+	repoState := t.TempDir()
+	runsDir := filepath.Join(repoState, "runs")
+	if err := os.Mkdir(runsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	older := completeReportFixture("20260821T120000.000000000Z-0000")
+	newer := completeReportFixture("20260821T120100.000000000Z-0001")
+	newer.SchemaVersion = 1
+	writeReportFixture(t, runsDir, older)
+	writeReportFixture(t, runsDir, newer)
+
+	got, err := (Ledger{RepoState: repoState}).Latest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RunID != older.RunID {
+		t.Fatalf("Latest run ID = %q, want %q", got.RunID, older.RunID)
+	}
+
+	onlyLegacyState := t.TempDir()
+	onlyLegacyRuns := filepath.Join(onlyLegacyState, "runs")
+	if err := os.Mkdir(onlyLegacyRuns, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeReportFixture(t, onlyLegacyRuns, newer)
+	if _, err := (Ledger{RepoState: onlyLegacyState}).Latest(); !errors.Is(err, ErrNoCompleteRuns) {
+		t.Fatalf("Latest error = %v, want ErrNoCompleteRuns", err)
 	}
 }
 
@@ -1581,6 +1663,9 @@ func writeReportFixture(t *testing.T, runsDir string, report Report) {
 
 func completeReportDefaults(report Report) Report {
 	defaults := completeReportFixture(report.RunID)
+	if report.SchemaVersion == 0 {
+		report.SchemaVersion = defaults.SchemaVersion
+	}
 	if report.RepoID == "" {
 		report.RepoID = defaults.RepoID
 	}
@@ -1599,20 +1684,29 @@ func completeReportDefaults(report Report) Report {
 	if report.Findings == nil {
 		report.Findings = defaults.Findings
 	}
+	if report.Diff == (DiffReport{}) {
+		report.Diff = defaults.Diff
+	}
 	return report
 }
 
 func completeReportFixture(runID string) Report {
 	started := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
 	return Report{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		RunID:         runID,
 		RepoID:        "repo-id",
-		StartedAt:     started,
-		FinishedAt:    started.Add(time.Second),
-		Verdict:       VerdictUnverified,
-		Gates:         []GateReport{{Gate: "lint", Language: "go", Status: GatePassed}},
-		Findings:      []finding.Finding{},
-		Counts:        Counts{},
+		Diff: DiffReport{
+			BaseRef:    "origin/main",
+			BaseCommit: strings.Repeat("a", 40),
+			MergeBase:  strings.Repeat("b", 40),
+			Head:       strings.Repeat("c", 40),
+		},
+		StartedAt:  started,
+		FinishedAt: started.Add(time.Second),
+		Verdict:    VerdictUnverified,
+		Gates:      []GateReport{{Gate: "lint", Language: "go", Status: GatePassed}},
+		Findings:   []finding.Finding{},
+		Counts:     Counts{},
 	}
 }

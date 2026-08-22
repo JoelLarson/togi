@@ -44,11 +44,22 @@ type Counts struct {
 	Occurrences int `json:"occurrences"`
 }
 
+// DiffReport records the public diff scope metadata for a completed run.
+type DiffReport struct {
+	BaseRef      string `json:"base_ref"`
+	BaseCommit   string `json:"base_commit"`
+	MergeBase    string `json:"merge_base"`
+	Head         string `json:"head"`
+	ChangedFiles int    `json:"changed_files"`
+	ChangedLines int    `json:"changed_lines"`
+}
+
 // Report is the machine-readable artifact for a completed run.
 type Report struct {
 	SchemaVersion int               `json:"schema_version"`
 	RunID         string            `json:"run_id"`
 	RepoID        string            `json:"repo_id"`
+	Diff          DiffReport        `json:"diff"`
 	StartedAt     time.Time         `json:"started_at"`
 	FinishedAt    time.Time         `json:"finished_at"`
 	Verdict       Verdict           `json:"verdict"`

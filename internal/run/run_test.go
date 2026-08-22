@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/enricher"
@@ -25,6 +26,56 @@ import (
 	"github.com/joellarson/togi/internal/normalizer"
 	"github.com/joellarson/togi/internal/repoid"
 )
+
+func TestBuildReportRecordsDiffScopeWithoutLineRanges(t *testing.T) {
+	started := time.Date(2026, time.August, 21, 12, 0, 0, 0, time.UTC)
+	diff := Diff{
+		BaseRef:      "origin/main",
+		BaseCommit:   strings.Repeat("a", 40),
+		MergeBase:    strings.Repeat("b", 40),
+		Head:         strings.Repeat("c", 40),
+		ChangedFiles: 2,
+		ChangedLines: 3,
+		Lines: finding.ChangedLines{
+			"first.go":  {{Start: 1, End: 2}},
+			"second.go": {{Start: 4, End: 4}},
+		},
+	}
+
+	report, err := buildReport("run-id", "repo-id", started, started.Add(time.Second), diff, []GateReport{{
+		Gate: "lint", Language: "go", Status: GatePassed,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := DiffReport{
+		BaseRef:      diff.BaseRef,
+		BaseCommit:   diff.BaseCommit,
+		MergeBase:    diff.MergeBase,
+		Head:         diff.Head,
+		ChangedFiles: diff.ChangedFiles,
+		ChangedLines: diff.ChangedLines,
+	}
+	if report.SchemaVersion != 2 || report.Diff != want {
+		t.Fatalf("report metadata = %#v, want schema 2 and %#v", report, want)
+	}
+
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := `{"schema_version":2,"run_id":"run-id","repo_id":"repo-id","diff":{"base_ref":"origin/main","base_commit":"` + strings.Repeat("a", 40) + `","merge_base":"` + strings.Repeat("b", 40) + `","head":"` + strings.Repeat("c", 40) + `","changed_files":2,"changed_lines":3},"started_at":"2026-08-21T12:00:00Z","finished_at":"2026-08-21T12:00:01Z","verdict":"unverified","gates":[{"gate":"lint","language":"go","status":"passed","duration_ms":0}],"findings":[],"counts":{"errors":0,"warnings":0,"info":0,"occurrences":0}}`
+	if got := string(encoded); got != wantJSON {
+		t.Fatalf("report JSON = %s, want %s", got, wantJSON)
+	}
+	var roundTrip Report
+	if err := json.Unmarshal(encoded, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(roundTrip, report) {
+		t.Fatalf("round trip = %#v, want %#v", roundTrip, report)
+	}
+}
 
 func TestRenderUsesCompilerStyleAndOccurrences(t *testing.T) {
 	report := Report{
@@ -385,7 +436,18 @@ func fixtureRepository(t *testing.T) (string, config.Paths) {
 }
 
 func fixtureService(paths config.Paths, output *bytes.Buffer) Service {
-	return Service{Paths: paths, Loader: gate.Loader{OverrideDir: paths.GateOverrides()}, Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}}, Stdout: output}
+	return Service{
+		Paths:    paths,
+		Loader:   gate.Loader{OverrideDir: paths.GateOverrides()},
+		Executor: Executor{Registry: normalizer.NewRegistry(), Enricher: enricher.Noop{}},
+		Stdout:   output,
+		Diff: Diff{
+			BaseRef:    "origin/main",
+			BaseCommit: strings.Repeat("a", 40),
+			MergeBase:  strings.Repeat("b", 40),
+			Head:       strings.Repeat("c", 40),
+		},
+	}
 }
 
 func runFixtureService(t *testing.T, root string, paths config.Paths) (Report, string, string, []string) {

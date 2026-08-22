@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/joellarson/togi/internal/finding"
 )
@@ -541,7 +542,7 @@ func validateReport(report Report, runID string) error {
 }
 
 func validateReportHeader(report Report, runID string) error {
-	if report.SchemaVersion != 1 {
+	if report.SchemaVersion != 2 {
 		return fmt.Errorf("unsupported report schema version %d", report.SchemaVersion)
 	}
 	if report.RunID != runID {
@@ -564,6 +565,40 @@ func validateReportHeader(report Report, runID string) error {
 	}
 	if report.Findings == nil {
 		return errors.New("report findings array is required")
+	}
+	return validateDiffReport(report.Diff)
+}
+
+func validateDiffReport(diff DiffReport) error {
+	if err := validateRequestedBase(diff.BaseRef); err != nil {
+		return fmt.Errorf("report diff base ref is invalid: %w", err)
+	}
+	for _, character := range diff.BaseRef {
+		if unicode.IsControl(character) {
+			return errors.New("report diff base ref contains a control character")
+		}
+	}
+	objectIDs := []struct {
+		name  string
+		value string
+	}{
+		{name: "base commit", value: diff.BaseCommit},
+		{name: "merge base", value: diff.MergeBase},
+		{name: "head", value: diff.Head},
+	}
+	for _, objectID := range objectIDs {
+		if _, err := parseObjectID([]byte(objectID.value)); err != nil {
+			return fmt.Errorf("report diff %s is invalid", objectID.name)
+		}
+	}
+	if len(diff.BaseCommit) != len(diff.MergeBase) || len(diff.BaseCommit) != len(diff.Head) {
+		return errors.New("report diff object IDs have inconsistent lengths")
+	}
+	if diff.ChangedFiles < 0 || diff.ChangedLines < 0 {
+		return errors.New("report diff counts cannot be negative")
+	}
+	if diff.ChangedFiles == 0 && diff.ChangedLines != 0 {
+		return errors.New("report diff with no changed files cannot contain changed lines")
 	}
 	return nil
 }
@@ -768,7 +803,7 @@ func (run *RunLedger) WriteReport(report Report) error {
 }
 
 func prepareReport(report Report, runID string) (Report, error) {
-	if report.SchemaVersion != 1 {
+	if report.SchemaVersion != 2 {
 		return report, fmt.Errorf("unsupported report schema version %d", report.SchemaVersion)
 	}
 	if report.RunID == "" {

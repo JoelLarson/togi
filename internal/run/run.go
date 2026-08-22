@@ -37,6 +37,9 @@ type Service struct {
 	Now        func() time.Time
 	Random     io.Reader
 
+	// Diff is the already-resolved scope recorded by this run. Resolution is wired separately.
+	Diff Diff
+
 	// GOOS and ResolveRepo are narrow seams for boundary and orchestration tests.
 	GOOS        string
 	ResolveRepo func(context.Context, string) (repoid.ID, error)
@@ -81,7 +84,7 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 		return Report{}, err
 	}
 	gateReports := Collect(ctx, service.Executor, requests, min(runtime.NumCPU(), defaultMaximumWorkers))
-	report, err = buildReport(active.runID, repository.Key, startedAt, now().UTC(), gateReports)
+	report, err = buildReport(active.runID, repository.Key, startedAt, now().UTC(), service.Diff, gateReports)
 	if err != nil {
 		return Report{}, err
 	}
@@ -121,7 +124,7 @@ func (service Service) writeVerbose(enabled bool, requests []Request) error {
 	return nil
 }
 
-func buildReport(runID, repoID string, startedAt, finishedAt time.Time, gateReports []GateReport) (Report, error) {
+func buildReport(runID, repoID string, startedAt, finishedAt time.Time, diff Diff, gateReports []GateReport) (Report, error) {
 	findings := make([]finding.Finding, 0)
 	for _, gateReport := range gateReports {
 		findings = append(findings, gateReport.Findings...)
@@ -132,13 +135,21 @@ func buildReport(runID, repoID string, startedAt, finishedAt time.Time, gateRepo
 	}
 	slices.SortFunc(gateReports, compareGateReports)
 	report := Report{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		RunID:         runID,
 		RepoID:        repoID,
-		StartedAt:     startedAt,
-		FinishedAt:    finishedAt,
-		Gates:         gateReports,
-		Findings:      grouped,
+		Diff: DiffReport{
+			BaseRef:      diff.BaseRef,
+			BaseCommit:   diff.BaseCommit,
+			MergeBase:    diff.MergeBase,
+			Head:         diff.Head,
+			ChangedFiles: diff.ChangedFiles,
+			ChangedLines: diff.ChangedLines,
+		},
+		StartedAt:  startedAt,
+		FinishedAt: finishedAt,
+		Gates:      gateReports,
+		Findings:   grouped,
 	}
 	if report.FinishedAt.Before(report.StartedAt) {
 		report.FinishedAt = report.StartedAt
