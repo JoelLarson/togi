@@ -7,11 +7,10 @@ decisions are in [docs/adr/](./adr/); Go-level build choices are in
 
 ## Formats and defaults
 
-- **TOML** for global config, per-project config, gate manifests and bindings
-  (Go-idiomatic, comments allowed).
+- **TOML** for gate manifests and bindings (Go-idiomatic, comments allowed).
 - **Markdown** for wiki principle pages, addenda, and assembled briefs.
 - **JSON** for machine artifacts: findings, `plan.json`, `report.json`.
-- **Base branch** for merge-base: per-project config, falling back to
+- **Base branch** for merge-base: explicit `--base`, falling back to
   auto-detected `origin/HEAD`.
 
 ## Phase 1 platform support
@@ -23,32 +22,25 @@ Platform seams and buildable stubs remain so Darwin, the BSDs, illumos, AIX,
 Solaris, and Windows can gain tested backends later without changing the run
 contract. `togi version` does not enter the runtime and remains available.
 
-## Config resolution
+## Configuration
 
-Three layers, deep-merged per key: **shipped defaults → global `config.toml`
-→ `projects/<repo-id>/config.toml`**.
+General user-authored configuration is deferred beyond the current roadmap.
+The initial gauntlet uses shipped gate definitions and explicit run flags.
+There is no `config.toml`, override-layer contract, provenance model, or
+`togi config init/show` command yet. Gate-directory overrides remain the
+phase-1 escape hatch for developing gate data.
 
-`<repo-id>` is the full stable hexadecimal key from ADR-0011. It is not
-prefixed with a checkout basename or shortened, so linked worktrees and renamed
-checkouts resolve the same external path without short-key collisions.
-
-Per-project may override: the gauntlet (gate list and order), per-gate
-thresholds and settings, fix policies, model and adapter per role, rails,
-suite/build commands, ratchet on/off.
-
-Not overridable per project: the findings schema and normalizer behavior.
-Integrity gate *thresholds* are tunable, but disabling an integrity gate
-requires an explicit global opt-out — the anti-gaming checks shouldn't be
-quietly switchable per repo.
-
-`togi config init` scaffolds a project config; `togi config show` prints the
-merged result with per-key provenance.
+This is an intentional pre-release simplification rather than a permanent
+claim that all users should share one configuration. The stable configuration
+surface will be designed after dogfooding identifies which settings actually
+need to vary.
 
 ## Behavioral suite discovery
 
 Per-language defaults: `go test ./...` / `cargo test` for the suite,
 `go build ./...` / `cargo check` for the build. **Green means exit 0.**
-Per-project config overrides both (monorepos, build tags, service subsets).
+Overrides for monorepos, build tags, and service subsets are deferred with the
+rest of the general configuration surface.
 
 If no suite exists, or the suite is red at baseline, togi reports that
 *before* any fixing starts, and the run's verdict caps at **unverified** — the
@@ -93,8 +85,8 @@ promising work available.
 
 ## Rails and stalemate
 
-Hard rails: max iterations, wall-clock, agent spend/tokens — set globally and
-overridable per project and per run.
+Hard rails: max iterations, wall-clock, agent spend/tokens — initially using
+shipped defaults with explicit per-run flags.
 
 Stalemate: the **finding set must strictly shrink** each iteration, compared
 by `(fingerprint, occurrence count)`. Comparing sets rather than counts catches
@@ -173,7 +165,7 @@ This is what "minimal code context" resolves to.
 ## Phasing
 
 1. Runner, findings schema, two report-only Go gates, XDG state, repo-id
-2. Diff scoping and config resolution
+2. Diff scoping and Go range enrichment
 3. The fix loop — worktree, adapter, integrity gates, rails
 4. Triage, the flywheel, and the wiki
 5. Rust, cost-class scheduling, ratchet, and the seal

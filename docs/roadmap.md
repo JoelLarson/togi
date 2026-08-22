@@ -81,16 +81,15 @@ build returns unsupported before launching gates or accessing ledger state.
 
 ---
 
-## Phase 2 — Diff scoping and config resolution
+## Phase 2 — Diff scoping and Go range enrichment
 
-**Goal:** togi judges only the feature's diff, and behaves differently per
-project.
+**Goal:** togi judges only the feature's committed diff.
 
 **Build:**
 
 - **Merge-base and changed-line sets** — `git merge-base HEAD <base>`, then
-  per-file changed-line sets from the diff. Base branch from per-project
-  config, falling back to auto-detected `origin/HEAD`.
+  per-file changed-line sets from the diff. Base branch from `--base`, falling
+  back to auto-detected `origin/HEAD`.
 - **Go range enricher** — `go/ast`-based, filling phase 1's seam: given
   file:line, the enclosing declaration's extent.
 - **Touched-entity filter** — a finding is in scope if its range intersects
@@ -98,15 +97,14 @@ project.
   and a grouped finding survives if any occurrence does (ADR-0005).
 - **Gate scope honored** — diff-scoped vs. whole-repo, per the manifest;
   whole-repo gates may run report-only.
-- **Config resolution** — three-layer deep merge (shipped → global →
-  `projects/<repo-id>/`), with per-key provenance retained.
-- **`togi config init` / `togi config show`** — scaffold a project config;
-  print the merged result showing which layer each key came from.
+- **Clean-worktree precondition** — staged, unstaged, and untracked changes
+  stop the run before ledger creation or gate execution, keeping gate input
+  aligned with the committed `HEAD` diff.
 
 **Exit criteria:** on a branch with one small change, only findings touching
 that change are reported, and a structural finding on a touched function
-appears even though its reported line is unchanged; lowering a threshold in
-project config visibly changes the result; `config show` attributes every key.
+appears even though its reported line is unchanged; dirty worktrees are
+rejected without creating run state.
 
 ---
 
@@ -125,9 +123,9 @@ largest and riskiest phase.
   codex and kimi to prove the seam is real.
 - **Naive batching** — group by file, no intelligence. The loop has to run
   before phase 4 can make it smart; phase 4 replaces this wholesale.
-- **Suite discovery** — per-language defaults, per-project override, baseline
-  check reported before any fixing, `unverified` verdict when there's no
-  green suite.
+- **Suite discovery** — per-language defaults, baseline check reported before
+  any fixing, `unverified` verdict when there's no green suite. Overrides are
+  deferred with the general configuration surface.
 - **Batch validation** — instant/fast gates must not regress, integrity gates
   clean, suite green; failure resets to the last green batch.
 - **Integrity gates** — suppression counter, test integrity, naming
@@ -216,6 +214,10 @@ exactly once per run; a genuinely clean diff exits 0.
 - **Dogfooding from phase 1** means togi's own gauntlet config is the first
   real gate content written, and togi's own findings drive which principle
   pages get written first.
+- **General user-authored configuration is deferred.** The current roadmap
+  uses shipped gate defaults plus explicit run flags. A stable `config.toml`
+  schema, override layers, provenance, and `config init/show` will be designed
+  after real use identifies the settings that need to be public.
 - **Phase ordering is dependency-driven, not preference-driven.** Integrity
   gates need diff scoping (2 → 3); containment needs ranges (1 → 4); triage
   needs a working loop to improve (3 → 4). The one place to resist compressing

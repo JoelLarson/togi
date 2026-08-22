@@ -101,7 +101,7 @@ rule_id = "gocyclo/complexity"
 message = "cyclomatic complexity {{.value}} in {{.symbol}}"
 
 [settings]
-threshold = 15                        # per-project overridable; substituted into command
+threshold = 15                        # substituted into command
 
 [severity_map]
 default = "warning"                   # tool vocabulary -> error | warning | info
@@ -110,8 +110,9 @@ default = "warning"                   # tool vocabulary -> error | warning | inf
 "gocyclo/complexity" = "small-composable-functions"
 ```
 
-Notes: `command` is a `text/template` over `[settings]`, which is what makes
-thresholds per-project overridable. Aliases may glob (`"golangci-lint/*"`).
+Notes: `command` is a `text/template` over `[settings]`. General settings
+overrides are deferred; a gate-directory override still replaces a shipped
+gate wholesale. Aliases may glob (`"golangci-lint/*"`).
 Bindings for tools emitting structured output name a compiled normalizer
 (`golangci-json`, `sarif`, `clippy-json`) instead of a regex. A finding exit is
 accepted only when normalization yields at least one valid finding and stderr
@@ -125,7 +126,6 @@ togi run [--report-only] [--base <ref>] [--gate <name>] [--verbose] [--no-color]
 togi status
 togi version
 togi gate list | eject <name>
-togi config init | show
 togi wiki lint | show <page>          # phase 4
 togi waive <fingerprint> --reason ""  # phase 3
 ```
