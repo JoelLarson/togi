@@ -338,8 +338,8 @@ it never enters the structured finding or rendered-report model.
 
 ### Running the gauntlet
 
-As a developer evaluating a feature, I can run independent quality gates so
-that I receive a complete, trustworthy quality report.
+As a developer evaluating a feature, I want to run independent quality
+gates so that I receive a complete, trustworthy quality report.
 
 Scenarios cover shipped and selected gates, normalized findings, occurrence
 grouping, stable fingerprints across unchanged runs, gate ordering independent
@@ -350,19 +350,21 @@ sibling's findings survive. Version mismatches remain advisory.
 
 ### Judging a feature diff
 
-As a developer evaluating committed work, I can judge findings against the
-feature diff so that unrelated repository findings do not obscure my change.
+As a developer evaluating committed work, I want to judge findings against
+the feature diff so that unrelated repository findings do not obscure my
+change.
 
 Scenarios cover explicit and automatically discovered bases, merge-base scope
-across diverged history, point versus touched-entity findings, repo-scoped
+across diverged history, point versus entity findings, whole-repo scoped
 gates, deletions, renames, and binary changes. Preconditions cover dirty
 worktrees, unsupported submodules, missing or invalid bases, and unrelated
 histories, all before ledger creation or gate execution.
 
 ### Keeping run history
 
-As a developer returning to a repository, I can inspect durable run history
-so that results survive checkouts without modifying the target repository.
+As a developer returning to a repository, I want to inspect durable run
+history so that results survive checkouts without modifying the target
+repository.
 
 Scenarios cover external report and raw-output persistence, absence of togi
 files in the target, state shared across linked worktrees, one active run per
@@ -372,9 +374,9 @@ are ignored.
 
 ### Customizing gates
 
-As an operator evolving personal standards, I can customize gates outside the
-target repository so that my gauntlet changes without imposing repository
-files on collaborators.
+As an operator evolving personal standards, I want to customize gates
+outside the target repository so that my gauntlet changes without imposing
+repository files on collaborators.
 
 Scenarios cover shipped definitions loading and normalizing representative
 recorded output, wholesale XDG overrides, additional override-only gates, and
@@ -382,8 +384,9 @@ rejection of invalid definitions before tools run.
 
 ### Using principle pages
 
-As a developer understanding a finding, I can inspect and customize principle
-pages so that tool-specific rules lead to stable engineering guidance.
+As a developer understanding a finding, I want to inspect and customize
+principle pages so that tool-specific rules lead to stable engineering
+guidance.
 
 Scenarios cover shipped and overridden pages, deterministic alias display,
 dangling-alias warnings, conflicting-alias failures, and ejection without
@@ -391,7 +394,7 @@ overwriting an existing operator copy.
 
 ### Supporting platforms
 
-As an operator running togi, I receive an explicit platform result so that an
+As an operator running togi, I want an explicit platform result so that an
 unsupported machine cannot appear to have passed its gates.
 
 Scenarios cover Linux service execution and rejection of other simulated

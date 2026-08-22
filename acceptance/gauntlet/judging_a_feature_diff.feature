@@ -1,6 +1,6 @@
 Feature: Judging a feature diff
   As a developer evaluating committed work
-  I can judge findings against the feature diff
+  I want to judge findings against the feature diff
   So that unrelated repository findings do not obscure my change
 
   Rule: The feature is measured from a merge base
@@ -31,25 +31,25 @@ Feature: Judging a feature diff
   Rule: Gate scope determines which findings survive
     Scenario: A point finding survives only on a changed line
       Given a committed feature changes line 8 but not line 3
-      And a point-scoped gate reports findings on lines 3 and 8
+      And a diff-scoped gate reports point findings on lines 3 and 8
       When I run the gauntlet
       Then only the finding on line 8 remains
 
     Scenario: Touching a Go declaration includes its structural finding
       Given a committed feature changes the body of function "calculate"
-      And an entity-scoped gate reports the function signature
+      And a diff-scoped gate reports an entity finding on the function signature
       When I run the gauntlet
       Then the structural finding for "calculate" remains
 
     Scenario: A repository-scoped finding survives outside the diff
       Given a committed feature changes "feature.go"
-      And a repository-scoped gate reports a finding in "legacy.go"
+      And a whole-repo gate reports a finding in "legacy.go"
       When I run the gauntlet
       Then the finding in "legacy.go" remains
 
     Scenario: Deleting a line owns the adjacent deletion location
       Given a committed feature deletes line 5 from "feature.go"
-      And a point-scoped gate reports the deletion location
+      And a diff-scoped gate reports a point finding at the deletion location
       When I run the gauntlet
       Then the deletion finding remains in scope
 

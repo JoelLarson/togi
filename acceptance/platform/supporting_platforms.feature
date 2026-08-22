@@ -1,6 +1,6 @@
 Feature: Supporting platforms
   As an operator running togi
-  I receive an explicit platform result
+  I want an explicit platform result
   So that an unsupported machine cannot appear to have passed its gates
 
   @linux

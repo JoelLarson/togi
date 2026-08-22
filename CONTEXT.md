@@ -77,6 +77,16 @@ The diff-scope rule: a finding is in scope when its range intersects, or
 contains, any line changed vs. the merge-base — touch a function, own its
 structural health.
 
+**Location**:
+Whether a gate's findings identify a single point or a structural entity —
+`point` / `entity` — declared in the gate manifest alongside, and
+independently of, its scope. Location fixes a finding's range before scoping
+runs: an entity finding is widened to its enclosing declaration, a point
+finding stays on its own line. Both are then judged by the same
+touched-entity overlap rule.
+_Avoid_: point-scoped, entity-scoped (scope is diff/whole-repo; location is
+a separate axis)
+
 **Errored**:
 A gate status distinct from findings: its tool crashed, is missing, emitted
 unparseable output, or mismatched its pinned version; blocks merge-ready

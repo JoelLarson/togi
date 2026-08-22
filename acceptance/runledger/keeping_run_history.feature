@@ -1,6 +1,6 @@
 Feature: Keeping run history
   As a developer returning to a repository
-  I can inspect durable run history
+  I want to inspect durable run history
   So that results survive checkouts without modifying the target repository
 
   Rule: Completed runs live outside the target repository

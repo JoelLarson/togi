@@ -1,6 +1,6 @@
 Feature: Using principle pages
   As a developer understanding a finding
-  I can inspect and customize principle pages
+  I want to inspect and customize principle pages
   So that tool-specific rules lead to stable engineering guidance
 
   Rule: Pages explain the principles behind findings

@@ -1,6 +1,6 @@
 Feature: Running the gauntlet
   As a developer evaluating a feature
-  I can run independent quality gates
+  I want to run independent quality gates
   So that I receive a complete, trustworthy quality report
 
   Rule: Selected gates produce one normalized report

@@ -1,6 +1,6 @@
 Feature: Customizing gates
   As an operator evolving personal standards
-  I can customize gates outside the target repository
+  I want to customize gates outside the target repository
   So that my gauntlet changes without imposing repository files on collaborators
 
   Rule: Shipped definitions work without repository configuration
