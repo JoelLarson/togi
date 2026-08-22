@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -179,6 +180,8 @@ func TestEnvironmentActivatesIsolatedRootsAndRestoresProcess(t *testing.T) {
 }
 
 func TestEnvironmentEnvironUsesMatchingXDGRoots(t *testing.T) {
+	moduleCache := goEnvironment(t, "GOMODCACHE")
+	buildCache := goEnvironment(t, "GOCACHE")
 	environment, err := NewEnvironment()
 	if err != nil {
 		t.Fatalf("NewEnvironment() = %v", err)
@@ -202,4 +205,19 @@ func TestEnvironmentEnvironUsesMatchingXDGRoots(t *testing.T) {
 	if got := values["PATH"]; !strings.HasPrefix(got, environment.BinRoot+string(os.PathListSeparator)) {
 		t.Fatalf("PATH = %q", got)
 	}
+	if got := values["GOMODCACHE"]; got != moduleCache {
+		t.Fatalf("GOMODCACHE = %q, want %q", got, moduleCache)
+	}
+	if got := values["GOCACHE"]; got != buildCache {
+		t.Fatalf("GOCACHE = %q, want %q", got, buildCache)
+	}
+}
+
+func goEnvironment(t *testing.T, key string) string {
+	t.Helper()
+	output, err := exec.Command("go", "env", key).Output()
+	if err != nil {
+		t.Fatalf("go env %s: %v", key, err)
+	}
+	return strings.TrimSpace(string(output))
 }

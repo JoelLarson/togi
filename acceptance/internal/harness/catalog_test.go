@@ -5,8 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/cucumber/godog"
 )
 
 const (
@@ -15,6 +18,12 @@ const (
 )
 
 var indexLine = regexp.MustCompile(`^- \[[^]]+\]\(([^)]+\.feature)\)$`)
+
+var capabilityExclusions = map[string]map[string]string{
+	"cli": {
+		"@simulated-platform": "requires test-only platform selection",
+	},
+}
 
 func TestFeatureIndex(t *testing.T) {
 	root, err := findModuleRoot(".")
@@ -39,6 +48,84 @@ func TestFeatureIndex(t *testing.T) {
 			t.Errorf("feature %q has no adjacent test %q: %v", feature, filepath.ToSlash(testPath), err)
 		}
 	}
+}
+
+func TestDriverCapabilityMatrix(t *testing.T) {
+	root, err := findModuleRoot(".")
+	if err != nil {
+		t.Fatalf("find module root: %v", err)
+	}
+	readme, err := os.ReadFile(filepath.Join(root, "acceptance", "README.md"))
+	if err != nil {
+		t.Fatalf("read acceptance catalog: %v", err)
+	}
+
+	scenarioTags := indexedScenarioTags(t, root, parseFeatureIndex(t, string(readme)))
+	for driver, exclusions := range capabilityExclusions {
+		for tag, reason := range exclusions {
+			if strings.TrimSpace(reason) == "" {
+				t.Errorf("driver %q excludes %q without a reason", driver, tag)
+			}
+			if !scenarioTags[tag] {
+				t.Errorf("driver %q excludes %q, but no indexed scenario declares it", driver, tag)
+			}
+		}
+	}
+
+	for _, factory := range []DriverFactory{newServiceFactory(), newCLIFactory("togi")} {
+		for _, tag := range excludedTags(factory.CapabilityTags()) {
+			if tag == linuxPlatformTag || tag == unsupportedHostTag {
+				continue
+			}
+			if _, declared := capabilityExclusions[factory.Name()][tag]; !declared {
+				t.Errorf("driver %q excludes undeclared capability tag %q", factory.Name(), tag)
+			}
+		}
+	}
+}
+
+func indexedScenarioTags(t *testing.T, root string, indexed map[string]struct{}) map[string]bool {
+	t.Helper()
+
+	features := mapsKeys(indexed)
+	slices.Sort(features)
+	tags := make(map[string]bool)
+	for _, feature := range features {
+		parsed, err := (godog.TestSuite{Options: &godog.Options{
+			Paths: []string{filepath.Join(root, "acceptance", feature)},
+		}}).RetrieveFeatures()
+		if err != nil {
+			t.Fatalf("parse indexed feature %q: %v", feature, err)
+		}
+		if len(parsed) != 1 {
+			t.Fatalf("parse indexed feature %q: got %d features, want 1", feature, len(parsed))
+		}
+		for _, pickle := range parsed[0].Pickles {
+			for _, tag := range pickle.Tags {
+				tags[tag.Name] = true
+			}
+		}
+	}
+	return tags
+}
+
+func mapsKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for value := range values {
+		keys = append(keys, value)
+	}
+	return keys
+}
+
+var excludedTag = regexp.MustCompile(`~(@[[:alnum:]_-]+)`)
+
+func excludedTags(expression string) []string {
+	matches := excludedTag.FindAllStringSubmatch(expression, -1)
+	tags := make([]string, 0, len(matches))
+	for _, match := range matches {
+		tags = append(tags, match[1])
+	}
+	return tags
 }
 
 func parseFeatureIndex(t *testing.T, readme string) map[string]struct{} {

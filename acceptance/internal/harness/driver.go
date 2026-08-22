@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -68,15 +69,17 @@ type Environment struct {
 	BinRoot    string
 	GOOS       string
 
-	mu        sync.Mutex
-	variables map[string]string
-	previous  map[string]environmentValue
-	active    bool
-	closed    bool
-	path      string
-	resolves  atomic.Int64
-	clock     *scenarioClock
-	random    *scenarioRandom
+	mu         sync.Mutex
+	variables  map[string]string
+	previous   map[string]environmentValue
+	active     bool
+	closed     bool
+	path       string
+	goModCache string
+	goCache    string
+	resolves   atomic.Int64
+	clock      *scenarioClock
+	random     *scenarioRandom
 }
 
 type environmentValue struct {
@@ -85,6 +88,14 @@ type environmentValue struct {
 }
 
 func NewEnvironment() (*Environment, error) {
+	goModCache, err := goEnvironmentPath("GOMODCACHE")
+	if err != nil {
+		return nil, err
+	}
+	goCache, err := goEnvironmentPath("GOCACHE")
+	if err != nil {
+		return nil, err
+	}
 	tempRoot, err := os.MkdirTemp("", "togi-acceptance-")
 	if err != nil {
 		return nil, fmt.Errorf("create scenario root: %w", err)
@@ -100,6 +111,8 @@ func NewEnvironment() (*Environment, error) {
 		GOOS:       runtime.GOOS,
 		variables:  make(map[string]string),
 		path:       os.Getenv("PATH"),
+		goModCache: goModCache,
+		goCache:    goCache,
 		clock:      newScenarioClock(),
 		random:     &scenarioRandom{},
 	}
@@ -110,6 +123,14 @@ func NewEnvironment() (*Environment, error) {
 		}
 	}
 	return e, nil
+}
+
+func goEnvironmentPath(key string) (string, error) {
+	output, err := exec.Command("go", "env", key).Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve Go %s: %w", key, err)
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func (e *Environment) resolveRepo(ctx context.Context, root string) (repoid.ID, error) {
@@ -242,6 +263,8 @@ func (e *Environment) valuesLocked() map[string]string {
 		"PATH":            e.BinRoot + string(os.PathListSeparator) + e.path,
 		"LANG":            "C",
 		"LC_ALL":          "C",
+		"GOMODCACHE":      e.goModCache,
+		"GOCACHE":         e.goCache,
 	}
 	for key, value := range e.variables {
 		values[key] = value
