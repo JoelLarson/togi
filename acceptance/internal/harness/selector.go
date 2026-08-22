@@ -5,6 +5,12 @@ import (
 	"sync"
 )
 
+const (
+	linuxPlatformTag     = "@linux"
+	unsupportedHostTag   = "@unsupported-host"
+	simulatedPlatformTag = "@simulated-platform"
+)
+
 var selectedDrivers struct {
 	sync.RWMutex
 	factories []DriverFactory

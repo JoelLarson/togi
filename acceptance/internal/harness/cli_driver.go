@@ -15,7 +15,7 @@ type cliFactory struct{ binary string }
 func newCLIFactory(binary string) cliFactory { return cliFactory{binary: binary} }
 
 func (cliFactory) Name() string           { return "cli" }
-func (cliFactory) CapabilityTags() string { return "~@simulated-platform" }
+func (cliFactory) CapabilityTags() string { return "~" + simulatedPlatformTag }
 func (f cliFactory) NewGauntlet(env *Environment) (GauntletDriver, error) {
 	if err := f.validate(env); err != nil {
 		return nil, err

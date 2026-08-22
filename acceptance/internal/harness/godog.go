@@ -47,14 +47,14 @@ func combineTags(expressions ...string) string {
 			nonEmpty = append(nonEmpty, expression)
 		}
 	}
-	return strings.Join(nonEmpty, " and ")
+	return strings.Join(nonEmpty, " && ")
 }
 
 func hostTags(goos string) string {
 	if goos == "linux" {
-		return "~@unsupported-host"
+		return "~" + unsupportedHostTag
 	}
-	return "~@linux"
+	return "~" + linuxPlatformTag
 }
 
 func eligibleFeatureCount(options *godog.Options) (int, error) {

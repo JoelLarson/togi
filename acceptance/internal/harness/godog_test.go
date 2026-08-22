@@ -20,9 +20,9 @@ func TestFeatureOptions(t *testing.T) {
 		want    string
 	}{
 		{"service linux", newServiceFactory(), "linux", "~@unsupported-host"},
-		{"cli linux", newCLIFactory("togi"), "linux", "~@simulated-platform and ~@unsupported-host"},
+		{"cli linux", newCLIFactory("togi"), "linux", "~@simulated-platform && ~@unsupported-host"},
 		{"service non-linux", newServiceFactory(), "darwin", "~@linux"},
-		{"cli non-linux", newCLIFactory("togi"), "darwin", "~@simulated-platform and ~@linux"},
+		{"cli non-linux", newCLIFactory("togi"), "darwin", "~@simulated-platform && ~@linux"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			options := buildFeatureOptions(test.factory, test.goos, path)
