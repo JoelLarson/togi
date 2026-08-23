@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/gate"
 )
 
@@ -16,12 +17,82 @@ import (
 // than one page.
 var ErrConflictingAliases = errors.New("conflicting aliases")
 
+// AliasConflictError reports how many rule IDs point at conflicting pages.
+type AliasConflictError struct {
+	RuleIDs int
+}
+
+func (e *AliasConflictError) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("conflicting aliases: %d rule IDs", e.RuleIDs)
+}
+
+// ExitCode marks conflicting aliases as findings for CLI callers.
+func (e *AliasConflictError) ExitCode() int { return 1 }
+
+// Is preserves compatibility with ErrConflictingAliases.
+func (e *AliasConflictError) Is(target error) bool {
+	return target == ErrConflictingAliases
+}
+
+// GateSource supplies the compiled gate definitions whose bindings own wiki aliases.
+type GateSource interface {
+	LoadAll() ([]gate.Gate, error)
+}
+
 // Service renders the wiki commands over a page loader and a gate loader.
 type Service struct {
 	Pages  Loader
-	Gates  gate.Loader
+	Gates  GateSource
 	Stdout io.Writer
 	Stderr io.Writer
+}
+
+// For returns the principle page aliased from a finding's gate and language
+// binding. Missing mappings and dangling pages are legal and return found=false.
+func (s Service) For(f finding.Finding) (Page, bool, error) {
+	gates, err := s.Gates.LoadAll()
+	if err != nil {
+		return Page{}, false, err
+	}
+
+	var matched *gate.Gate
+	seen := make(map[string]struct{}, len(gates))
+	for index := range gates {
+		loaded := &gates[index]
+		if !loaded.Valid() {
+			return Page{}, false, fmt.Errorf("invalid gate %q from gate source", loaded.Manifest.Name)
+		}
+		name := loaded.Manifest.Name
+		if _, exists := seen[name]; exists {
+			return Page{}, false, fmt.Errorf("duplicate gate %q from gate source", name)
+		}
+		seen[name] = struct{}{}
+		if name == f.Gate {
+			matched = loaded
+		}
+	}
+	if matched == nil {
+		return Page{}, false, nil
+	}
+	binding, ok := matched.Bindings[f.Language]
+	if !ok {
+		return Page{}, false, nil
+	}
+	name, ok := resolve(binding.Aliases, f.RuleID)
+	if !ok {
+		return Page{}, false, nil
+	}
+	page, err := s.Pages.Load(name)
+	if errors.Is(err, ErrNotFound) {
+		return Page{}, false, nil
+	}
+	if err != nil {
+		return Page{}, false, err
+	}
+	return page, true, nil
 }
 
 // Show writes a page verbatim, followed by the aliases that reach it.
@@ -80,11 +151,11 @@ func (s Service) Lint() error {
 
 	dangling := 0
 	for _, page := range pages {
-		exists, err := s.Pages.Exists(page)
-		if err != nil {
+		_, err := s.Pages.Load(page)
+		if err != nil && !errors.Is(err, ErrNotFound) {
 			return err
 		}
-		if exists {
+		if err == nil {
 			continue
 		}
 		dangling++
@@ -108,7 +179,7 @@ func (s Service) Lint() error {
 		return err
 	}
 	if len(conflicts) > 0 {
-		return fmt.Errorf("%w: %d rule IDs", ErrConflictingAliases, len(conflicts))
+		return &AliasConflictError{RuleIDs: len(conflicts)}
 	}
 	return nil
 }

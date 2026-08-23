@@ -18,17 +18,18 @@ import (
 	"github.com/joellarson/togi/internal/runner"
 )
 
-// RawStore persists captured output from one gate execution.
-type RawStore interface {
-	WriteRaw(gate, language, stream string, raw []byte) error
+// RawSink persists captured output for one already-identified gate execution.
+type RawSink interface {
+	WriteRaw(stream string, raw []byte) error
 }
 
 // Request identifies one gate binding to execute against a repository.
 type Request struct {
 	Gate         gate.Gate
 	Binding      gate.Binding
+	Position     int
 	Root         string
-	RawStore     RawStore
+	RawSink      RawSink
 	ChangedLines finding.ChangedLines
 }
 
@@ -54,7 +55,7 @@ func gateCommand(ctx context.Context, root string, command []string) runner.Resu
 
 // Execute runs a gate and always returns a report, including infrastructure errors.
 func (e Executor) Execute(parent context.Context, req Request) (report GateReport) {
-	report = GateReport{Gate: req.Gate.Manifest.Name, Language: req.Binding.Language}
+	report = NewGateReport(req.Gate, req.Binding, req.Position)
 	now := e.Now
 	if now == nil {
 		now = time.Now
@@ -243,10 +244,14 @@ func validateExecution(parent context.Context, req Request) error {
 		return errors.New("execution context is required")
 	case !req.Gate.Valid() || !req.Binding.Valid():
 		return errors.New("gate was not compiled; load gates through gate.Compile")
+	case !req.Gate.Owns(req.Binding):
+		return errors.New("binding does not belong to gate")
+	case req.Position < 0:
+		return errors.New("gauntlet position cannot be negative")
 	case strings.TrimSpace(req.Root) == "":
 		return errors.New("repository root is required")
-	case isNilInterface(req.RawStore):
-		return errors.New("raw store is required")
+	case isNilInterface(req.RawSink):
+		return errors.New("raw sink is required")
 	}
 	if req.Gate.Manifest.Scope == gate.Diff {
 		if req.ChangedLines == nil {
@@ -287,8 +292,8 @@ func validateCommand(command []string) error {
 }
 
 func persistRaw(req Request, stdout, stderr []byte) error {
-	stdoutErr := req.RawStore.WriteRaw(req.Gate.Manifest.Name, req.Binding.Language, "stdout", stdout)
-	stderrErr := req.RawStore.WriteRaw(req.Gate.Manifest.Name, req.Binding.Language, "stderr", stderr)
+	stdoutErr := req.RawSink.WriteRaw("stdout", stdout)
+	stderrErr := req.RawSink.WriteRaw("stderr", stderr)
 	if stdoutErr != nil || stderrErr != nil {
 		return errors.Join(
 			wrapIfError("persist stdout", stdoutErr),

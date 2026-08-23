@@ -2,6 +2,8 @@ package run
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,6 +22,8 @@ import (
 	"unicode"
 
 	"github.com/joellarson/togi/internal/finding"
+	gatepkg "github.com/joellarson/togi/internal/gate"
+	"github.com/joellarson/togi/internal/repoid"
 )
 
 var (
@@ -47,11 +51,11 @@ const runTimestampLayout = "20060102T150405.000000000Z"
 
 var runIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}\.[0-9]{9}Z-[0-9a-f]{4}$`)
 
-var rawComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
-
 // Ledger manages run artifacts below one repository's external state path.
 type Ledger struct {
+	RepoID    string
 	RepoState string
+	RunsDir   string
 	Keep      int
 	Now       func() time.Time
 	Random    io.Reader
@@ -61,6 +65,7 @@ type Ledger struct {
 type RunLedger struct {
 	Dir      string
 	runID    string
+	repoID   string
 	lock     *stateLock
 	repoRoot *os.Root
 	runsRoot *os.Root
@@ -79,8 +84,18 @@ type directoryBoundary struct {
 
 // Start acquires the repository lock and creates a new run directory.
 func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
+	if !repoid.ValidKey(ledger.RepoID) {
+		return nil, errors.New("repository ID must be a full lowercase hexadecimal Git or SHA-256 identity")
+	}
 	if ledger.RepoState == "" {
 		return nil, errors.New("repository state path is required")
+	}
+	if ledger.RunsDir == "" {
+		return nil, errors.New("runs directory path is required")
+	}
+	runsName, err := ledger.runsName()
+	if err != nil {
+		return nil, err
 	}
 	if err := ensureLockPlatform(); err != nil {
 		return nil, err
@@ -93,12 +108,11 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("open repository state root: %w", err)
 	}
-	runsDir := filepath.Join(ledger.RepoState, "runs")
-	runsDirectory, err := ensureChildDirectoryAt(repoRoot, "runs", runsDir)
+	runsDirectory, err := ensureChildDirectoryAt(repoRoot, runsName, ledger.RunsDir)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("prepare runs directory: %w", err), repoRoot.Close())
 	}
-	runsRoot, err := openChildBoundaryRoot(repoRoot, "runs", runsDirectory)
+	runsRoot, err := openChildBoundaryRoot(repoRoot, runsName, runsDirectory)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("open runs root: %w", err), repoRoot.Close())
 	}
@@ -119,7 +133,7 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 	if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
 		return nil, errors.Join(err, lock.release())
 	}
-	runDir := filepath.Join(runsDir, runID)
+	runDir := filepath.Join(ledger.RunsDir, runID)
 	runRoot, err := createChildRoot(runsRoot, runID)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
@@ -140,6 +154,7 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 	run := &RunLedger{
 		Dir:      runDir,
 		runID:    runID,
+		repoID:   ledger.RepoID,
 		lock:     lock,
 		repoRoot: repoRoot,
 		runsRoot: runsRoot,
@@ -416,8 +431,18 @@ func openExistingChildRoot(parent *os.Root, name string) (*os.Root, error) {
 
 // Latest returns the newest complete, parseable report in the ledger.
 func (ledger Ledger) Latest() (Report, error) {
+	if !repoid.ValidKey(ledger.RepoID) {
+		return Report{}, errors.New("repository ID must be a full lowercase hexadecimal Git or SHA-256 identity")
+	}
 	if ledger.RepoState == "" {
 		return Report{}, errors.New("repository state path is required")
+	}
+	if ledger.RunsDir == "" {
+		return Report{}, errors.New("runs directory path is required")
+	}
+	runsName, err := ledger.runsName()
+	if err != nil {
+		return Report{}, err
 	}
 	repoDirectory, err := existingDirectory(ledger.RepoState)
 	if errors.Is(err, os.ErrNotExist) {
@@ -430,8 +455,7 @@ func (ledger Ledger) Latest() (Report, error) {
 		return Report{}, err
 	}
 	defer func() { _ = repoRoot.Close() }()
-	runsDir := filepath.Join(ledger.RepoState, "runs")
-	runsDirectory, err := existingChildDirectoryAt(repoRoot, "runs", runsDir)
+	runsDirectory, err := existingChildDirectoryAt(repoRoot, runsName, ledger.RunsDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return Report{}, ErrNoCompleteRuns
 	} else if err != nil {
@@ -440,15 +464,20 @@ func (ledger Ledger) Latest() (Report, error) {
 	if err := validateDirectories(repoDirectory, runsDirectory); err != nil {
 		return Report{}, err
 	}
-	runsRoot, err := openChildBoundaryRoot(repoRoot, "runs", runsDirectory)
+	runsRoot, err := openChildBoundaryRoot(repoRoot, runsName, runsDirectory)
 	if err != nil {
 		return Report{}, err
 	}
 	defer func() { _ = runsRoot.Close() }()
-	return latestFromRunsRoot(runsRoot)
+	report, err := latestFromRunsRoot(runsRoot, ledger.RepoID)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Ref = RunRef{ID: report.RunID, Dir: filepath.Join(ledger.RunsDir, report.RunID)}
+	return report, nil
 }
 
-func latestFromRunsRoot(runsRoot *os.Root) (Report, error) {
+func latestFromRunsRoot(runsRoot *os.Root, repoID string) (Report, error) {
 	entries, err := fs.ReadDir(runsRoot.FS(), ".")
 	if err != nil {
 		return Report{}, fmt.Errorf("read runs directory: %w", err)
@@ -468,7 +497,7 @@ func latestFromRunsRoot(runsRoot *os.Root) (Report, error) {
 		if err != nil {
 			return Report{}, err
 		}
-		report, err := readCompleteReport(runRoot, runID)
+		report, err := readCompleteReport(runRoot, runID, repoID)
 		closeErr := runRoot.Close()
 		if err == nil && closeErr != nil {
 			return Report{}, closeErr
@@ -484,7 +513,7 @@ func latestFromRunsRoot(runsRoot *os.Root) (Report, error) {
 	return Report{}, ErrNoCompleteRuns
 }
 
-func readCompleteReport(runRoot *os.Root, runID string) (Report, error) {
+func readCompleteReport(runRoot *os.Root, runID, repoID string) (Report, error) {
 	const reportName = "report.json"
 	before, err := runRoot.Lstat(reportName)
 	if errors.Is(err, os.ErrNotExist) {
@@ -521,6 +550,10 @@ func readCompleteReport(runRoot *os.Root, runID string) (Report, error) {
 	if err := validateReport(report, runID); err != nil {
 		return Report{}, errIncompleteRun
 	}
+	if report.RepoID != repoID {
+		return Report{}, errIncompleteRun
+	}
+	report.Ref = RunRef{ID: runID}
 	return report, nil
 }
 
@@ -534,6 +567,9 @@ func validateReport(report Report, runID string) error {
 			return err
 		}
 		flattened = append(flattened, gate.Findings...)
+		if index > 0 && report.Gates[index-1].Position == gate.Position {
+			return errors.New("report gate positions are duplicated")
+		}
 		if index > 0 && compareGateReports(report.Gates[index-1], gate) >= 0 {
 			return errors.New("report gates are duplicated or out of order")
 		}
@@ -542,13 +578,13 @@ func validateReport(report Report, runID string) error {
 }
 
 func validateReportHeader(report Report, runID string) error {
-	if report.SchemaVersion != 2 {
+	if report.SchemaVersion != ReportSchemaVersion {
 		return fmt.Errorf("unsupported report schema version %d", report.SchemaVersion)
 	}
 	if report.RunID != runID {
 		return fmt.Errorf("report run ID %q does not match ledger run ID %q", report.RunID, runID)
 	}
-	if !validRepositoryKey(report.RepoID) {
+	if !repoid.ValidKey(report.RepoID) {
 		return errors.New("report repository ID must be a full lowercase hexadecimal Git or SHA-256 identity")
 	}
 	if report.StartedAt.IsZero() || report.FinishedAt.IsZero() {
@@ -567,6 +603,15 @@ func validateReportHeader(report Report, runID string) error {
 		return errors.New("report findings array is required")
 	}
 	return validateDiffReport(report.Diff)
+}
+
+func (ledger Ledger) runsName() (string, error) {
+	repoState := filepath.Clean(ledger.RepoState)
+	runsDir := filepath.Clean(ledger.RunsDir)
+	if filepath.Dir(runsDir) != repoState {
+		return "", errors.New("runs directory must be a direct child of repository state")
+	}
+	return filepath.Base(runsDir), nil
 }
 
 func validateDiffReport(diff DiffReport) error {
@@ -629,7 +674,7 @@ func validateReportSummary(report Report, flattened []finding.Finding) error {
 	if counts := countFindings(report.Findings); counts != report.Counts {
 		return fmt.Errorf("report counts are inconsistent: got %+v, want %+v", report.Counts, counts)
 	}
-	if verdict := verdictFor(report.Gates, report.Findings); verdict != report.Verdict {
+	if verdict := verdictFor(report.Gates); verdict != report.Verdict {
 		return fmt.Errorf("report verdict %q is inconsistent with %q", report.Verdict, verdict)
 	}
 	return nil
@@ -641,6 +686,27 @@ func validateGateReport(gate GateReport, index int) error {
 	}
 	if gate.DurationMS < 0 {
 		return fmt.Errorf("gate %d has negative duration", index)
+	}
+	if gate.Position < 0 {
+		return fmt.Errorf("gate %d has negative position", index)
+	}
+	if gate.Blocking == nil {
+		return fmt.Errorf("gate %d blocking severities are required", index)
+	}
+	seenBlocking := make(map[finding.Severity]struct{}, len(gate.Blocking))
+	for _, severity := range gate.Blocking {
+		if severity != finding.Error && severity != finding.Warning && severity != finding.Info {
+			return fmt.Errorf("gate %d has invalid blocking severity %q", index, severity)
+		}
+		if _, exists := seenBlocking[severity]; exists {
+			return fmt.Errorf("gate %d has duplicate blocking severity %q", index, severity)
+		}
+		seenBlocking[severity] = struct{}{}
+	}
+	switch gate.FixPolicy {
+	case gatepkg.AutofixOnly, gatepkg.AutofixThenLLM, gatepkg.LLMFix, gatepkg.ReportOnly:
+	default:
+		return fmt.Errorf("gate %d has invalid fix policy %q", index, gate.FixPolicy)
 	}
 	if err := validateGateStatus(gate, index); err != nil {
 		return err
@@ -778,7 +844,7 @@ func (run *RunLedger) WriteReport(report Report) error {
 		return ErrClosed
 	}
 	var err error
-	report, err = prepareReport(report, run.runID)
+	report, err = prepareReport(report, run.runID, run.repoID)
 	if err != nil {
 		return err
 	}
@@ -815,8 +881,8 @@ func (run *RunLedger) WriteReport(report Report) error {
 	return nil
 }
 
-func prepareReport(report Report, runID string) (Report, error) {
-	if report.SchemaVersion != 2 {
+func prepareReport(report Report, runID, repoID string) (Report, error) {
+	if report.SchemaVersion != ReportSchemaVersion {
 		return report, fmt.Errorf("unsupported report schema version %d", report.SchemaVersion)
 	}
 	if report.RunID == "" {
@@ -826,6 +892,9 @@ func prepareReport(report Report, runID string) (Report, error) {
 	}
 	if err := validateReport(report, runID); err != nil {
 		return report, fmt.Errorf("validate report: %w", err)
+	}
+	if report.RepoID != repoID {
+		return report, fmt.Errorf("report repository ID %q does not match ledger repository ID %q", report.RepoID, repoID)
 	}
 	return report, nil
 }
@@ -851,8 +920,34 @@ func writeReportTemporary(temporary *os.File, report Report) error {
 	return nil
 }
 
-// WriteRaw atomically persists one captured tool stream.
-func (run *RunLedger) WriteRaw(gate, language, stream string, raw []byte) error {
+type ledgerRawSink struct {
+	run      *RunLedger
+	gate     string
+	language string
+}
+
+// RawSink validates and binds one gate identity before execution begins.
+func (run *RunLedger) RawSink(gate, language string) (RawSink, error) {
+	if run == nil || run.marker != run {
+		return nil, ErrUninitialized
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if run.closed || run.closing {
+		return nil, ErrClosed
+	}
+	return &ledgerRawSink{run: run, gate: gate, language: language}, nil
+}
+
+func (sink *ledgerRawSink) WriteRaw(stream string, raw []byte) error {
+	if sink == nil || sink.run == nil {
+		return ErrUninitialized
+	}
+	return sink.run.writeRaw(sink.gate, sink.language, stream, raw)
+}
+
+// writeRaw atomically persists one captured tool stream for a bound sink.
+func (run *RunLedger) writeRaw(gate, language, stream string, raw []byte) error {
 	if run == nil || run.marker != run {
 		return ErrUninitialized
 	}
@@ -861,8 +956,8 @@ func (run *RunLedger) WriteRaw(gate, language, stream string, raw []byte) error 
 	if run.closed || run.closing {
 		return ErrClosed
 	}
-	if err := validateRawName(gate, language, stream); err != nil {
-		return err
+	if stream != "stdout" && stream != "stderr" {
+		return fmt.Errorf("invalid raw output stream %q", stream)
 	}
 	temporary, temporaryName, err := createRootTemp(run.rawRoot, "raw")
 	if err != nil {
@@ -877,7 +972,7 @@ func (run *RunLedger) WriteRaw(gate, language, stream string, raw []byte) error 
 	if err := writeRawTemporary(temporary, raw); err != nil {
 		return err
 	}
-	name := gate + "." + language + "." + stream
+	name := rawOutputName(gate, language, stream)
 	if err := run.rawRoot.Rename(temporaryName, name); err != nil {
 		return fmt.Errorf("publish raw output: %w", err)
 	}
@@ -888,17 +983,16 @@ func (run *RunLedger) WriteRaw(gate, language, stream string, raw []byte) error 
 	return nil
 }
 
-func validateRawName(gateName, language, stream string) error {
-	if !safeRawComponent(gateName) {
-		return fmt.Errorf("invalid raw output gate %q", gateName)
+func rawOutputName(gateName, language, stream string) string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("togi/raw-output-identity/v1\x00"))
+	for _, component := range []string{gateName, language} {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(component)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write([]byte(component))
 	}
-	if !safeRawComponent(language) {
-		return fmt.Errorf("invalid raw output language %q", language)
-	}
-	if stream != "stdout" && stream != "stderr" {
-		return fmt.Errorf("invalid raw output stream %q", stream)
-	}
-	return nil
+	return "gate-" + hex.EncodeToString(hash.Sum(nil)) + "." + stream
 }
 
 func writeRawTemporary(temporary *os.File, raw []byte) error {
@@ -922,20 +1016,6 @@ func writeRawTemporary(temporary *os.File, raw []byte) error {
 		return fmt.Errorf("close raw output: %w", err)
 	}
 	return nil
-}
-
-func safeRawComponent(component string) bool {
-	if len(component) > 64 || !rawComponentPattern.MatchString(component) {
-		return false
-	}
-	upper := strings.ToUpper(component)
-	if upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" {
-		return false
-	}
-	if len(upper) == 4 && (strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT")) {
-		return upper[3] < '1' || upper[3] > '9'
-	}
-	return true
 }
 
 // Close releases this run's repository lock.

@@ -12,9 +12,12 @@ type Buffer struct {
 	truncated bool
 }
 
-// NewBuffer returns a Buffer holding at most limit bytes including marker.
+// NewBuffer returns a Buffer holding at most max(limit, 0) bytes including
+// marker. When marker exceeds that budget, its prefix is retained so the
+// capture keeps the sentinel's recognizable opening.
 func NewBuffer(limit int, marker []byte) *Buffer {
-	return &Buffer{limit: limit, marker: append([]byte(nil), marker...)}
+	limit = max(limit, 0)
+	return &Buffer{limit: limit, marker: append([]byte(nil), marker[:min(len(marker), limit)]...)}
 }
 
 func (b *Buffer) Write(input []byte) (int, error) {
@@ -27,9 +30,7 @@ func (b *Buffer) Write(input []byte) (int, error) {
 		_, _ = b.buffer.Write(input)
 		return inputLength, nil
 	}
-	// A marker longer than the limit still gets written whole, so a capture
-	// is never silently truncated without its sentinel.
-	dataLimit := max(0, b.limit-len(b.marker))
+	dataLimit := b.limit - len(b.marker)
 	if b.buffer.Len() > dataLimit {
 		b.buffer.Truncate(dataLimit)
 	} else if b.buffer.Len() < dataLimit {

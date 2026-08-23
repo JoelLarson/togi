@@ -20,9 +20,10 @@ import (
 
 // Options controls one report-only run.
 type Options struct {
-	Root       string
-	Base       string
-	GateNames  []string
+	Root      string
+	Base      string
+	GateNames []string
+	// ReportOnly stabilizes the pre-phase-3 CLI surface; see docs/implementation.md.
 	ReportOnly bool
 	Verbose    bool
 	NoColor    bool
@@ -64,7 +65,7 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 		now = time.Now
 	}
 	startedAt := now().UTC()
-	ledger := Ledger{RepoState: prepared.repoState, Now: func() time.Time { return startedAt }, Random: service.Random}
+	ledger := Ledger{RepoID: prepared.repository.Key(), RepoState: prepared.repoState, RunsDir: prepared.runsDir, Now: func() time.Time { return startedAt }, Random: service.Random}
 	active, err := ledger.Start()
 	if err != nil {
 		return Report{}, fmt.Errorf("start run ledger: %w", err)
@@ -76,19 +77,24 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 		}
 	}()
 	for index := range prepared.requests {
-		prepared.requests[index].RawStore = active
+		sink, sinkErr := active.RawSink(prepared.requests[index].Gate.Manifest.Name, prepared.requests[index].Binding.Language)
+		if sinkErr != nil {
+			return Report{}, fmt.Errorf("prepare raw sink: %w", sinkErr)
+		}
+		prepared.requests[index].RawSink = sink
 	}
 	if err := service.writeVerbose(opts.Verbose, prepared.requests); err != nil {
 		return Report{}, err
 	}
 	gateReports := Collect(ctx, service.Executor, prepared.requests, min(runtime.NumCPU(), defaultMaximumWorkers))
-	report, err = buildReport(active.runID, prepared.repository.Key, startedAt, now().UTC(), prepared.diff, gateReports)
+	report, err = ComposeReport(active.runID, prepared.repository.Key(), startedAt, now().UTC(), prepared.diff, gateReports)
 	if err != nil {
 		return Report{}, err
 	}
 	if err := active.WriteReport(report); err != nil {
 		return report, fmt.Errorf("write report: %w", err)
 	}
+	report.Ref = RunRef{ID: active.runID, Dir: active.Dir}
 	closeErr := active.Close()
 	closed = closeErr == nil
 	if closeErr != nil {
@@ -122,10 +128,11 @@ func (service Service) writeVerbose(enabled bool, requests []Request) error {
 	return nil
 }
 
-func buildReport(runID, repoID string, startedAt, finishedAt time.Time, diff Diff, gateReports []GateReport) (Report, error) {
+func ComposeReport(runID, repoID string, startedAt, finishedAt time.Time, diff Diff, gateReports []GateReport) (Report, error) {
 	if err := validateDiff(diff); err != nil {
 		return Report{}, fmt.Errorf("validate report diff: %w", err)
 	}
+	gateReports = cloneGateReports(gateReports)
 	findings := make([]finding.Finding, 0)
 	for _, gateReport := range gateReports {
 		findings = append(findings, gateReport.Findings...)
@@ -136,7 +143,7 @@ func buildReport(runID, repoID string, startedAt, finishedAt time.Time, diff Dif
 	}
 	slices.SortFunc(gateReports, compareGateReports)
 	report := Report{
-		SchemaVersion: 2,
+		SchemaVersion: ReportSchemaVersion,
 		RunID:         runID,
 		RepoID:        repoID,
 		Diff:          diffReport(diff),
@@ -149,7 +156,10 @@ func buildReport(runID, repoID string, startedAt, finishedAt time.Time, diff Dif
 		report.FinishedAt = report.StartedAt
 	}
 	report.Counts = countFindings(grouped)
-	report.Verdict = verdictFor(gateReports, grouped)
+	report.Verdict = verdictFor(gateReports)
+	if err := validateReport(report, runID); err != nil {
+		return Report{}, fmt.Errorf("validate composed report: %w", err)
+	}
 	return report, nil
 }
 
@@ -203,6 +213,7 @@ func diffReport(diff Diff) DiffReport {
 type preparedRun struct {
 	repository repoid.ID
 	repoState  string
+	runsDir    string
 	diff       Diff
 	requests   []Request
 }
@@ -220,29 +231,26 @@ func (service Service) prepareRun(ctx context.Context, opts Options) (preparedRu
 	if err != nil {
 		return preparedRun{}, fmt.Errorf("resolve repository identity: %w", err)
 	}
-	if err := validateRepositoryID(repository); err != nil {
-		return preparedRun{}, fmt.Errorf("validate repository identity: %w", err)
+	if repository.IsZero() {
+		return preparedRun{}, errors.New("repository identity is required")
 	}
-	repoState := service.Paths.RepoState(repository.Directory)
-	if err := validateExternalRepoState(repository.Root, repoState); err != nil {
+	repoState := service.Paths.RepoState(repository)
+	runsDir := service.Paths.RunsDir(repository)
+	if err := validateExternalRepoState(repository.Root(), repoState); err != nil {
 		return preparedRun{}, err
 	}
-	diff, err := resolveDiff(ctx, repository.Root, opts.Base)
+	diff, err := resolveDiff(ctx, repository.Root(), opts.Base)
 	if err != nil {
 		return preparedRun{}, fmt.Errorf("resolve diff scope: %w", err)
 	}
 	if err := validateDiff(diff); err != nil {
 		return preparedRun{}, fmt.Errorf("validate diff scope: %w", err)
 	}
-	loader := service.Loader
-	if loader.OverrideDir == "" {
-		loader.OverrideDir = service.Paths.GateOverrides()
-	}
-	loaded, err := loader.LoadAll()
+	loaded, err := service.Loader.LoadAll()
 	if err != nil {
 		return preparedRun{}, fmt.Errorf("load gates: %w", err)
 	}
-	requests, err := selectRequests(loaded, opts.GateNames, repository.Root)
+	requests, err := selectRequests(loaded, opts.GateNames, repository.Root())
 	if err != nil {
 		return preparedRun{}, err
 	}
@@ -254,7 +262,7 @@ func (service Service) prepareRun(ctx context.Context, opts Options) (preparedRu
 			requests[index].ChangedLines = diff.Lines
 		}
 	}
-	return preparedRun{repository: repository, repoState: repoState, diff: diff, requests: requests}, nil
+	return preparedRun{repository: repository, repoState: repoState, runsDir: runsDir, diff: diff, requests: requests}, nil
 }
 
 // Status renders the newest complete report without loading or executing gates.
@@ -279,14 +287,14 @@ func (service Service) Status(ctx context.Context, root string, noColor bool) (R
 	if err != nil {
 		return Report{}, fmt.Errorf("resolve repository identity: %w", err)
 	}
-	if err := validateRepositoryID(repository); err != nil {
-		return Report{}, fmt.Errorf("validate repository identity: %w", err)
+	if repository.IsZero() {
+		return Report{}, errors.New("repository identity is required")
 	}
-	repoState := service.Paths.RepoState(repository.Directory)
-	if err := validateExternalRepoState(repository.Root, repoState); err != nil {
+	repoState := service.Paths.RepoState(repository)
+	if err := validateExternalRepoState(repository.Root(), repoState); err != nil {
 		return Report{}, err
 	}
-	report, err := (Ledger{RepoState: repoState}).Latest()
+	report, err := (Ledger{RepoID: repository.Key(), RepoState: repoState, RunsDir: service.Paths.RunsDir(repository)}).Latest()
 	if err != nil {
 		return Report{}, fmt.Errorf("read latest report: %w", err)
 	}
@@ -301,11 +309,8 @@ func (service Service) Status(ctx context.Context, root string, noColor bool) (R
 }
 
 func (service Service) validateRun() error {
-	if service.Paths.Config == "" || !filepath.IsAbs(service.Paths.Config) {
-		return errors.New("configuration root must be absolute")
-	}
-	if service.Paths.State == "" || !filepath.IsAbs(service.Paths.State) {
-		return errors.New("state root must be absolute")
+	if service.Paths.IsZero() {
+		return errors.New("storage paths are required")
 	}
 	if service.Loader.OverrideDir != "" && !filepath.IsAbs(service.Loader.OverrideDir) {
 		return errors.New("gate override root must be absolute")
@@ -320,35 +325,11 @@ func (service Service) validateRun() error {
 }
 
 func (service Service) validateStatus() error {
-	if service.Paths.State == "" || !filepath.IsAbs(service.Paths.State) {
-		return errors.New("state root must be absolute")
+	if service.Paths.IsZero() {
+		return errors.New("storage paths are required")
 	}
 	if isNilInterface(service.Stdout) {
 		return errors.New("report output is required")
-	}
-	return nil
-}
-
-func validateRepositoryID(repository repoid.ID) error {
-	if !validRepositoryKey(repository.Key) {
-		return errors.New("repository key must be a full lowercase hexadecimal Git or SHA-256 identity")
-	}
-	if repository.Directory != repository.Key {
-		return errors.New("repository state directory must equal the full repository key")
-	}
-	if !filepath.IsAbs(repository.Root) {
-		return errors.New("repository root must be absolute")
-	}
-	canonical, err := filepath.EvalSymlinks(repository.Root)
-	if err != nil {
-		return errors.New("repository root cannot be resolved")
-	}
-	if filepath.Clean(repository.Root) != canonical {
-		return errors.New("repository root must be canonical")
-	}
-	info, err := os.Stat(canonical)
-	if err != nil || !info.IsDir() {
-		return errors.New("repository root must be a directory")
 	}
 	return nil
 }
@@ -405,22 +386,6 @@ func resolveProspectiveDirectory(destination string) (string, error) {
 	}
 }
 
-func validRepositoryKey(key string) bool {
-	if len(key) != 40 && len(key) != 64 {
-		return false
-	}
-	for _, character := range key {
-		if character >= '0' && character <= '9' {
-			continue
-		}
-		if character >= 'a' && character <= 'f' {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
 func (service Service) checkPlatform() error {
 	platform := service.GOOS
 	if platform == "" {
@@ -462,7 +427,7 @@ func selectRequests(gates []gate.Gate, requested []string, root string) ([]Reque
 		}
 	}
 	requests := make([]Request, 0, len(gates))
-	for _, candidate := range gates {
+	for position, candidate := range gates {
 		name := candidate.Manifest.Name
 		if len(selected) > 0 {
 			if _, ok := selected[name]; !ok {
@@ -473,7 +438,7 @@ func selectRequests(gates []gate.Gate, requested []string, root string) ([]Reque
 		if !ok {
 			continue
 		}
-		requests = append(requests, Request{Gate: candidate, Binding: binding, Root: root})
+		requests = append(requests, Request{Gate: candidate, Binding: binding, Position: position, Root: root})
 	}
 	if len(requests) == 0 {
 		return nil, errors.New("no Go gates selected")
@@ -498,19 +463,26 @@ func countFindings(items []finding.Finding) Counts {
 	return counts
 }
 
-func verdictFor(gates []GateReport, items []finding.Finding) Verdict {
+func verdictFor(gates []GateReport) Verdict {
 	for _, gateReport := range gates {
 		if gateReport.Status == GateErrored {
 			return VerdictErrored
 		}
 	}
-	if len(items) > 0 {
-		return VerdictFindings
+	for _, gateReport := range gates {
+		for _, item := range gateReport.Findings {
+			if slices.Contains(gateReport.Blocking, item.Severity) {
+				return VerdictFindings
+			}
+		}
 	}
 	return VerdictUnverified
 }
 
 func compareGateReports(left, right GateReport) int {
+	if left.Position != right.Position {
+		return left.Position - right.Position
+	}
 	if left.Gate != right.Gate {
 		return strings.Compare(left.Gate, right.Gate)
 	}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -16,12 +17,61 @@ import (
 	"github.com/joellarson/togi/internal/gitcmd"
 )
 
-// ID identifies a target repository and its external state directory. Directory
-// is the full Key so identity is stable across worktrees and checkout renames.
+// ID identifies a target repository and its external state directory.
 type ID struct {
-	Key       string
-	Directory string
-	Root      string
+	key  string
+	root string
+}
+
+// New constructs an identity from a persisted key and repository root.
+func New(key, root string) (ID, error) {
+	if !ValidKey(key) {
+		return ID{}, errors.New("repository key must be a full lowercase hexadecimal Git or SHA-256 identity")
+	}
+	if strings.TrimSpace(root) == "" {
+		return ID{}, errors.New("repository root is required")
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return ID{}, fmt.Errorf("make repository root absolute: %w", err)
+	}
+	canonical, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return ID{}, fmt.Errorf("resolve repository root: %w", err)
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return ID{}, fmt.Errorf("stat repository root: %w", err)
+	}
+	if !info.IsDir() {
+		return ID{}, fmt.Errorf("repository root %q must be a directory", canonical)
+	}
+	return ID{key: key, root: filepath.Clean(canonical)}, nil
+}
+
+// Key returns the full stable repository identity.
+func (id ID) Key() string { return id.key }
+
+// Root returns the canonical absolute repository root.
+func (id ID) Root() string { return id.root }
+
+// Dir returns the safe external-state directory component.
+func (id ID) Dir() string { return id.key }
+
+// IsZero reports whether the identity was not constructed.
+func (id ID) IsZero() bool { return id.key == "" || id.root == "" }
+
+// ValidKey reports whether key is a full lowercase Git or SHA-256 identity.
+func ValidKey(key string) bool {
+	if len(key) != 40 && len(key) != 64 {
+		return false
+	}
+	for _, character := range key {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Resolve derives a stable identity for the repository containing start.
@@ -59,11 +109,11 @@ func Resolve(ctx context.Context, start string) (ID, error) {
 		return ID{}, err
 	}
 
-	return ID{
-		Key:       key,
-		Directory: key,
-		Root:      root,
-	}, nil
+	id, err := New(key, root)
+	if err != nil {
+		return ID{}, fmt.Errorf("construct repository identity: %w", err)
+	}
+	return id, nil
 }
 
 func hasHead(ctx context.Context, root string) (bool, error) {

@@ -11,7 +11,7 @@ import (
 
 func TestLedgerStartRejectsUnsupportedLockPlatformBeforeCreatingState(t *testing.T) {
 	repoState := filepath.Join(t.TempDir(), "repo-state")
-	run, err := (Ledger{RepoState: repoState}).Start()
+	run, err := (testLedger(repoState)).Start()
 	if run != nil {
 		_ = run.Close()
 	}

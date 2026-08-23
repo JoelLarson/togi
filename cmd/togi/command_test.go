@@ -9,13 +9,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/enricher"
 	runpkg "github.com/joellarson/togi/internal/run"
 )
 
 func TestVersionCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	cmd := newRootCommand(streams{out: &stdout, err: &stderr})
+	cmd := newRootCommand(streams{out: &stdout, err: &stderr}, commandEnvironment(t))
 	cmd.SetArgs([]string{"version"})
 
 	if err := cmd.Execute(); err != nil {
@@ -34,6 +35,13 @@ type fakeService struct {
 	statusNoColor bool
 	statusErr     error
 }
+
+type commandExitError struct {
+	code int
+}
+
+func (e commandExitError) Error() string { return "command exit error" }
+func (e commandExitError) ExitCode() int { return e.code }
 
 func (service *fakeService) Run(ctx context.Context, opts runpkg.Options) (runpkg.Report, error) {
 	service.ctx = ctx
@@ -75,8 +83,7 @@ func TestRunCommandRejectsArguments(t *testing.T) {
 }
 
 func TestDefaultServiceUsesGoEnricher(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	service, err := defaultService(streams{out: io.Discard, err: io.Discard})
+	service, _, err := defaultServices(streams{out: io.Discard, err: io.Discard}, commandEnvironment(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +132,7 @@ func TestMainRunMapsTypedAndInternalErrors(t *testing.T) {
 		want int
 	}{
 		{name: "typed", err: &runpkg.ExitError{Code: 5, Err: errors.New("unverified")}, want: 5},
+		{name: "generic exit coder", err: commandExitError{code: 3}, want: 3},
 		{name: "blocked", err: &runpkg.ExitError{Code: 2, Err: errors.New("blocked")}, want: 2},
 		{name: "typed nil", err: typedNil, want: 70},
 		{name: "zero", err: &runpkg.ExitError{Code: 0}, want: 70},
@@ -147,7 +155,7 @@ func TestMainRunMapsTypedAndInternalErrors(t *testing.T) {
 
 func TestVersionCommandRejectsArguments(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	cmd := newRootCommand(streams{out: &stdout, err: &stderr})
+	cmd := newRootCommand(streams{out: &stdout, err: &stderr}, commandEnvironment(t))
 	cmd.SetArgs([]string{"version", "extra"})
 
 	if err := cmd.Execute(); err == nil {
@@ -158,10 +166,79 @@ func TestVersionCommandRejectsArguments(t *testing.T) {
 func TestRunReportsCommandErrors(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
-	if got := run([]string{"unknown"}, &stdout, &stderr); got == 0 {
+	if got := run([]string{"unknown"}, &stdout, &stderr, commandEnvironment(t)); got == 0 {
 		t.Fatal("run status = 0, want nonzero")
 	}
 	if !strings.Contains(stderr.String(), "unknown command") {
 		t.Fatalf("stderr = %q, want unknown-command diagnostic", stderr.String())
+	}
+}
+
+func TestRootCommandResolvesStorageOnce(t *testing.T) {
+	lookups := make(map[string]int)
+	root := t.TempDir()
+	environment := config.Environment{Getenv: func(key string) string {
+		lookups[key]++
+		return map[string]string{
+			"XDG_CONFIG_HOME": root + "/config",
+			"XDG_STATE_HOME":  root + "/state",
+			"XDG_CACHE_HOME":  root + "/cache",
+		}[key]
+	}}
+	_ = newRootCommand(streams{out: io.Discard, err: io.Discard}, environment)
+	for _, key := range []string{"XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"} {
+		if lookups[key] != 1 {
+			t.Fatalf("%s lookups = %d, want 1", key, lookups[key])
+		}
+	}
+}
+
+func commandEnvironment(t *testing.T) config.Environment {
+	t.Helper()
+	root := t.TempDir()
+	values := map[string]string{
+		"XDG_CONFIG_HOME": root + "/config",
+		"XDG_STATE_HOME":  root + "/state",
+		"XDG_CACHE_HOME":  root + "/cache",
+	}
+	return config.Environment{Getenv: func(key string) string { return values[key] }}
+}
+
+func TestMainEnvironmentSkipsHomeForAbsoluteXDGPaths(t *testing.T) {
+	root := t.TempDir()
+	values := map[string]string{
+		"HOME":            "",
+		"XDG_CONFIG_HOME": root + "/config",
+		"XDG_STATE_HOME":  root + "/state",
+		"XDG_CACHE_HOME":  root + "/cache",
+	}
+	homeLookups := 0
+	environment := mainEnvironment(func(key string) string {
+		if key == "HOME" {
+			homeLookups++
+		}
+		return values[key]
+	})
+	if homeLookups != 0 {
+		t.Fatalf("HOME lookups = %d, want 0", homeLookups)
+	}
+	if _, err := config.Resolve(environment); err != nil {
+		t.Fatalf("resolve all-absolute XDG environment: %v", err)
+	}
+}
+
+func TestMainEnvironmentReportsMissingFallbackHome(t *testing.T) {
+	values := map[string]string{
+		"XDG_CONFIG_HOME": "",
+		"XDG_STATE_HOME":  "/state",
+		"XDG_CACHE_HOME":  "/cache",
+	}
+	environment := mainEnvironment(func(key string) string { return values[key] })
+	if _, err := config.Resolve(environment); err == nil || !strings.Contains(err.Error(), "home directory") {
+		t.Fatalf("Resolve error = %v, want contextual home error", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if got := run([]string{"version"}, &stdout, &stderr, environment); got != 0 || stdout.String() != "togi dev\n" {
+		t.Fatalf("version status = %d stdout = %q stderr = %q", got, stdout.String(), stderr.String())
 	}
 }

@@ -1,6 +1,10 @@
 package run
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"reflect"
+)
 
 // ExitError carries the stable process status for a completed gauntlet run.
 type ExitError struct {
@@ -23,6 +27,41 @@ func (e *ExitError) Unwrap() error {
 		return nil
 	}
 	return e.Err
+}
+
+// ExitCode returns the stable process status carried by the error.
+func (e *ExitError) ExitCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.Code
+}
+
+// ResolveExit maps command results onto the published CLI exit codes.
+func ResolveExit(err error) int {
+	if err == nil {
+		return 0
+	}
+
+	var exitCoder interface{ ExitCode() int }
+	if !errors.As(err, &exitCoder) || isNilExitCoder(exitCoder) {
+		return 70
+	}
+	code := exitCoder.ExitCode()
+	if code < 1 || code > 5 {
+		return 70
+	}
+	return code
+}
+
+func isNilExitCoder(exitCoder interface{ ExitCode() int }) bool {
+	value := reflect.ValueOf(exitCoder)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // ExitCode maps a persisted verdict onto the CLI contract.

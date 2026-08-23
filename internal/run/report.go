@@ -4,7 +4,11 @@ import (
 	"time"
 
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/gate"
 )
+
+// ReportSchemaVersion is the only persisted report schema accepted pre-1.0.
+const ReportSchemaVersion = 3
 
 // GateStatus describes the outcome of one gate execution.
 type GateStatus string
@@ -26,14 +30,71 @@ const (
 
 // GateReport records one gate's normalized result.
 type GateReport struct {
-	Gate            string            `json:"gate"`
-	Language        string            `json:"language"`
-	Status          GateStatus        `json:"status"`
-	Findings        []finding.Finding `json:"findings,omitempty"`
-	DurationMS      int64             `json:"duration_ms"`
-	ObservedVersion string            `json:"observed_version,omitempty"`
-	Warnings        []string          `json:"warnings,omitempty"`
-	Error           string            `json:"error,omitempty"`
+	Gate            string             `json:"gate"`
+	Language        string             `json:"language"`
+	Blocking        []finding.Severity `json:"blocking"`
+	FixPolicy       gate.FixPolicy     `json:"fix_policy"`
+	Position        int                `json:"position"`
+	Status          GateStatus         `json:"status"`
+	Findings        []finding.Finding  `json:"findings,omitempty"`
+	DurationMS      int64              `json:"duration_ms"`
+	ObservedVersion string             `json:"observed_version,omitempty"`
+	Warnings        []string           `json:"warnings,omitempty"`
+	Error           string             `json:"error,omitempty"`
+}
+
+// NewGateReport captures the compiled gate and binding identity used by one request.
+func NewGateReport(g gate.Gate, binding gate.Binding, position int) GateReport {
+	blocking := make([]finding.Severity, len(g.Manifest.Blocking))
+	copy(blocking, g.Manifest.Blocking)
+	return GateReport{
+		Gate:      g.Manifest.Name,
+		Language:  binding.Language,
+		Blocking:  blocking,
+		FixPolicy: g.Manifest.FixPolicy,
+		Position:  position,
+	}
+}
+
+func cloneGateReports(reports []GateReport) []GateReport {
+	if reports == nil {
+		return nil
+	}
+	cloned := make([]GateReport, len(reports))
+	for index, report := range reports {
+		cloned[index] = report
+		cloned[index].Blocking = cloneReportSlice(report.Blocking)
+		cloned[index].Warnings = cloneReportSlice(report.Warnings)
+		cloned[index].Findings = cloneReportFindings(report.Findings)
+	}
+	return cloned
+}
+
+func cloneReportFindings(findings []finding.Finding) []finding.Finding {
+	if findings == nil {
+		return nil
+	}
+	cloned := make([]finding.Finding, len(findings))
+	for index, item := range findings {
+		cloned[index] = item
+		cloned[index].Occurrences = cloneReportSlice(item.Occurrences)
+	}
+	return cloned
+}
+
+func cloneReportSlice[T any](values []T) []T {
+	if values == nil {
+		return nil
+	}
+	cloned := make([]T, len(values))
+	copy(cloned, values)
+	return cloned
+}
+
+// RunRef locates a completed report in external state at runtime.
+type RunRef struct {
+	ID  string
+	Dir string
 }
 
 // Counts summarizes findings and their occurrence sites.
@@ -56,6 +117,7 @@ type DiffReport struct {
 
 // Report is the machine-readable artifact for a completed run.
 type Report struct {
+	Ref           RunRef            `json:"-"`
 	SchemaVersion int               `json:"schema_version"`
 	RunID         string            `json:"run_id"`
 	RepoID        string            `json:"repo_id"`

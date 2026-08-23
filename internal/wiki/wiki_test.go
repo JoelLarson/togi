@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/joellarson/togi/internal/gate"
+	"github.com/joellarson/togi/internal/gate/gatetest"
 )
 
 func TestLoadReadsShippedPage(t *testing.T) {
@@ -41,11 +42,11 @@ func TestShippedAliasesResolveExceptKnownGaps(t *testing.T) {
 	loader := Loader{}
 	dangling := make([]string, 0)
 	for page := range ReverseIndex(gates) {
-		exists, err := loader.Exists(page)
-		if err != nil {
+		_, err := loader.Load(page)
+		if err != nil && !errors.Is(err, ErrNotFound) {
 			t.Fatal(err)
 		}
-		if !exists {
+		if errors.Is(err, ErrNotFound) {
 			dangling = append(dangling, page)
 		}
 	}
@@ -122,23 +123,6 @@ func TestLoadRejectsPageWithoutHeading(t *testing.T) {
 	}
 }
 
-func TestLoadAllMergesShippedAndOverrideOnlyPages(t *testing.T) {
-	dir := t.TempDir()
-	writePage(t, dir, "aardvark", "# Aardvark\n")
-
-	pages, err := (Loader{OverrideDir: dir}).LoadAll()
-	if err != nil {
-		t.Fatal(err)
-	}
-	names := make([]string, 0, len(pages))
-	for _, page := range pages {
-		names = append(names, page.Name)
-	}
-	if !reflect.DeepEqual(names, []string{"aardvark", "small-composable-functions"}) {
-		t.Fatalf("names = %v", names)
-	}
-}
-
 func TestResolvePrefersExactThenLongestGlob(t *testing.T) {
 	aliases := map[string]string{
 		"golangci-lint/*":        "lint-correctness",
@@ -158,16 +142,16 @@ func TestResolvePrefersExactThenLongestGlob(t *testing.T) {
 		{"clippy/needless_range_loop", "", false},
 	}
 	for _, tc := range cases {
-		page, ok := Resolve(aliases, tc.ruleID)
+		page, ok := resolve(aliases, tc.ruleID)
 		if page != tc.page || ok != tc.ok {
-			t.Fatalf("Resolve(%q) = (%q, %v), want (%q, %v)", tc.ruleID, page, ok, tc.page, tc.ok)
+			t.Fatalf("resolve(%q) = (%q, %v), want (%q, %v)", tc.ruleID, page, ok, tc.page, tc.ok)
 		}
 	}
 }
 
 func TestResolveHandlesNoAliases(t *testing.T) {
-	if page, ok := Resolve(nil, "gocyclo/complexity"); ok {
-		t.Fatalf("Resolve on nil aliases returned %q", page)
+	if page, ok := resolve(nil, "gocyclo/complexity"); ok {
+		t.Fatalf("resolve on nil aliases returned %q", page)
 	}
 }
 
@@ -185,8 +169,8 @@ func TestReverseIndexReportsShippedAliases(t *testing.T) {
 
 func TestReverseIndexIsManyToOne(t *testing.T) {
 	gates := []gate.Gate{
-		fakeGate("complexity", "go", map[string]string{"gocyclo/complexity": "small-composable-functions"}),
-		fakeGate("complexity-rs", "rust", map[string]string{"clippy/cognitive_complexity": "small-composable-functions"}),
+		fakeGate(t, "complexity", "go", map[string]string{"gocyclo/complexity": "small-composable-functions"}),
+		fakeGate(t, "complexity-rs", "rust", map[string]string{"clippy/cognitive_complexity": "small-composable-functions"}),
 	}
 	refs := ReverseIndex(gates)["small-composable-functions"]
 	if len(refs) != 2 {
@@ -199,8 +183,8 @@ func TestReverseIndexIsManyToOne(t *testing.T) {
 
 func TestConflictsDetectsOneRuleIDOnTwoPages(t *testing.T) {
 	gates := []gate.Gate{
-		fakeGate("a", "go", map[string]string{"tool/rule": "page-one"}),
-		fakeGate("b", "go", map[string]string{"tool/rule": "page-two"}),
+		fakeGate(t, "a", "go", map[string]string{"tool/rule": "page-one"}),
+		fakeGate(t, "b", "go", map[string]string{"tool/rule": "page-two"}),
 	}
 	conflicts := Conflicts(gates)
 	if len(conflicts) != 1 {
@@ -213,8 +197,8 @@ func TestConflictsDetectsOneRuleIDOnTwoPages(t *testing.T) {
 
 func TestConflictsIgnoresAgreeingAliases(t *testing.T) {
 	gates := []gate.Gate{
-		fakeGate("a", "go", map[string]string{"tool/rule": "page-one"}),
-		fakeGate("b", "go", map[string]string{"tool/rule": "page-one"}),
+		fakeGate(t, "a", "go", map[string]string{"tool/rule": "page-one"}),
+		fakeGate(t, "b", "go", map[string]string{"tool/rule": "page-one"}),
 	}
 	if conflicts := Conflicts(gates); len(conflicts) != 0 {
 		t.Fatalf("conflicts = %v, want none", conflicts)
@@ -238,9 +222,7 @@ func writePage(t *testing.T, dir, name, body string) {
 	}
 }
 
-func fakeGate(name, language string, aliases map[string]string) gate.Gate {
-	return gate.Gate{
-		Manifest: gate.Manifest{Name: name},
-		Bindings: map[string]gate.Binding{language: {Language: language, Aliases: aliases}},
-	}
+func fakeGate(t *testing.T, name, language string, aliases map[string]string) gate.Gate {
+	t.Helper()
+	return gatetest.Compile(t, name, gatetest.Language(language), gatetest.Aliases(aliases))
 }

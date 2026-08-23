@@ -3,11 +3,15 @@ package gate
 import (
 	"errors"
 	"fmt"
+	"math"
+	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/normalizer"
+	"github.com/pelletier/go-toml/v2"
 )
 
 // Compile validates a gate wholesale and compiles each binding's normalizer.
@@ -28,11 +32,17 @@ func Compile(manifest Manifest, bindings map[string]Binding) (Gate, error) {
 	}
 	sort.Strings(languages)
 
+	owner := &ownership{marker: 1}
 	compiled := make(map[string]Binding, len(bindings))
+	snapshots := make(map[string]*bindingSnapshot, len(bindings))
 	for _, language := range languages {
-		binding := bindings[language]
-		if binding.Language != language {
-			return Gate{}, fmt.Errorf("binding %q declares language %q", language, binding.Language)
+		wireBinding := bindings[language]
+		if wireBinding.Language != language {
+			return Gate{}, fmt.Errorf("binding %q declares language %q", language, wireBinding.Language)
+		}
+		binding, err := cloneBindingState(wireBinding)
+		if err != nil {
+			return Gate{}, fmt.Errorf("binding %s: %w", language, err)
 		}
 		if err := validateBindingValue(binding); err != nil {
 			return Gate{}, fmt.Errorf("binding %s: %w", language, err)
@@ -41,16 +51,164 @@ func Compile(manifest Manifest, bindings map[string]Binding) (Gate, error) {
 			Language:    binding.Language,
 			RuleID:      binding.RuleID,
 			Message:     binding.Message,
-			SeverityMap: binding.SeverityMap,
+			SeverityMap: cloneSeverityMap(binding.SeverityMap),
 		})
 		if err != nil {
 			return Gate{}, fmt.Errorf("binding %s: %w", language, err)
 		}
+		snapshotWire, err := cloneBindingState(binding)
+		if err != nil {
+			return Gate{}, fmt.Errorf("binding %s: %w", language, err)
+		}
+		snapshot := &bindingSnapshot{wire: snapshotWire}
 		binding.compiled = parser
-		binding.valid = true
+		binding.owner = owner
+		binding.snapshot = snapshot
 		compiled[language] = binding
+		snapshots[language] = snapshot
 	}
-	return Gate{Manifest: manifest, Bindings: compiled, valid: true}, nil
+	compiledManifest := cloneManifest(manifest)
+	return Gate{
+		Manifest: compiledManifest, Bindings: compiled, owner: owner,
+		manifestSnapshot: cloneManifest(compiledManifest), bindingSnapshots: snapshots,
+	}, nil
+}
+
+func cloneManifest(manifest Manifest) Manifest {
+	manifest.Blocking = cloneSlice(manifest.Blocking)
+	return manifest
+}
+
+func cloneBindingState(binding Binding) (Binding, error) {
+	binding.Command = cloneSlice(binding.Command)
+	binding.SuccessExitCodes = cloneSlice(binding.SuccessExitCodes)
+	binding.FindingExitCodes = cloneSlice(binding.FindingExitCodes)
+	settings, err := cloneSettings(binding.Settings)
+	if err != nil {
+		return Binding{}, err
+	}
+	binding.Settings = settings
+	binding.SeverityMap = cloneSeverityMap(binding.SeverityMap)
+	binding.Version.Command = cloneSlice(binding.Version.Command)
+	binding.Aliases = cloneAliases(binding.Aliases)
+	binding.compiled = nil
+	binding.owner = nil
+	binding.snapshot = nil
+	return binding, nil
+}
+
+func cloneSlice[T any](values []T) []T {
+	if values == nil {
+		return nil
+	}
+	return append(make([]T, 0, len(values)), values...)
+}
+
+func cloneSettings(settings map[string]any) (map[string]any, error) {
+	if settings == nil {
+		return nil, nil
+	}
+	cloned, err := cloneSettingValue("", settings, make(map[settingContainer]struct{}))
+	if err != nil {
+		return nil, err
+	}
+	return cloned.(map[string]any), nil
+}
+
+type settingContainer struct {
+	kind    byte
+	pointer uintptr
+}
+
+func cloneSettingValue(path string, value any, active map[settingContainer]struct{}) (any, error) {
+	switch value := value.(type) {
+	case string, bool, int64, time.Time, toml.LocalDate, toml.LocalTime, toml.LocalDateTime:
+		return value, nil
+	case float64:
+		if math.IsNaN(value) {
+			return nil, fmt.Errorf("settings %s: NaN is not supported", path)
+		}
+		if value == 0 && math.Signbit(value) {
+			return nil, fmt.Errorf("settings %s: negative zero is not supported", path)
+		}
+		return value, nil
+	case map[string]any:
+		if value == nil {
+			return nil, fmt.Errorf("settings %s: null is not a TOML value", path)
+		}
+		container := settingContainer{kind: 'm', pointer: reflect.ValueOf(value).Pointer()}
+		if _, exists := active[container]; exists {
+			return nil, fmt.Errorf("settings %s: cyclic TOML container", path)
+		}
+		active[container] = struct{}{}
+		defer delete(active, container)
+
+		cloned := make(map[string]any, len(value))
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			item, err := cloneSettingValue(settingKeyPath(path, key), value[key], active)
+			if err != nil {
+				return nil, err
+			}
+			cloned[key] = item
+		}
+		return cloned, nil
+	case []any:
+		if value == nil {
+			return nil, fmt.Errorf("settings %s: null is not a TOML value", path)
+		}
+		container := settingContainer{kind: 's', pointer: reflect.ValueOf(value).Pointer()}
+		if _, exists := active[container]; exists {
+			return nil, fmt.Errorf("settings %s: cyclic TOML container", path)
+		}
+		active[container] = struct{}{}
+		defer delete(active, container)
+
+		cloned := make([]any, len(value))
+		for index, item := range value {
+			item, err := cloneSettingValue(fmt.Sprintf("%s[%d]", path, index), item, active)
+			if err != nil {
+				return nil, err
+			}
+			cloned[index] = item
+		}
+		return cloned, nil
+	default:
+		return nil, fmt.Errorf("settings %s: unsupported TOML value type %T", path, value)
+	}
+}
+
+func settingKeyPath(parent, key string) string {
+	if parent == "" {
+		return key
+	}
+	return parent + "." + key
+}
+
+func cloneSeverityMap(severities map[string]finding.Severity) map[string]finding.Severity {
+	if severities == nil {
+		return nil
+	}
+	cloned := make(map[string]finding.Severity, len(severities))
+	for source, severity := range severities {
+		cloned[source] = severity
+	}
+	return cloned
+}
+
+func cloneAliases(aliases map[string]string) map[string]string {
+	if aliases == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(aliases))
+	for ruleID, page := range aliases {
+		cloned[ruleID] = page
+	}
+	return cloned
 }
 
 func validateManifest(manifest Manifest) error {
