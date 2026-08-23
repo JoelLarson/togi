@@ -1,5 +1,5 @@
 Feature: Supporting platforms
-  As an operator running togi
+  As an operator on an unfamiliar machine
   I want an explicit platform result
   So that an unsupported machine cannot appear to have passed its gates
 

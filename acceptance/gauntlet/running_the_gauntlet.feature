@@ -11,7 +11,7 @@ Feature: Running the gauntlet
       Then the report contains the "complexity" and "lint" gates
       And the report contains both shipped findings
 
-    Scenario: An operator can select one gate from the gauntlet
+    Scenario: Running one selected gate reports only that gate
       Given a committed Go repository with a changed function
       And the "complexity" and "lint" gates report findings
       When I run the gauntlet with only the "lint" gate
@@ -21,7 +21,7 @@ Feature: Running the gauntlet
       Given a committed Go repository with a changed function
       And the "lint" gate reports rule "golangci-lint/errcheck" on "feature.go" line 4
       When I run the gauntlet
-      Then the finding records its gate, language, rule, severity, location, message, and fingerprint
+      Then the finding records its gate, language, rule, severity, file, line, message, and fingerprint
 
     Scenario: Repeated occurrences are grouped under one finding
       Given a committed Go repository with a changed function
@@ -44,7 +44,7 @@ Feature: Running the gauntlet
       Given a committed Go repository with one gate finding
       And the gate writes the raw diagnostic "PRIVATE RAW DIAGNOSTIC"
       When I run the gauntlet
-      Then stdout contains compiler-style findings
+      Then the findings are shown in compiler-style output
       And the raw diagnostic exists only in a persisted raw artifact
 
   Rule: An errored gate never suppresses a healthy sibling

@@ -28,7 +28,7 @@ Feature: Keeping run history
       And the first run can complete after the gate resumes
 
     Scenario: An abandoned unlocked lock file does not block a new run
-      Given a committed Go repository with an abandoned unlocked ledger file
+      Given a committed Go repository with an abandoned unlocked lock file
       When I run the gauntlet
       Then a completed report is persisted
 

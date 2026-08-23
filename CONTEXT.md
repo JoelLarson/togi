@@ -131,6 +131,10 @@ declared in the gate's language binding.
 A per-language note attached to a principle page, created only after a fix
 has actually failed for language-specific reasons — never speculatively.
 
+**Eject**:
+Copying a shipped principle page into the operator tier so it can be edited.
+Never overwrites an existing operator copy.
+
 ### The fix loop
 
 **Triage**:
@@ -205,6 +209,12 @@ A hard budget limit: max iterations, wall-clock, agent spend/tokens.
 **Ratchet**:
 "Never worse than last time" — optional repo-wide metric high-water marks
 stored in external state, keyed by fingerprint.
+
+**Config tier**:
+Where a gate definition or principle page comes from — *shipped* (compiled
+into the binary), *operator* (XDG config, per machine), or *repository* (per
+project). An operator copy wholly overrides the shipped one; nothing is ever
+written into a target repository (ADR-0002, ADR-0003).
 
 **Repo-id**:
 A target repo's stable identity for external config/state: first root

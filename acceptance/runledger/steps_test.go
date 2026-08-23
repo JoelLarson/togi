@@ -52,7 +52,7 @@ func (f *runHistoryFeature) initialize(sc *godog.ScenarioContext) {
 		{`^I start another gauntlet run for the repository$`, f.startSecondRun},
 		{`^the second run is rejected as locked$`, f.secondLocked},
 		{`^the first run can complete after the gate resumes$`, f.firstCompletes},
-		{`^a committed Go repository with an abandoned unlocked ledger file$`, f.abandonedLock},
+		{`^a committed Go repository with an abandoned unlocked lock file$`, f.abandonedLock},
 		{`^a completed report is persisted$`, f.reportPersisted},
 		{`^a committed Go repository with 20 completed runs$`, f.twentyCompletedRuns},
 		{`^I complete one more run$`, f.completeOneMoreRun},

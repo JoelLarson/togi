@@ -10,6 +10,7 @@ need to see how application language maps to a driver action.
 - [Keeping run history](runledger/keeping_run_history.feature)
 - [Customizing gates](gate/customizing_gates.feature)
 - [Using principle pages](wiki/using_principle_pages.feature)
+- [Customizing principle pages](wiki/customizing_principle_pages.feature)
 - [Supporting platforms](platform/supporting_platforms.feature)
 <!-- feature-index:end -->
 
