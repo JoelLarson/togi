@@ -8,6 +8,26 @@ Each phase ends in something runnable — togi is dogfooded on its own repo from
 phase 1's first report, so every phase's output is exercised on real code
 immediately rather than at the end.
 
+## Implementation status
+
+- **Phase 1: complete.** The report-only run engine, finding pipeline, two
+  shipped Go gates, external run ledger, and Linux runtime boundary are built.
+- **Phase 2: complete.** Committed-diff scoping, Go entity enrichment, clean
+  repository preconditions, and conventional local trunk discovery are built.
+- **Phase 3: next.** The fix loop has no approved implementation plan yet;
+  `internal/adapter`, `internal/flywheel`, and `internal/triage` remain package
+  seams rather than working loop components.
+- **Phase 4: partially implemented ahead of sequence.** Principle-page
+  loading, alias resolution, `wiki show`, `wiki lint`, `wiki eject`, and the
+  first shipped page are built. Triage, `plan.json`, brief assembly, and resume
+  behavior remain.
+- **Phase 5: not started.**
+
+The completed executable-specification detour added the human-readable catalog
+under [`features/`](../features/README.md). It exercises assembled Phase 1/2
+and wiki behavior through service and compiled-CLI drivers without changing
+the dependency-driven phase order below.
+
 ---
 
 ## Phase 1 — Run engine, findings, and two report-only Go gates

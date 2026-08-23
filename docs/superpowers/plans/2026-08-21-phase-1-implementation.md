@@ -1,5 +1,9 @@
 # Phase 1 Implementation Plan
 
+> **Status: Complete.** Phase 1 is implemented. This plan remains as a
+> historical execution record; unchecked boxes preserve the prescribed
+> sequence and do not identify outstanding work.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use

@@ -17,22 +17,27 @@ phase order in [roadmap.md](./roadmap.md).
 
 ## Dependencies
 
-Deliberately few, since togi is mostly subprocess orchestration.
+Production dependencies are deliberately few, since togi is mostly subprocess
+orchestration.
 
 - **`spf13/cobra`** — subcommand CLI. The de-facto standard, and ADR-0001
   commits to a command surface that grows into pipeline stages.
 - **`pelletier/go-toml/v2`** — config, gate manifests, bindings. Faster than
   BurntSushi with markedly better decode errors, which matters when what's
   being parsed is hand-authored gate manifests.
+- **`cucumber/godog` v0.16.0** — pinned test-only dependency for the executable
+  acceptance specifications under `features/`. It is not linked into the
+  production command.
 
-Everything else — git, tool execution, hashing, JSON — is stdlib. Git is
-driven by shelling to plumbing commands rather than go-git: the behaviours
-togi depends on (merge-base, worktrees, root commits) are exactly where a
-reimplementation would diverge from real git.
+Production functionality beyond Cobra and go-toml — git, tool execution,
+hashing, JSON — is stdlib. Git is driven by shelling to plumbing commands
+rather than go-git: the behaviours togi depends on (merge-base, worktrees,
+root commits) are exactly where a reimplementation would diverge from real
+git.
 
 ## Platform boundary
 
-Phase 1 supports Linux runtime behavior only. The `run` and `status`
+The current runtime supports Linux only. The `run` and `status`
 orchestration entry points check the platform before gate loading, subprocess
 startup, or any ledger access and return `ErrUnsupportedPlatform` elsewhere.
 Platform-specific files retain buildable interfaces and unsupported stubs for
@@ -66,19 +71,21 @@ Gate definitions embed into the binary via `go:embed` from
 `internal/gate/defaults/gates/`. Keeping the files below the owning package is
 required by `go:embed`, which cannot traverse to a parent directory. togi reads
 them from the embed and **never writes them into the config dir**; a same-named
-directory under `$XDG_CONFIG_HOME/togi/gates/` overrides one wholesale. `togi
-gate eject <name>` copies one out for editing.
+directory under `$XDG_CONFIG_HOME/togi/gates/` overrides one wholesale.
+Operators create or copy an override there when they choose to own a gate
+definition; there is no gate-ejection command yet.
 
-Upgrades therefore propagate automatically to everything you haven't
-customized, you own only what you explicitly ejected, and a fresh install
+Upgrades therefore propagate automatically to every definition you have not
+overridden, you own only the operator copies you create, and a fresh install
 creates no surprise files. This is also how togi dogfoods itself: running togi
 on togi uses the shipped defaults, so ADR-0002 holds (nothing is read from the
 target tree) while the standards stay version-controlled and reviewable.
 
 ## Gate manifest and binding schema
 
-**Proposed** — the first thing phase 1 will pressure-test, so treat the shape
-as settled and the field names as revisable.
+**Implemented contract.** The shipped gates and operator overrides use this
+schema; changing its field names now requires an explicit compatibility
+decision.
 
 A gate is a directory: `gate.toml` plus one subdirectory per language.
 
@@ -128,9 +135,8 @@ version flag; the installed module is pinned operationally instead.
 
 ```
 togi run [--report-only] [--base <ref>] [--gate <name>] [--verbose] [--no-color]
-togi status
+togi status [--no-color]
 togi version
-togi gate list | eject <name>
 togi wiki show <page> | lint | eject <page>
 togi waive <fingerprint> --reason ""  # phase 3
 ```
@@ -177,7 +183,8 @@ compiled gate name persists without a path component derived from it. The name
 is therefore opaque: readers derive it with `run.RawOutputName` rather than
 parsing identity back out of a directory listing.
 
-Runs prune to the most recent 20 at run start, configurable.
+Runs prune to the most recent 20 at run start. The retention limit is currently
+fixed.
 
 `<repo-id>` is the full stable hexadecimal repository key. The durable path
 does not include the checkout basename and does not truncate the key, so linked
@@ -223,9 +230,9 @@ A gate manifest may declare a timeout; otherwise its cost class implies one:
 `instant` 10s, `fast` 60s, `slow` 10m, `glacial` 60m. **A timeout produces
 `errored`, never zero findings.**
 
-Gate concurrency defaults to `min(NumCPU, 4)` and is configurable. golangci-
-lint and cargo already saturate cores on their own, so oversubscription rather
-than idle CPU is the real risk.
+Gate concurrency is currently fixed at `min(NumCPU, 4)`. golangci-lint and
+cargo already saturate cores on their own, so oversubscription rather than idle
+CPU is the real risk.
 
 ## Testing
 
@@ -235,5 +242,8 @@ than idle CPU is the real risk.
   built in `t.TempDir()`, not a mocked git. The bugs in that code are all in
   real git's behaviour, so mocking the subprocess boundary would mock exactly
   the layer worth testing.
-- **Integration**: a build-tagged suite exercising the real tools.
+- **Acceptance**: service and compiled-CLI drivers use scenario-owned fake
+  tools, real temporary Git repositories, and isolated XDG roots.
+- **Real tools**: verify their external CLI contracts separately when
+  installed; the automated suite does not require them.
 - No network in any test.

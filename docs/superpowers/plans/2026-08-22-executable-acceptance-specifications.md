@@ -1,5 +1,10 @@
 # Executable Acceptance Specifications Implementation Plan
 
+> **Status: Complete.** The service and compiled-CLI acceptance catalog is
+> implemented under `features/`. This plan remains as a historical execution
+> record; unchecked boxes preserve the prescribed sequence and do not identify
+> outstanding work.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a human-first Gherkin catalog that executes togi's user-visible behavior through the service boundary by default and the compiled CLI boundary on demand.
