@@ -25,8 +25,8 @@ func newGateCustomizationFeature(factory harness.DriverFactory) *gateCustomizati
 func (f *gateCustomizationFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Before(f.before)
 	sc.After(f.world.After)
-	f.world.BindReports(sc)
-	f.world.BindGates(sc)
+	sc.Step(`^I run the gauntlet$`, f.runGauntlet)
+	sc.Step(`^the target repository contains no gate definition$`, f.noGateDefinition)
 	sc.Step(`^a committed Go repository with a changed function$`, f.changedRepository)
 	sc.Step(`^the shipped Go gates report representative findings$`, f.shippedFindings)
 	sc.Step(`^the shipped findings are normalized without repository configuration$`, f.shippedNormalized)
@@ -43,6 +43,23 @@ func (f *gateCustomizationFeature) initialize(sc *godog.ScenarioContext) {
 func (f *gateCustomizationFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {
 	f.beforeTree, f.invokedMarkers = nil, nil
 	return f.world.Before(ctx, scenario)
+}
+
+func (f *gateCustomizationFeature) runGauntlet(ctx context.Context) error {
+	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: "base", NoColor: true})
+}
+
+func (f *gateCustomizationFeature) noGateDefinition() error {
+	tree, err := f.world.Repository().Tree()
+	if err != nil {
+		return err
+	}
+	for _, name := range tree {
+		if filepath.Base(name) == "gate.toml" {
+			return fmt.Errorf("target repository contains gate definition %q", name)
+		}
+	}
+	return nil
 }
 
 func (f *gateCustomizationFeature) changedRepository() error {

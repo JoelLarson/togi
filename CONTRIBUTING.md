@@ -18,20 +18,16 @@ colocated with the Go step definitions that bind it.
 
 ### Zed — Gherkin step navigation
 
-[`.zed/settings.json`](./.zed/settings.json) points the Cucumber language server
-at our step definitions:
+Every step pattern must be registered in a `features/**/*_test.go` file. That is
+the Cucumber language server's default Go glue, and we cannot override it — see
+below. `features/internal/harness/glue_test.go` fails the build if a `Step` call
+appears in any other file under `features/`, because such a step still runs under
+godog but reads as undefined in the editor.
 
-```json
-"glue": ["features/**/*.go"]
-```
+Shared step *behavior* may live in the harness; shared *registration* may not.
 
-That overrides the server's default `features/**/*_test.go`, which would miss
-`features/internal/harness/steps.go` — shared steps that cannot live in a
-`_test.go` file, because other packages import them.
-
-**A one-time workaround is also required.** `@cucumber/language-server` resolves
-its tree-sitter grammars from a path that does not exist under a normal npm
-install:
+**A one-time workaround is required.** `@cucumber/language-server` resolves its
+tree-sitter grammars from a path that does not exist under a normal npm install:
 
 ```js
 // bin/cucumber-language-server.cjs
@@ -43,7 +39,7 @@ npm hoists `language-service` to the top level, so every grammar fails to load a
 reads as undefined even though the logs show features and glue being found:
 
 ```
-* Found 38 glue file(s) in ["features/**/*.go"]
+* Found 29 glue file(s) in [... ,"features/**/*_test.go"]
 * Found 0 step definitions in those glue files
 * Step Definition errors: Error: Parsing failed ... language: go
 ```
@@ -63,12 +59,13 @@ Cucumber publishes a new `language-server` release.
 Verify with `debug: open language server logs` → **cucumber**:
 
 ```
-* Found 38 glue file(s) in ["features/**/*.go"]
-* Found 128 step definitions in those glue files
+* Found 29 glue file(s) in [... ,"features/**/*_test.go"]
+* Found 127 step definitions in those glue files
 ```
 
-This is upstream, not ours. The same `ENOENT` was reported for Neovim/Mason and
-global npm installs in
+Both problems are upstream, not ours.
+
+The grammar path was reported for Neovim/Mason and global npm installs in
 [cucumber/language-server#72](https://github.com/cucumber/language-server/issues/72)
 in 2022, and `bin/cucumber-language-server.cjs` on `main` is still unchanged. The
 fix is to resolve the package instead of assuming a layout:
@@ -79,3 +76,20 @@ const wasmBasePath = path.resolve(
   '../../../dist'
 )
 ```
+
+The glue setting cannot be configured at all. Anything under
+`lsp.cucumber.settings` in `.zed/settings.json` reaches the server wrapped as
+`{"cucumber": {...}}` by
+[thlcodes/zed-extension-cucumber](https://github.com/thlcodes/zed-extension-cucumber),
+but the server reads `glue` off the top level of what it receives. It gets
+`undefined`, `findUris` calls `globs.reduce` on it, and the reindex dies:
+
+```
+Client sent workspace/configuration
+Failed to reindex: Cannot read properties of undefined (reading 'reduce')
+```
+
+The next reindex then silently falls back to the server's thirteen built-in
+globs. Since `glue` can never land at the top level, no value in
+`.zed/settings.json` fixes this, which is why the invariant above is enforced in
+Go instead.

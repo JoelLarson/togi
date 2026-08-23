@@ -35,8 +35,8 @@ func newRunHistoryFeature(factory harness.DriverFactory) *runHistoryFeature {
 func (f *runHistoryFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Before(f.before)
 	sc.After(f.after)
-	f.world.BindReports(sc)
-	f.world.BindHistory(sc)
+	sc.Step(`^I run the gauntlet$`, f.runGauntlet)
+	sc.Step(`^I inspect repository status$`, f.inspectStatus)
 	sc.Step(`^a committed Go repository with one gate finding$`, f.oneGateFinding)
 	sc.Step(`^report.json and both raw gate streams are persisted under XDG state$`, f.persistedOutsideRepository)
 	sc.Step(`^the target repository tree and status are unchanged$`, f.targetUnchanged)
@@ -202,8 +202,16 @@ func (f *runHistoryFeature) completedLinkedRun(ctx context.Context) error {
 	return err
 }
 
-func (f *runHistoryFeature) statusPrimary(ctx context.Context) error {
+func (f *runHistoryFeature) runGauntlet(ctx context.Context) error {
+	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: "base", NoColor: true})
+}
+
+func (f *runHistoryFeature) inspectStatus(ctx context.Context) error {
 	return f.world.Status(ctx, harness.StatusRequest{Root: f.world.Repository().Root, NoColor: true})
+}
+
+func (f *runHistoryFeature) statusPrimary(ctx context.Context) error {
+	return f.inspectStatus(ctx)
 }
 func (f *runHistoryFeature) rendersLinkedRun() error {
 	return sameRender(f.world.LastCommand(), f.linkedRun)
