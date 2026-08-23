@@ -1,7 +1,7 @@
 Feature: Customizing gates
   As an operator evolving personal standards
   I want to customize gates outside the target repository
-  So that my gauntlet changes without imposing repository files on collaborators
+  So that I can hold my own bar on repositories I do not own
 
   Rule: Shipped definitions work without repository configuration
     Scenario: Shipped gates normalize representative Go tool output

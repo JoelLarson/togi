@@ -9,6 +9,25 @@ it later.
 
 ## Language
 
+### People
+
+**Engineer**:
+The single person togi serves: the owner of the standards it enforces. togi
+encodes one engineer's bar, not a team's shared CI policy (ADR-0002). The two
+roles below are this person's modes, not separate populations — the same
+person on the same machine, doing two different things.
+
+**Developer**:
+The engineer judging a feature diff: running the gauntlet, reading findings,
+understanding why one matters. The mode that consumes togi's output.
+_Avoid_: user (the adjective is fine — user-visible, user-facing — but it is
+never a role)
+
+**Operator**:
+The engineer tuning togi itself: gate definitions, principle pages, and the
+machine it runs on. The mode that shapes togi's behaviour.
+_Avoid_: user
+
 ### The gauntlet
 
 **Gauntlet**:
