@@ -1,0 +1,9 @@
+{
+  "lsp": {
+    "cucumber": {
+      "settings": {
+        "glue": ["features/**/*.go"]
+      }
+    }
+  }
+}
