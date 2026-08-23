@@ -100,8 +100,12 @@ func (o RunObservation) Report() (Report, error) {
 }
 
 func (o RunObservation) ReportPath() string { return o.reportPath }
+
+// RawPath locates one persisted gate stream. Raw filenames are opaque digests,
+// so the artifact is found by deriving the name the ledger writes rather than
+// by reading identity back out of the directory listing.
 func (o RunObservation) RawPath(gate, language, stream string) (string, bool) {
-	path, ok := o.rawPaths[rawPathKey(gate, language, stream)]
+	path, ok := o.rawPaths[run.RawOutputName(gate, language, stream)]
 	return path, ok
 }
 
@@ -115,9 +119,6 @@ func clonePaths(value map[string]string) map[string]string {
 		copy[key] = path
 	}
 	return copy
-}
-func rawPathKey(gate, language, stream string) string {
-	return gate + "\x00" + language + "\x00" + stream
 }
 
 type Report struct {

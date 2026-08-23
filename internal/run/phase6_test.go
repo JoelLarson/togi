@@ -209,7 +209,7 @@ func TestRunLedgerRawSinkBindsIdentityAndWritesStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	for stream, want := range map[string]string{"stdout": "out", "stderr": "err"} {
-		contents, err := os.ReadFile(filepath.Join(run.Dir, "raw", rawOutputName("lint", "go", stream)))
+		contents, err := os.ReadFile(filepath.Join(run.Dir, "raw", RawOutputName("lint", "go", stream)))
 		if err != nil || string(contents) != want {
 			t.Fatalf("%s = %q, %v; want %q", stream, contents, err, want)
 		}
@@ -236,7 +236,7 @@ func TestRunLedgerRawSinkEncodesDistinctCompiledIdentitiesWithinRawDirectory(t *
 		if err := sink.WriteRaw("stdout", []byte{byte(index)}); err != nil {
 			t.Fatal(err)
 		}
-		name := rawOutputName(identity[0], identity[1], "stdout")
+		name := RawOutputName(identity[0], identity[1], "stdout")
 		if filepath.Base(name) != name || name == "." || name == ".." || len(name) > 255 {
 			t.Fatalf("raw name escaped or exceeded filesystem limits: %q", name)
 		}

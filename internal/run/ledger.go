@@ -972,7 +972,7 @@ func (run *RunLedger) writeRaw(gate, language, stream string, raw []byte) error 
 	if err := writeRawTemporary(temporary, raw); err != nil {
 		return err
 	}
-	name := rawOutputName(gate, language, stream)
+	name := RawOutputName(gate, language, stream)
 	if err := run.rawRoot.Rename(temporaryName, name); err != nil {
 		return fmt.Errorf("publish raw output: %w", err)
 	}
@@ -983,7 +983,12 @@ func (run *RunLedger) writeRaw(gate, language, stream string, raw []byte) error 
 	return nil
 }
 
-func rawOutputName(gateName, language, stream string) string {
+// RawOutputName is the filename a gate's captured stream is persisted under
+// inside a run's raw directory. Gate and language are folded into a bounded
+// digest so any compiled gate name can be written without weakening ledger
+// confinement, which leaves the name opaque: readers locate an artifact by
+// deriving its name here, not by parsing one off disk.
+func RawOutputName(gateName, language, stream string) string {
 	hash := sha256.New()
 	_, _ = hash.Write([]byte("togi/raw-output-identity/v1\x00"))
 	for _, component := range []string{gateName, language} {

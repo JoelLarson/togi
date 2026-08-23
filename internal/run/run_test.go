@@ -528,8 +528,8 @@ func assertPersistedFixtureRuns(t *testing.T, directories ...string) {
 			t.Fatal("persisted report has no run ID")
 		}
 		for _, name := range []string{
-			rawOutputName("lint", "go", "stdout"), rawOutputName("lint", "go", "stderr"),
-			rawOutputName("complexity", "go", "stdout"), rawOutputName("complexity", "go", "stderr"),
+			RawOutputName("lint", "go", "stdout"), RawOutputName("lint", "go", "stderr"),
+			RawOutputName("complexity", "go", "stdout"), RawOutputName("complexity", "go", "stderr"),
 		} {
 			if _, err := os.Stat(filepath.Join(dir, "raw", name)); err != nil {
 				t.Fatalf("raw %s: %v", name, err)
@@ -661,7 +661,7 @@ func TestServiceRunsGateWithFormerlyUnsafeRawIdentityAlongsideHealthyGate(t *tes
 			t.Fatalf("gate %q = %#v", name, gateReport)
 		}
 		for _, stream := range []string{"stdout", "stderr"} {
-			if _, err := os.Stat(filepath.Join(report.Ref.Dir, "raw", rawOutputName(name, "go", stream))); err != nil {
+			if _, err := os.Stat(filepath.Join(report.Ref.Dir, "raw", RawOutputName(name, "go", stream))); err != nil {
 				t.Fatalf("gate %q raw %s: %v", name, stream, err)
 			}
 		}

@@ -166,11 +166,16 @@ $XDG_STATE_HOME/togi/<repo-id>/
 │   ├── report.json
 │   ├── plan.json          # phase 4
 │   ├── briefs/            # phase 4
-│   └── raw/<gate>.<lang>.stdout
+│   └── raw/gate-<digest>.stdout
 ├── waivers.toml
 ├── ratchet.json           # phase 5
 └── lock
 ```
+
+Raw filenames fold the gate and language into a bounded SHA-256 digest, so any
+compiled gate name persists without a path component derived from it. The name
+is therefore opaque: readers derive it with `run.RawOutputName` rather than
+parsing identity back out of a directory listing.
 
 Runs prune to the most recent 20 at run start, configurable.
 

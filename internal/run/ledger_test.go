@@ -884,7 +884,7 @@ func TestWriteRawPreservesBytes(t *testing.T) {
 	if err := mustRawSink(t, run, "golangci-lint", "go").WriteRaw("stdout", raw); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(run.Dir, "raw", rawOutputName("golangci-lint", "go", "stdout"))
+	path := filepath.Join(run.Dir, "raw", RawOutputName("golangci-lint", "go", "stdout"))
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -947,7 +947,7 @@ func TestRunLedgerWritesRemainAnchoredAfterRepoStateReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	anchoredRun := filepath.Join(movedState, "runs", runID)
-	rawName := rawOutputName("gate", "go", "stdout")
+	rawName := RawOutputName("gate", "go", "stdout")
 	if got, err := os.ReadFile(filepath.Join(anchoredRun, "raw", rawName)); err != nil {
 		t.Fatalf("read anchored raw output: %v", err)
 	} else if string(got) != "anchored" {
@@ -980,7 +980,7 @@ func TestWriteRawCapsOutputIncludingMarker(t *testing.T) {
 	if err := sink.WriteRaw("stderr", raw); err != nil {
 		t.Fatal(err)
 	}
-	got, err := os.ReadFile(filepath.Join(run.Dir, "raw", rawOutputName("gocyclo", "go", "stderr")))
+	got, err := os.ReadFile(filepath.Join(run.Dir, "raw", RawOutputName("gocyclo", "go", "stderr")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -998,7 +998,7 @@ func TestWriteRawCapsOutputIncludingMarker(t *testing.T) {
 	if err := sink.WriteRaw("stdout", exact); err != nil {
 		t.Fatal(err)
 	}
-	got, err = os.ReadFile(filepath.Join(run.Dir, "raw", rawOutputName("gocyclo", "go", "stdout")))
+	got, err = os.ReadFile(filepath.Join(run.Dir, "raw", RawOutputName("gocyclo", "go", "stdout")))
 	if err != nil {
 		t.Fatal(err)
 	}

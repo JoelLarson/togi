@@ -187,11 +187,11 @@ func persistedRawPaths(runDirectory string) (map[string]string, error) {
 		if entry.IsDir() {
 			continue
 		}
-		parts := strings.Split(entry.Name(), ".")
-		if len(parts) != 3 || (parts[2] != "stdout" && parts[2] != "stderr") {
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".stdout") && !strings.HasSuffix(name, ".stderr") {
 			continue
 		}
-		paths[rawPathKey(parts[0], parts[1], parts[2])] = filepath.Join(rawDirectory, entry.Name())
+		paths[name] = filepath.Join(rawDirectory, name)
 	}
 	return paths, nil
 }

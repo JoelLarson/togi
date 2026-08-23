@@ -95,12 +95,13 @@ func TestReportRejectsMalformedUnknownAndTrailingJSON(t *testing.T) {
 
 func TestReportPathAndRawArtifactsAreProvenanceOnly(t *testing.T) {
 	obs := newProcessRunObservation([]byte("rendered report\n"), []byte("diagnostic\n"), 4, validErroredReport, "/state/run/report.json")
-	obs.rawPaths = map[string]string{"lint\x00go\x00stdout": "/state/run/raw/lint-go.stdout"}
+	rawName := run.RawOutputName("lint", "go", "stdout")
+	obs.rawPaths = map[string]string{rawName: "/state/run/raw/" + rawName}
 
 	if got, want := obs.ReportPath(), "/state/run/report.json"; got != want {
 		t.Fatalf("ReportPath() = %q, want %q", got, want)
 	}
-	if got, ok := obs.RawPath("lint", "go", "stdout"); !ok || got != "/state/run/raw/lint-go.stdout" {
+	if got, ok := obs.RawPath("lint", "go", "stdout"); !ok || got != "/state/run/raw/"+rawName {
 		t.Fatalf("RawPath() = %q, %t", got, ok)
 	}
 	if got := obs.Stdout(); strings.Contains(got, "raw/lint") || got != "rendered report\n" {
@@ -112,7 +113,8 @@ func TestObservationCopiesInputBytesAndRawPaths(t *testing.T) {
 	stdout := []byte("stdout")
 	stderr := []byte("stderr")
 	report := append([]byte(nil), validErroredReport...)
-	rawPaths := map[string]string{"gate\x00go\x00stderr": "raw"}
+	rawName := run.RawOutputName("gate", "go", "stderr")
+	rawPaths := map[string]string{rawName: "raw"}
 	obs := newRunObservation(stdout, stderr, processExit{code: 0}, report, "report.json", rawPaths)
 
 	stdout[0] = 'X'
@@ -128,7 +130,7 @@ func TestObservationCopiesInputBytesAndRawPaths(t *testing.T) {
 		t.Fatalf("Report() = %v", err)
 	}
 
-	rawPaths["gate\x00go\x00stderr"] = "changed"
+	rawPaths[rawName] = "changed"
 	if got, _ := obs.RawPath("gate", "go", "stderr"); got != "raw" {
 		t.Fatalf("RawPath() = %q", got)
 	}
