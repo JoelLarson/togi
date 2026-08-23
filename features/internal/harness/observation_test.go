@@ -48,8 +48,9 @@ func TestServiceOutcomeClassifiesWikiAndUnexpectedErrors(t *testing.T) {
 		err  error
 		want int
 	}{
-		{"wiki aliases", wiki.ErrConflictingAliases, 1},
-		{"wrapped wiki aliases", fmt.Errorf("context: %w", wiki.ErrConflictingAliases), 1},
+		{"wiki aliases", &wiki.AliasConflictError{RuleIDs: 2}, 1},
+		{"wrapped wiki aliases", fmt.Errorf("context: %w", &wiki.AliasConflictError{RuleIDs: 2}), 1},
+		{"out of range", &run.ExitError{Code: 99}, 70},
 		{"unexpected", errors.New("broken"), 70},
 		{"nil", nil, 0},
 	} {

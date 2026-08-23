@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/joellarson/togi/internal/run"
-	"github.com/joellarson/togi/internal/wiki"
 )
 
 type Outcome struct {
@@ -24,18 +23,14 @@ type exitSource interface {
 type serviceExit struct{ err error }
 type processExit struct{ code int }
 
+// outcome maps a service error onto a process status the same way the CLI
+// does, so the in-process driver cannot observe an exit code the subprocess
+// would never produce.
 func (e serviceExit) outcome() (Outcome, error) {
 	if e.err == nil {
 		return Outcome{}, nil
 	}
-	var exit *run.ExitError
-	if errors.As(e.err, &exit) {
-		return Outcome{Code: exit.Code, Message: e.err.Error()}, nil
-	}
-	if errors.Is(e.err, wiki.ErrConflictingAliases) {
-		return Outcome{Code: 1, Message: e.err.Error()}, nil
-	}
-	return Outcome{Code: 70, Message: e.err.Error()}, nil
+	return Outcome{Code: run.ResolveExit(e.err), Message: e.err.Error()}, nil
 }
 
 func (e processExit) outcome() (Outcome, error) { return Outcome{Code: e.code}, nil }
