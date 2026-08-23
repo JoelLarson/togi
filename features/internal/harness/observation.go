@@ -144,6 +144,9 @@ type DiffReport struct {
 type GateReport struct {
 	Gate            string    `json:"gate"`
 	Language        string    `json:"language"`
+	Blocking        []string  `json:"blocking"`
+	FixPolicy       string    `json:"fix_policy"`
+	Position        int       `json:"position"`
 	Status          string    `json:"status"`
 	Findings        []Finding `json:"findings,omitempty"`
 	DurationMS      int64     `json:"duration_ms"`
