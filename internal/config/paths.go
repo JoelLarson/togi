@@ -78,6 +78,22 @@ func (p Paths) RunDir(id repoid.ID, runID string) string {
 	return filepath.Join(p.RunsDir(id), runID)
 }
 
+// WorktreesDir returns the cache directory containing togi-owned worktrees for a repository.
+func (p Paths) WorktreesDir(id repoid.ID) string {
+	if p.IsZero() || id.IsZero() {
+		return ""
+	}
+	return filepath.Join(p.cache, id.Key(), "worktrees")
+}
+
+// WorktreeDir returns the cache directory for one run's togi-owned worktree.
+func (p Paths) WorktreeDir(id repoid.ID, runID string) string {
+	if p.IsZero() || id.IsZero() || !validPathComponent(runID) {
+		return ""
+	}
+	return filepath.Join(p.WorktreesDir(id), runID)
+}
+
 func validPathComponent(value string) bool {
 	return value != "" && value != "." && value != ".." &&
 		filepath.Clean(value) == value && !filepath.IsAbs(value) &&

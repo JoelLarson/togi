@@ -53,28 +53,31 @@ var runIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}\.[0-9]{9}Z-[0-9a-f]{4}
 
 // Ledger manages run artifacts below one repository's external state path.
 type Ledger struct {
-	RepoID    string
-	RepoState string
-	RunsDir   string
-	Keep      int
-	Now       func() time.Time
-	Random    io.Reader
+	RepoID        string
+	RepoState     string
+	RunsDir       string
+	Keep          int
+	Now           func() time.Time
+	Random        io.Reader
+	syncDirectory func(*os.Root) error
 }
 
 // RunLedger is one active, exclusively locked run directory.
 type RunLedger struct {
-	Dir      string
-	runID    string
-	repoID   string
-	lock     *stateLock
-	repoRoot *os.Root
-	runsRoot *os.Root
-	runRoot  *os.Root
-	rawRoot  *os.Root
-	mu       sync.Mutex
-	marker   *RunLedger
-	closing  bool
-	closed   bool
+	Dir         string
+	runID       string
+	repoID      string
+	lock        *stateLock
+	repoRoot    *os.Root
+	runsRoot    *os.Root
+	runRoot     *os.Root
+	rawRoot     *os.Root
+	briefRoot   *os.Root
+	adapterRoot *os.Root
+	mu          sync.Mutex
+	marker      *RunLedger
+	closing     bool
+	closed      bool
 }
 
 type directoryBoundary struct {
@@ -84,6 +87,10 @@ type directoryBoundary struct {
 
 // Start acquires the repository lock and creates a new run directory.
 func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
+	syncDirectory := syncRootDirectory
+	if ledger.syncDirectory != nil {
+		syncDirectory = ledger.syncDirectory
+	}
 	if !repoid.ValidKey(ledger.RepoID) {
 		return nil, errors.New("repository ID must be a full lowercase hexadecimal Git or SHA-256 identity")
 	}
@@ -111,6 +118,9 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 	runsDirectory, err := ensureChildDirectoryAt(repoRoot, runsName, ledger.RunsDir)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("prepare runs directory: %w", err), repoRoot.Close())
+	}
+	if err := syncDirectory(repoRoot); err != nil {
+		return nil, errors.Join(fmt.Errorf("sync repository state directory: %w", err), repoRoot.Close())
 	}
 	runsRoot, err := openChildBoundaryRoot(repoRoot, runsName, runsDirectory)
 	if err != nil {
@@ -141,25 +151,63 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 		}
 		return nil, errors.Join(fmt.Errorf("create run directory: %w", err), lock.release())
 	}
-	rawRoot, err := createChildRoot(runRoot, "raw")
+	var rawRoot, briefRoot, adapterRoot *os.Root
+	cleanupRun := func(primary error) error {
+		var cleanupErr error
+		for _, root := range []struct {
+			name string
+			root *os.Root
+		}{
+			{name: "adapter", root: adapterRoot},
+			{name: "briefs", root: briefRoot},
+			{name: "raw", root: rawRoot},
+			{name: "run", root: runRoot},
+		} {
+			if root.root == nil {
+				continue
+			}
+			if err := root.root.Close(); err != nil {
+				cleanupErr = errors.Join(cleanupErr, fmt.Errorf("close partial %s root: %w", root.name, err))
+			}
+		}
+		if err := runsRoot.RemoveAll(runID); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove partial run directory: %w", err))
+		}
+		if err := syncDirectory(runsRoot); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("sync cleanup runs directory: %w", err))
+		}
+		return errors.Join(primary, cleanupErr, lock.release())
+	}
+	rawRoot, err = createChildRoot(runRoot, "raw")
 	if err != nil {
-		return nil, errors.Join(
-			fmt.Errorf("create raw directory: %w", err),
-			runRoot.Close(),
-			runsRoot.RemoveAll(runID),
-			lock.release(),
-		)
+		return nil, cleanupRun(fmt.Errorf("create raw directory: %w", err))
+	}
+	briefRoot, err = createChildRoot(runRoot, "briefs")
+	if err != nil {
+		return nil, cleanupRun(fmt.Errorf("create briefs directory: %w", err))
+	}
+	adapterRoot, err = createChildRoot(runRoot, "adapter")
+	if err != nil {
+		return nil, cleanupRun(fmt.Errorf("create adapter directory: %w", err))
+	}
+	if err := syncDirectory(runRoot); err != nil {
+		return nil, cleanupRun(fmt.Errorf("sync run directory: %w", err))
+	}
+	if err := syncDirectory(runsRoot); err != nil {
+		return nil, cleanupRun(fmt.Errorf("sync runs directory: %w", err))
 	}
 	keepRoots = true
 	run := &RunLedger{
-		Dir:      runDir,
-		runID:    runID,
-		repoID:   ledger.RepoID,
-		lock:     lock,
-		repoRoot: repoRoot,
-		runsRoot: runsRoot,
-		runRoot:  runRoot,
-		rawRoot:  rawRoot,
+		Dir:         runDir,
+		runID:       runID,
+		repoID:      ledger.RepoID,
+		lock:        lock,
+		repoRoot:    repoRoot,
+		runsRoot:    runsRoot,
+		runRoot:     runRoot,
+		rawRoot:     rawRoot,
+		briefRoot:   briefRoot,
+		adapterRoot: adapterRoot,
 	}
 	run.marker = run
 	return run, nil
@@ -920,6 +968,159 @@ func writeReportTemporary(temporary *os.File, report Report) error {
 	return nil
 }
 
+// WritePlan atomically persists the current action plan, replacing any prior version.
+func (run *RunLedger) WritePlan(raw []byte) error {
+	if run == nil || run.marker != run {
+		return ErrUninitialized
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if run.closed || run.closing {
+		return ErrClosed
+	}
+	temporary, temporaryName, err := createRootTemp(run.runRoot, "plan")
+	if err != nil {
+		return fmt.Errorf("create temporary plan: %w", err)
+	}
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			_ = run.runRoot.Remove(temporaryName)
+		}
+	}()
+	if err := writeArtifactTemporary(temporary, raw, 0); err != nil {
+		return fmt.Errorf("write plan: %w", err)
+	}
+	if err := run.runRoot.Rename(temporaryName, "plan.json"); err != nil {
+		return fmt.Errorf("publish plan: %w", err)
+	}
+	removeTemporary = false
+	if err := syncRootDirectory(run.runRoot); err != nil {
+		return fmt.Errorf("sync run directory: %w", err)
+	}
+	return nil
+}
+
+// WriteBrief persists one immutable agent brief.
+func (run *RunLedger) WriteBrief(batchID string, attempt int, raw []byte) error {
+	return run.writeAttemptArtifact(runBriefArtifact, batchID, attempt, raw)
+}
+
+// WriteAdapterJSONL persists one immutable, bounded adapter protocol log.
+func (run *RunLedger) WriteAdapterJSONL(batchID string, attempt int, raw []byte) error {
+	return run.writeAttemptArtifact(runAdapterArtifact, batchID, attempt, raw)
+}
+
+type runArtifactKind int
+
+const (
+	runBriefArtifact runArtifactKind = iota
+	runAdapterArtifact
+)
+
+func (run *RunLedger) writeAttemptArtifact(kind runArtifactKind, batchID string, attempt int, raw []byte) error {
+	if run == nil || run.marker != run {
+		return ErrUninitialized
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if run.closed || run.closing {
+		return ErrClosed
+	}
+	if !validArtifactBatchID(batchID) {
+		return fmt.Errorf("invalid batch ID %q", batchID)
+	}
+	if attempt <= 0 {
+		return fmt.Errorf("attempt must be positive")
+	}
+	root := run.briefRoot
+	extension := ".txt"
+	limit := 0
+	label := "brief"
+	temporaryPrefix := "brief"
+	if kind == runAdapterArtifact {
+		root = run.adapterRoot
+		extension = ".jsonl"
+		limit = rawOutputLimit
+		label = "adapter JSONL"
+		temporaryPrefix = "adapter"
+	}
+	name := "attempt-" + attemptArtifactDigest(batchID, attempt) + extension
+	if _, err := root.Lstat(name); err == nil {
+		return fmt.Errorf("%s already exists", label)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect %s path: %w", label, err)
+	}
+	temporary, temporaryName, err := createRootTemp(root, temporaryPrefix)
+	if err != nil {
+		return fmt.Errorf("create temporary %s: %w", label, err)
+	}
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			_ = root.Remove(temporaryName)
+		}
+	}()
+	if err := writeArtifactTemporary(temporary, raw, limit); err != nil {
+		return fmt.Errorf("write %s: %w", label, err)
+	}
+	if err := root.Link(temporaryName, name); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("%s already exists", label)
+		}
+		return fmt.Errorf("publish %s: %w", label, err)
+	}
+	if err := root.Remove(temporaryName); err != nil {
+		return fmt.Errorf("remove published %s temporary file: %w", label, err)
+	}
+	removeTemporary = false
+	if err := syncRootDirectory(root); err != nil {
+		return fmt.Errorf("sync %s directory: %w", label, err)
+	}
+	return nil
+}
+
+func validArtifactBatchID(batchID string) bool {
+	return batchID != "" && batchID != "." && batchID != ".." &&
+		filepath.Clean(batchID) == batchID && !filepath.IsAbs(batchID) &&
+		!strings.ContainsAny(batchID, `/\:`)
+}
+
+func attemptArtifactDigest(batchID string, attempt int) string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("togi/attempt-artifact-identity/v1\x00"))
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], uint64(len(batchID)))
+	_, _ = hash.Write(encoded[:])
+	_, _ = hash.Write([]byte(batchID))
+	binary.BigEndian.PutUint64(encoded[:], uint64(attempt))
+	_, _ = hash.Write(encoded[:])
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func writeArtifactTemporary(temporary *os.File, raw []byte, limit int) error {
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("set artifact permissions: %w", err)
+	}
+	output := raw
+	if limit > 0 && len(output) > limit {
+		output = append(append(make([]byte, 0, limit), raw[:limit-len(rawTruncationMarker)]...), rawTruncationMarker...)
+	}
+	if _, err := temporary.Write(output); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return nil
+}
+
 type ledgerRawSink struct {
 	run      *RunLedger
 	gate     string
@@ -1038,7 +1239,7 @@ func (run *RunLedger) Close() error {
 		return err
 	}
 	var closeErr error
-	for _, root := range []**os.Root{&run.rawRoot, &run.runRoot, &run.runsRoot, &run.repoRoot} {
+	for _, root := range []**os.Root{&run.adapterRoot, &run.briefRoot, &run.rawRoot, &run.runRoot, &run.runsRoot, &run.repoRoot} {
 		if *root == nil {
 			continue
 		}

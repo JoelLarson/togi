@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,6 +118,12 @@ func TestPathsDerivedDirectories(t *testing.T) {
 	if got, want := p.RunDir(id, "run-id"), filepath.Join(root, "state", "togi", id.Key(), "runs", "run-id"); got != want {
 		t.Fatalf("RunDir = %q, want %q", got, want)
 	}
+	if got, want := p.WorktreesDir(id), filepath.Join(root, "cache", "togi", id.Key(), "worktrees"); got != want {
+		t.Fatalf("WorktreesDir = %q, want %q", got, want)
+	}
+	if got, want := p.WorktreeDir(id, "run-id"), filepath.Join(root, "cache", "togi", id.Key(), "worktrees", "run-id"); got != want {
+		t.Fatalf("WorktreeDir = %q, want %q", got, want)
+	}
 	if got, want := p.GateOverrides(), filepath.Join(root, "config", "togi", "gates"); got != want {
 		t.Fatalf("GateOverrides = %q, want %q", got, want)
 	}
@@ -140,10 +147,49 @@ func TestPathsZeroValueIsUnusable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for name, got := range map[string]string{"gates": paths.GateOverrides(), "wiki": paths.Wiki(), "state": paths.RepoState(id), "runs": paths.RunsDir(id), "run": paths.RunDir(id, "run-id")} {
+	for name, got := range map[string]string{"gates": paths.GateOverrides(), "wiki": paths.Wiki(), "state": paths.RepoState(id), "runs": paths.RunsDir(id), "run": paths.RunDir(id, "run-id"), "worktrees": paths.WorktreesDir(id), "worktree": paths.WorktreeDir(id, "run-id")} {
 		if got != "" {
 			t.Fatalf("zero Paths %s = %q, want empty", name, got)
 		}
+	}
+}
+
+func TestWorktreePathsRejectZeroRepositoryIdentity(t *testing.T) {
+	root := t.TempDir()
+	paths, err := Resolve(testEnvironment("", map[string]string{"XDG_CONFIG_HOME": filepath.Join(root, "config"), "XDG_STATE_HOME": filepath.Join(root, "state"), "XDG_CACHE_HOME": filepath.Join(root, "cache")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id repoid.ID
+	if got := paths.WorktreesDir(id); got != "" {
+		t.Fatalf("WorktreesDir(zero ID) = %q, want empty", got)
+	}
+	if got := paths.WorktreeDir(id, "run-id"); got != "" {
+		t.Fatalf("WorktreeDir(zero ID) = %q, want empty", got)
+	}
+}
+
+func TestWorktreeDirRejectsUnsafeComponentsAndCreatesNothing(t *testing.T) {
+	repositoryRoot := t.TempDir()
+	root := filepath.Join(repositoryRoot, "does-not-exist")
+	paths, err := Resolve(testEnvironment("", map[string]string{"XDG_CONFIG_HOME": filepath.Join(root, "config"), "XDG_STATE_HOME": filepath.Join(root, "state"), "XDG_CACHE_HOME": filepath.Join(root, "cache")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := repoid.New(strings.Repeat("a", 40), repositoryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runID := range []string{"", ".", "..", "../escape", "nested/run", `nested\run`, "/absolute", `C:\absolute`, `\\server\share`} {
+		if got := paths.WorktreeDir(id, runID); got != "" {
+			t.Fatalf("WorktreeDir(%q) = %q, want empty", runID, got)
+		}
+	}
+	if got, want := paths.WorktreeDir(id, "run-id"), filepath.Join(paths.WorktreesDir(id), "run-id"); got != want {
+		t.Fatalf("WorktreeDir(valid) = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("worktree path calculation created %q or returned unexpected error: %v", root, err)
 	}
 }
 

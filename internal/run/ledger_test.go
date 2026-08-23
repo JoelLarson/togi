@@ -2,6 +2,9 @@ package run
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,6 +66,8 @@ func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
 		filepath.Join(repoState, "runs"),
 		run.Dir,
 		filepath.Join(run.Dir, "raw"),
+		filepath.Join(run.Dir, "briefs"),
+		filepath.Join(run.Dir, "adapter"),
 	} {
 		info, statErr := os.Stat(path)
 		if statErr != nil {
@@ -96,6 +101,293 @@ func TestLedgerCreatesSortableRunAndAtomicReport(t *testing.T) {
 		t.Fatal(err)
 	} else if len(matches) != 0 {
 		t.Fatalf("atomic report left temporary files: %v", matches)
+	}
+}
+
+func TestLedgerStartSyncsCreatedDirectoryEntries(t *testing.T) {
+	repoState := filepath.Join(t.TempDir(), "repo-state")
+	runsDir := filepath.Join(repoState, "runs")
+	var synced []string
+	ledger := testLedger(repoState)
+	ledger.Now = func() time.Time { return fixedTime }
+	ledger.Random = bytes.NewReader([]byte{0xa3, 0xf1})
+	ledger.syncDirectory = func(root *os.Root) error {
+		synced = append(synced, filepath.Clean(root.Name()))
+		return syncRootDirectory(root)
+	}
+	run, err := ledger.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.Close() })
+	want := []string{repoState, run.Dir, runsDir}
+	if !reflect.DeepEqual(synced, want) {
+		t.Fatalf("synced directories = %q, want %q", synced, want)
+	}
+}
+
+func TestLedgerStartCleansUpAfterDirectorySyncFailure(t *testing.T) {
+	syncErr := errors.New("injected directory sync failure")
+	for _, test := range []struct {
+		name        string
+		failedRoot  string
+		wantContext string
+		wantSynced  []string
+	}{
+		{name: "repository state", failedRoot: "repo-state", wantContext: "sync repository state directory", wantSynced: []string{"repo-state"}},
+		{name: "run", failedRoot: "20260821T151230.123456789Z-a3f1", wantContext: "sync run directory", wantSynced: []string{"repo-state", "20260821T151230.123456789Z-a3f1", "runs"}},
+		{name: "runs", failedRoot: "runs", wantContext: "sync runs directory", wantSynced: []string{"repo-state", "20260821T151230.123456789Z-a3f1", "runs", "runs"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repoState := filepath.Join(t.TempDir(), "repo-state")
+			ledger := testLedger(repoState)
+			ledger.Now = func() time.Time { return fixedTime }
+			ledger.Random = bytes.NewReader([]byte{0xa3, 0xf1})
+			var synced []string
+			failed := false
+			ledger.syncDirectory = func(root *os.Root) error {
+				name := filepath.Base(filepath.Clean(root.Name()))
+				synced = append(synced, name)
+				if name == test.failedRoot && !failed {
+					failed = true
+					return syncErr
+				}
+				return syncRootDirectory(root)
+			}
+			run, err := ledger.Start()
+			if run != nil {
+				_ = run.Close()
+				t.Fatal("Start returned a usable ledger after sync failure")
+			}
+			if !errors.Is(err, syncErr) || !strings.Contains(err.Error(), test.wantContext) {
+				t.Fatalf("Start error = %v, want %q wrapping sync failure", err, test.wantContext)
+			}
+			runDir := filepath.Join(repoState, "runs", "20260821T151230.123456789Z-a3f1")
+			if _, statErr := os.Stat(runDir); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("partial run directory remains after sync failure: %v", statErr)
+			}
+			if !reflect.DeepEqual(synced, test.wantSynced) {
+				t.Fatalf("synced directories = %q, want %q", synced, test.wantSynced)
+			}
+			next, nextErr := (testLedger(repoState)).Start()
+			if nextErr != nil {
+				t.Fatalf("lock remained held after sync failure: %v", nextErr)
+			}
+			if err := next.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestLedgerStartJoinsCleanupDirectorySyncFailure(t *testing.T) {
+	primaryErr := errors.New("injected run sync failure")
+	cleanupErr := errors.New("injected cleanup sync failure")
+	repoState := filepath.Join(t.TempDir(), "repo-state")
+	ledger := testLedger(repoState)
+	ledger.Now = func() time.Time { return fixedTime }
+	ledger.Random = bytes.NewReader([]byte{0xa3, 0xf1})
+	ledger.syncDirectory = func(root *os.Root) error {
+		switch filepath.Base(filepath.Clean(root.Name())) {
+		case "20260821T151230.123456789Z-a3f1":
+			return primaryErr
+		case "runs":
+			return cleanupErr
+		default:
+			return syncRootDirectory(root)
+		}
+	}
+	run, err := ledger.Start()
+	if run != nil {
+		_ = run.Close()
+		t.Fatal("Start returned a usable ledger after sync failure")
+	}
+	if !errors.Is(err, primaryErr) || !errors.Is(err, cleanupErr) {
+		t.Fatalf("Start error = %v, want primary and cleanup sync failures", err)
+	}
+	for _, context := range []string{"sync run directory", "sync cleanup runs directory"} {
+		if !strings.Contains(err.Error(), context) {
+			t.Errorf("Start error = %v, want %q context", err, context)
+		}
+	}
+	if _, statErr := os.Stat(filepath.Join(repoState, "runs", "20260821T151230.123456789Z-a3f1")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("partial run directory remains after cleanup sync failure: %v", statErr)
+	}
+	next, nextErr := (testLedger(repoState)).Start()
+	if nextErr != nil {
+		t.Fatalf("lock remained held after cleanup sync failure: %v", nextErr)
+	}
+	if err := next.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWritePlanAtomicallyReplacesPrivateArtifact(t *testing.T) {
+	run, err := (testLedger(t.TempDir())).Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.Close() })
+	first := []byte(`{"status":"pending"}`)
+	second := []byte(`{"status":"running"}`)
+	if err := run.WritePlan(first); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(run.Dir, "plan.json")
+	old, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = old.Close() }()
+	if err := run.WritePlan(second); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(path); err != nil {
+		t.Fatal(err)
+	} else if !bytes.Equal(got, second) {
+		t.Fatalf("plan = %q, want %q", got, second)
+	}
+	if got, err := io.ReadAll(old); err != nil {
+		t.Fatal(err)
+	} else if !bytes.Equal(got, first) {
+		t.Fatalf("opened plan changed in place: got %q, want %q", got, first)
+	}
+	assertPrivateFile(t, path)
+	if matches, err := filepath.Glob(filepath.Join(run.Dir, ".plan-*.tmp")); err != nil {
+		t.Fatal(err)
+	} else if len(matches) != 0 {
+		t.Fatalf("atomic plan left temporary files: %v", matches)
+	}
+}
+
+func TestWriteBriefAndAdapterJSONLCreateImmutablePrivateArtifacts(t *testing.T) {
+	run, err := (testLedger(t.TempDir())).Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.Close() })
+	const batchID = "batch-1"
+	const attempt = 2
+	brief := []byte("fix the finding\n")
+	log := []byte("{\"type\":\"turn.completed\"}\n")
+	if err := run.WriteBrief(batchID, attempt, brief); err != nil {
+		t.Fatal(err)
+	}
+	if err := run.WriteAdapterJSONL(batchID, attempt, log); err != nil {
+		t.Fatal(err)
+	}
+	digest := expectedArtifactAttemptDigest(batchID, attempt)
+	briefPath := filepath.Join(run.Dir, "briefs", "attempt-"+digest+".txt")
+	adapterPath := filepath.Join(run.Dir, "adapter", "attempt-"+digest+".jsonl")
+	for path, want := range map[string][]byte{briefPath: brief, adapterPath: log} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+		assertPrivateFile(t, path)
+	}
+	if err := run.WriteBrief(batchID, attempt, []byte("replacement")); err == nil {
+		t.Fatal("WriteBrief replaced an existing attempt")
+	}
+	if err := run.WriteAdapterJSONL(batchID, attempt, []byte("replacement")); err == nil {
+		t.Fatal("WriteAdapterJSONL replaced an existing attempt")
+	}
+	if got, err := os.ReadFile(briefPath); err != nil || !bytes.Equal(got, brief) {
+		t.Fatalf("brief changed after duplicate write: contents=%q error=%v", got, err)
+	}
+	if got, err := os.ReadFile(adapterPath); err != nil || !bytes.Equal(got, log) {
+		t.Fatalf("adapter log changed after duplicate write: contents=%q error=%v", got, err)
+	}
+	for _, pattern := range []string{
+		filepath.Join(run.Dir, "briefs", ".brief-*.tmp"),
+		filepath.Join(run.Dir, "adapter", ".adapter-*.tmp"),
+	} {
+		if matches, err := filepath.Glob(pattern); err != nil {
+			t.Fatal(err)
+		} else if len(matches) != 0 {
+			t.Fatalf("immutable artifact left temporary files: %v", matches)
+		}
+	}
+}
+
+func TestWriteAdapterJSONLCapsArtifactAtOneMiB(t *testing.T) {
+	run, err := (testLedger(t.TempDir())).Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.Close() })
+	raw := bytes.Repeat([]byte("x"), (1<<20)+1)
+	if err := run.WriteAdapterJSONL("batch-1", 1, raw); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(run.Dir, "adapter", "attempt-"+expectedArtifactAttemptDigest("batch-1", 1)+".jsonl")
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1<<20 {
+		t.Fatalf("adapter JSONL length = %d, want %d", len(got), 1<<20)
+	}
+	if !bytes.HasSuffix(got, rawTruncationMarker) {
+		t.Fatalf("adapter JSONL lacks truncation marker: %q", got[len(got)-len(rawTruncationMarker):])
+	}
+	exact := bytes.Repeat([]byte("y"), 1<<20)
+	if err := run.WriteAdapterJSONL("batch-1", 2, exact); err != nil {
+		t.Fatal(err)
+	}
+	exactPath := filepath.Join(run.Dir, "adapter", "attempt-"+expectedArtifactAttemptDigest("batch-1", 2)+".jsonl")
+	if got, err := os.ReadFile(exactPath); err != nil || !bytes.Equal(got, exact) {
+		t.Fatalf("adapter JSONL at limit changed: equal=%t error=%v", bytes.Equal(got, exact), err)
+	}
+}
+
+func TestAttemptArtifactsRejectUnsafeIdentities(t *testing.T) {
+	run, err := (testLedger(t.TempDir())).Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.Close() })
+	for _, batchID := range []string{"", ".", "..", "../escape", "nested/batch", `nested\batch`, "/absolute", `C:\absolute`, `\\server\share`} {
+		if err := run.WriteBrief(batchID, 1, []byte("brief")); err == nil {
+			t.Errorf("WriteBrief accepted batch ID %q", batchID)
+		}
+		if err := run.WriteAdapterJSONL(batchID, 1, []byte("log")); err == nil {
+			t.Errorf("WriteAdapterJSONL accepted batch ID %q", batchID)
+		}
+	}
+	for _, attempt := range []int{-1, 0} {
+		if err := run.WriteBrief("batch-1", attempt, []byte("brief")); err == nil {
+			t.Errorf("WriteBrief accepted attempt %d", attempt)
+		}
+		if err := run.WriteAdapterJSONL("batch-1", attempt, []byte("log")); err == nil {
+			t.Errorf("WriteAdapterJSONL accepted attempt %d", attempt)
+		}
+	}
+}
+
+func expectedArtifactAttemptDigest(batchID string, attempt int) string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("togi/attempt-artifact-identity/v1\x00"))
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], uint64(len(batchID)))
+	_, _ = hash.Write(encoded[:])
+	_, _ = hash.Write([]byte(batchID))
+	binary.BigEndian.PutUint64(encoded[:], uint64(attempt))
+	_, _ = hash.Write(encoded[:])
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func assertPrivateFile(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !privateFileMode(info.Mode()) {
+		t.Errorf("mode for %s is not private: %04o", path, info.Mode().Perm())
 	}
 }
 
@@ -926,9 +1218,11 @@ func TestRunLedgerWritesRemainAnchoredAfterRepoStateReplacement(t *testing.T) {
 	}
 	externalState := filepath.Join(root, "external-state")
 	externalRun := filepath.Join(externalState, "runs", runID)
-	if err := os.MkdirAll(filepath.Join(externalRun, "raw"), 0o700); err != nil {
-		_ = run.Close()
-		t.Fatal(err)
+	for _, directory := range []string{"raw", "briefs", "adapter"} {
+		if err := os.MkdirAll(filepath.Join(externalRun, directory), 0o700); err != nil {
+			_ = run.Close()
+			t.Fatal(err)
+		}
 	}
 	if err := os.Symlink(externalState, repoState); err != nil {
 		_ = run.Close()
@@ -940,6 +1234,18 @@ func TestRunLedgerWritesRemainAnchoredAfterRepoStateReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := run.WriteReport(completeReportFixture(runID)); err != nil {
+		_ = run.Close()
+		t.Fatal(err)
+	}
+	if err := run.WritePlan([]byte("anchored plan")); err != nil {
+		_ = run.Close()
+		t.Fatal(err)
+	}
+	if err := run.WriteBrief("batch-1", 1, []byte("anchored brief")); err != nil {
+		_ = run.Close()
+		t.Fatal(err)
+	}
+	if err := run.WriteAdapterJSONL("batch-1", 1, []byte("anchored adapter")); err != nil {
 		_ = run.Close()
 		t.Fatal(err)
 	}
@@ -956,9 +1262,22 @@ func TestRunLedgerWritesRemainAnchoredAfterRepoStateReplacement(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(anchoredRun, "report.json")); err != nil {
 		t.Fatalf("anchored report missing: %v", err)
 	}
+	digest := expectedArtifactAttemptDigest("batch-1", 1)
+	for path, want := range map[string]string{
+		filepath.Join(anchoredRun, "plan.json"):                           "anchored plan",
+		filepath.Join(anchoredRun, "briefs", "attempt-"+digest+".txt"):    "anchored brief",
+		filepath.Join(anchoredRun, "adapter", "attempt-"+digest+".jsonl"): "anchored adapter",
+	} {
+		if got, err := os.ReadFile(path); err != nil || string(got) != want {
+			t.Fatalf("read anchored artifact %s: contents=%q error=%v", path, got, err)
+		}
+	}
 	for _, path := range []string{
 		filepath.Join(externalRun, "raw", rawName),
 		filepath.Join(externalRun, "report.json"),
+		filepath.Join(externalRun, "plan.json"),
+		filepath.Join(externalRun, "briefs", "attempt-"+digest+".txt"),
+		filepath.Join(externalRun, "adapter", "attempt-"+digest+".jsonl"),
 	} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("artifact escaped to replacement tree %s: %v", path, err)
@@ -1055,6 +1374,15 @@ func TestRunLedgerRejectsWritesAfterClose(t *testing.T) {
 	if err := run.WriteReport(Report{SchemaVersion: 1}); !errors.Is(err, ErrClosed) {
 		t.Errorf("WriteReport after Close = %v, want ErrClosed", err)
 	}
+	if err := run.WritePlan([]byte("plan")); !errors.Is(err, ErrClosed) {
+		t.Errorf("WritePlan after Close = %v, want ErrClosed", err)
+	}
+	if err := run.WriteBrief("batch-1", 1, []byte("brief")); !errors.Is(err, ErrClosed) {
+		t.Errorf("WriteBrief after Close = %v, want ErrClosed", err)
+	}
+	if err := run.WriteAdapterJSONL("batch-1", 1, []byte("log")); !errors.Is(err, ErrClosed) {
+		t.Errorf("WriteAdapterJSONL after Close = %v, want ErrClosed", err)
+	}
 }
 
 func TestRunLedgerRejectsUninitializedValue(t *testing.T) {
@@ -1064,6 +1392,15 @@ func TestRunLedgerRejectsUninitializedValue(t *testing.T) {
 	}
 	if err := run.WriteReport(Report{SchemaVersion: 1}); !errors.Is(err, ErrUninitialized) {
 		t.Errorf("WriteReport on zero value = %v, want ErrUninitialized", err)
+	}
+	if err := run.WritePlan([]byte("plan")); !errors.Is(err, ErrUninitialized) {
+		t.Errorf("WritePlan on zero value = %v, want ErrUninitialized", err)
+	}
+	if err := run.WriteBrief("batch-1", 1, []byte("brief")); !errors.Is(err, ErrUninitialized) {
+		t.Errorf("WriteBrief on zero value = %v, want ErrUninitialized", err)
+	}
+	if err := run.WriteAdapterJSONL("batch-1", 1, []byte("log")); !errors.Is(err, ErrUninitialized) {
+		t.Errorf("WriteAdapterJSONL on zero value = %v, want ErrUninitialized", err)
 	}
 	if err := run.Close(); !errors.Is(err, ErrUninitialized) {
 		t.Errorf("Close on zero value = %v, want ErrUninitialized", err)
