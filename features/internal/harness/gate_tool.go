@@ -157,7 +157,7 @@ func (e *Environment) WriteGate(definition GateDefinition) error {
 		definition.SeverityMap = map[string]string{"default": "warning"}
 	}
 
-	root := filepath.Join(e.ConfigRoot, "gates", definition.Name)
+	root := filepath.Join(e.Paths().GateOverrides(), definition.Name)
 	if err := os.MkdirAll(filepath.Join(root, "go"), 0o700); err != nil {
 		return fmt.Errorf("create gate fixture %q: %w", definition.Name, err)
 	}
@@ -198,7 +198,7 @@ func (e *Environment) WriteInvalidGate(name, contents string) error {
 	if err := validateFixtureName("gate", name); err != nil {
 		return err
 	}
-	root := filepath.Join(e.ConfigRoot, "gates", name)
+	root := filepath.Join(e.Paths().GateOverrides(), name)
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return fmt.Errorf("create invalid gate fixture: %w", err)
 	}

@@ -66,7 +66,7 @@ func (d serviceGauntlet) Run(ctx context.Context, request RunRequest) (RunObserv
 	if len(created) != 1 {
 		return RunObservation{}, fmt.Errorf("service run created %d run directories", len(created))
 	}
-	reportPath := filepath.Join(d.environment.StateRoot, after.directory, "runs", created[0], "report.json")
+	reportPath := after.reportPath(created[0])
 	report, err := os.ReadFile(reportPath)
 	if err != nil {
 		return RunObservation{}, fmt.Errorf("read persisted report %q: %w", reportPath, err)
@@ -83,8 +83,8 @@ func (d serviceGauntlet) Close() error { return nil }
 func (d serviceGauntlet) service(stdout, stderr *bytes.Buffer) run.Service {
 	env := d.environment
 	return run.Service{
-		Paths:    config.Paths{Config: env.ConfigRoot, State: env.StateRoot, Cache: env.CacheRoot},
-		Loader:   gate.Loader{OverrideDir: filepath.Join(env.ConfigRoot, "gates")},
+		Paths:    env.Paths(),
+		Loader:   gate.Loader{OverrideDir: env.Paths().GateOverrides()},
 		Executor: run.Executor{Enrichers: enricher.NewRegistry(), Now: env.clock.Now},
 		Stdout:   stdout, VerboseOut: stderr, Now: env.clock.Now, Random: env.random,
 		GOOS: env.GOOS, ResolveRepo: env.resolveRepo,
@@ -116,16 +116,23 @@ func (d serviceWiki) invoke(action func(wiki.Service) error) (CommandObservation
 	var stdout, stderr bytes.Buffer
 	env := d.environment
 	err := action(wiki.Service{
-		Pages:  wiki.Loader{OverrideDir: filepath.Join(env.ConfigRoot, "wiki")},
-		Gates:  gate.Loader{OverrideDir: filepath.Join(env.ConfigRoot, "gates")},
+		Pages:  wiki.Loader{OverrideDir: env.Paths().Wiki()},
+		Gates:  gate.Loader{OverrideDir: env.Paths().GateOverrides()},
 		Stdout: &stdout, Stderr: &stderr,
 	})
 	return CommandObservation{stdout: cloneBytes(stdout.Bytes()), stderr: cloneBytes(stderr.Bytes()), source: serviceExit{err: err}}, nil
 }
 
 type runSnapshot struct {
-	directory string
-	runs      map[string]struct{}
+	paths      config.Paths
+	repository repoid.ID
+	runs       map[string]struct{}
+}
+
+// reportPath locates a run's persisted report through the same layout the
+// service writes it to.
+func (s runSnapshot) reportPath(runID string) string {
+	return filepath.Join(s.paths.RunDir(s.repository, runID), "report.json")
 }
 
 func snapshotRuns(ctx context.Context, environment *Environment, root string) (runSnapshot, error) {
@@ -136,26 +143,27 @@ func snapshotRuns(ctx context.Context, environment *Environment, root string) (r
 	if err != nil {
 		return runSnapshot{}, fmt.Errorf("resolve repository for run snapshot: %w", err)
 	}
-	directory := repository.Directory
-	runsRoot := filepath.Join(environment.StateRoot, directory, "runs")
-	entries, err := os.ReadDir(runsRoot)
+	paths := environment.Paths()
+	entries, err := os.ReadDir(paths.RunsDir(repository))
+	snapshot := runSnapshot{paths: paths, repository: repository}
 	if errors.Is(err, os.ErrNotExist) {
-		return runSnapshot{directory: directory, runs: make(map[string]struct{})}, nil
+		snapshot.runs = make(map[string]struct{})
+		return snapshot, nil
 	}
 	if err != nil {
 		return runSnapshot{}, fmt.Errorf("read run directory snapshot: %w", err)
 	}
-	runs := make(map[string]struct{}, len(entries))
+	snapshot.runs = make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
-			runs[entry.Name()] = struct{}{}
+			snapshot.runs[entry.Name()] = struct{}{}
 		}
 	}
-	return runSnapshot{directory: directory, runs: runs}, nil
+	return snapshot, nil
 }
 
 func newRuns(before, after runSnapshot) []string {
-	if before.directory != after.directory {
+	if before.repository.Key() != after.repository.Key() {
 		return nil
 	}
 	created := make([]string, 0)

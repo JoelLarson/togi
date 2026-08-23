@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cucumber/godog"
+	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/repoid"
 )
 
@@ -77,6 +78,7 @@ type Environment struct {
 	path       string
 	goModCache string
 	goCache    string
+	paths      config.Paths
 	resolves   atomic.Int64
 	clock      *scenarioClock
 	random     *scenarioRandom
@@ -116,6 +118,12 @@ func NewEnvironment() (*Environment, error) {
 		clock:      newScenarioClock(),
 		random:     &scenarioRandom{},
 	}
+	paths, err := config.Resolve(config.Environment{Home: e.Home, Getenv: func(key string) string { return e.valuesLocked()[key] }})
+	if err != nil {
+		_ = os.RemoveAll(tempRoot)
+		return nil, fmt.Errorf("resolve scenario storage paths: %w", err)
+	}
+	e.paths = paths
 	for _, path := range []string{e.Home, e.ConfigRoot, e.StateRoot, e.CacheRoot, e.BinRoot} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
 			_ = os.RemoveAll(tempRoot)
@@ -221,8 +229,13 @@ func (e *Environment) RepoState(ctx context.Context, root string) (string, error
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(e.StateRoot, id.Directory), nil
+	return e.paths.RepoState(id), nil
 }
+
+// Paths reports the storage roots togi resolves from this scenario's
+// environment. Both drivers read external state through it, so the in-process
+// service and the CLI subprocess observe one layout.
+func (e *Environment) Paths() config.Paths { return e.paths }
 
 type scenarioClock struct {
 	mu   sync.Mutex

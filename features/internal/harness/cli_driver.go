@@ -79,7 +79,7 @@ func (d cliGauntlet) Run(ctx context.Context, request RunRequest) (RunObservatio
 	if len(created) != 1 {
 		return RunObservation{}, fmt.Errorf("CLI run created %d run directories", len(created))
 	}
-	reportPath := filepath.Join(d.environment.StateRoot, after.directory, "runs", created[0], "report.json")
+	reportPath := after.reportPath(created[0])
 	report, err := os.ReadFile(reportPath)
 	if err != nil {
 		return RunObservation{}, fmt.Errorf("read persisted report %q: %w", reportPath, err)
