@@ -29,49 +29,42 @@ func newDiffFeature(factory harness.DriverFactory) *diffFeature {
 func (f *diffFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Before(f.before)
 	sc.After(f.world.After)
-	for _, bind := range []struct {
-		expression string
-		step       any
-	}{
-		{`^a committed feature branch with two possible bases$`, f.twoBases},
-		{`^a gate finding belongs only to the explicitly based diff$`, f.explicitFinding},
-		{`^I run the gauntlet with the older base$`, f.runOlder},
-		{`^the report records the explicit base and its merge base$`, f.explicitRecorded},
-		{`^the finding is in scope$`, f.oneFinding},
-		{`^a committed feature branch whose origin HEAD points to "([^"]*)"$`, f.originHead},
-		{`^I run the gauntlet without a base$`, f.runAutomatic},
-		{`^the report base is "([^"]*)"$`, f.reportBase},
-		{`^a committed feature branch from local "([^"]*)" without a remote$`, f.localTrunk},
-		{`^trunk and the feature branch diverged after a shared commit$`, f.diverged},
-		{`^a gate reports findings on both branches' changes$`, f.bothBranches},
-		{`^I run the gauntlet against trunk$`, f.runTrunk},
-		{`^the report merge base is the shared commit$`, f.mergeBase},
-		{`^only the feature finding is in scope$`, f.onlyFeature},
-		{`^a committed feature changes line 8 but not line 3$`, f.pointLines},
-		{`^a diff-scoped gate reports point findings on lines 3 and 8$`, f.pointGate},
-		{`^I run the gauntlet$`, f.runDefault},
-		{`^only the finding on line 8 remains$`, f.lineEight},
-		{`^a committed feature changes the body of function "([^"]*)"$`, f.entityChange},
-		{`^a diff-scoped gate reports an entity finding on the function signature$`, f.entityGate},
-		{`^the structural finding for "([^"]*)" remains$`, f.structural},
-		{`^a committed feature changes "([^"]*)"$`, f.repoChange},
-		{`^a whole-repo gate reports a finding in "([^"]*)"$`, f.repoGate},
-		{`^the finding in "([^"]*)" remains$`, f.findingFile},
-		{`^a committed feature deletes line 5 from "([^"]*)"$`, f.deleteLine},
-		{`^a diff-scoped gate reports a point finding at the deletion location$`, f.deletionGate},
-		{`^the deletion finding remains in scope$`, f.oneFinding},
-		{`^a committed feature renames "([^"]*)" to "([^"]*)"$`, f.rename},
-		{`^a gate reports a finding in "([^"]*)"$`, f.namedFinding},
-		{`^the report records the finding in "([^"]*)"$`, f.findingFile},
-		{`^a committed feature changes the binary file "([^"]*)"$`, f.binary},
-		{`^the diff records one changed file and zero changed lines$`, f.binaryRecorded},
-		{`^a repository with (.*)$`, f.invalidRepository},
-		{`^a gate that records whether it starts$`, f.markerGate},
-		{`^the run is rejected for the (.*)$`, f.rejected},
-		{`^no gate, ledger, or target-repository file is created$`, f.noSideEffects},
-	} {
-		sc.Step(bind.expression, bind.step)
-	}
+	sc.Step(`^a committed feature branch with two possible bases$`, f.twoBases)
+	sc.Step(`^a gate finding belongs only to the explicitly based diff$`, f.explicitFinding)
+	sc.Step(`^I run the gauntlet with the older base$`, f.runOlder)
+	sc.Step(`^the report records the explicit base and its merge base$`, f.explicitRecorded)
+	sc.Step(`^the finding is in scope$`, f.oneFinding)
+	sc.Step(`^a committed feature branch whose origin HEAD points to "([^"]*)"$`, f.originHead)
+	sc.Step(`^I run the gauntlet without a base$`, f.runAutomatic)
+	sc.Step(`^the report base is "([^"]*)"$`, f.reportBase)
+	sc.Step(`^a committed feature branch from local "([^"]*)" without a remote$`, f.localTrunk)
+	sc.Step(`^trunk and the feature branch diverged after a shared commit$`, f.diverged)
+	sc.Step(`^a gate reports findings on both branches' changes$`, f.bothBranches)
+	sc.Step(`^I run the gauntlet against trunk$`, f.runTrunk)
+	sc.Step(`^the report merge base is the shared commit$`, f.mergeBase)
+	sc.Step(`^only the feature finding is in scope$`, f.onlyFeature)
+	sc.Step(`^a committed feature changes line 8 but not line 3$`, f.pointLines)
+	sc.Step(`^a diff-scoped gate reports point findings on lines 3 and 8$`, f.pointGate)
+	sc.Step(`^I run the gauntlet$`, f.runDefault)
+	sc.Step(`^only the finding on line 8 remains$`, f.lineEight)
+	sc.Step(`^a committed feature changes the body of function "([^"]*)"$`, f.entityChange)
+	sc.Step(`^a diff-scoped gate reports an entity finding on the function signature$`, f.entityGate)
+	sc.Step(`^the structural finding for "([^"]*)" remains$`, f.structural)
+	sc.Step(`^a committed feature changes "([^"]*)"$`, f.repoChange)
+	sc.Step(`^a whole-repo gate reports a finding in "([^"]*)"$`, f.repoGate)
+	sc.Step(`^the finding in "([^"]*)" remains$`, f.findingFile)
+	sc.Step(`^a committed feature deletes line 5 from "([^"]*)"$`, f.deleteLine)
+	sc.Step(`^a diff-scoped gate reports a point finding at the deletion location$`, f.deletionGate)
+	sc.Step(`^the deletion finding remains in scope$`, f.oneFinding)
+	sc.Step(`^a committed feature renames "([^"]*)" to "([^"]*)"$`, f.rename)
+	sc.Step(`^a gate reports a finding in "([^"]*)"$`, f.namedFinding)
+	sc.Step(`^the report records the finding in "([^"]*)"$`, f.findingFile)
+	sc.Step(`^a committed feature changes the binary file "([^"]*)"$`, f.binary)
+	sc.Step(`^the diff records one changed file and zero changed lines$`, f.binaryRecorded)
+	sc.Step(`^a repository with (.*)$`, f.invalidRepository)
+	sc.Step(`^a gate that records whether it starts$`, f.markerGate)
+	sc.Step(`^the run is rejected for the (.*)$`, f.rejected)
+	sc.Step(`^no gate, ledger, or target-repository file is created$`, f.noSideEffects)
 }
 
 func (f *diffFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {
@@ -473,17 +466,35 @@ func (f *gauntletFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Step(`^I run the gauntlet$`, f.run)
 	sc.Step(`^the report verdict is (.*)$`, f.verdict)
 	sc.Step(`^the application outcome is (\d+)$`, f.outcome)
-	for _, bind := range []struct {
-		expression string
-		step       any
-	}{
-		{`^a committed Go repository with a changed function$`, f.changed}, {`^a committed Go repository with one gate finding$`, f.one}, {`^a committed Go repository with a healthy gate finding$`, f.healthy}, {`^a committed Go repository with "([^"]*)" and "([^"]*)" gates$`, f.named}, {`^a committed Go repository with a healthy versioned gate$`, f.versioned}, {`^a committed Go repository whose gate result is (.*)$`, f.result},
-		{`^the shipped Go gates report one complexity and one lint finding$`, f.shipped}, {`^the "([^"]*)" and "([^"]*)" gates report findings$`, f.two}, {`^the "([^"]*)" gate reports rule "([^"]*)" on "([^"]*)" line (\d+)$`, f.rule}, {`^one gate reports the same finding on lines (\d+), (\d+), and (\d+)$`, f.repeat}, {`^I run the gauntlet with only the "([^"]*)" gate$`, f.runOnly}, {`^I run the unchanged gauntlet twice$`, f.twice}, {`^the "([^"]*)" gate finishes after the "([^"]*)" gate$`, f.delayed}, {`^the gate writes the raw diagnostic "([^"]*)"$`, f.rawDiagnostic},
-		{`^the report contains the "([^"]*)" and "([^"]*)" gates$`, f.gates}, {`^the report contains both shipped findings$`, f.twoReported}, {`^the report contains only the "([^"]*)" gate$`, f.only}, {`^the finding records its gate, language, rule, severity, file, line, message, and fingerprint$`, f.public}, {`^the report contains one finding with two occurrences$`, f.grouped}, {`^the finding fingerprint is identical in both reports$`, f.stable}, {`^the report orders gates as "([^"]*)"$`, f.order}, {`^the findings are shown in compiler-style output$`, f.compiler}, {`^the raw diagnostic exists only in a persisted raw artifact$`, f.persisted},
-		{`^a sibling gate experiences (.*)$`, f.problem}, {`^the sibling gate is errored$`, f.errored}, {`^the healthy gate finding remains in the report$`, f.healthyFinding}, {`^the tool version is outside the gate constraint$`, func() error { return nil }}, {`^the gate has a version warning$`, f.warning}, {`^the gate is not errored$`, f.notErrored},
-	} {
-		sc.Step(bind.expression, bind.step)
-	}
+	sc.Step(`^a committed Go repository with a changed function$`, f.changed)
+	sc.Step(`^a committed Go repository with one gate finding$`, f.one)
+	sc.Step(`^a committed Go repository with a healthy gate finding$`, f.healthy)
+	sc.Step(`^a committed Go repository with "([^"]*)" and "([^"]*)" gates$`, f.named)
+	sc.Step(`^a committed Go repository with a healthy versioned gate$`, f.versioned)
+	sc.Step(`^a committed Go repository whose gate result is (.*)$`, f.result)
+	sc.Step(`^the shipped Go gates report one complexity and one lint finding$`, f.shipped)
+	sc.Step(`^the "([^"]*)" and "([^"]*)" gates report findings$`, f.two)
+	sc.Step(`^the "([^"]*)" gate reports rule "([^"]*)" on "([^"]*)" line (\d+)$`, f.rule)
+	sc.Step(`^one gate reports the same finding on lines (\d+), (\d+), and (\d+)$`, f.repeat)
+	sc.Step(`^I run the gauntlet with only the "([^"]*)" gate$`, f.runOnly)
+	sc.Step(`^I run the unchanged gauntlet twice$`, f.twice)
+	sc.Step(`^the "([^"]*)" gate finishes after the "([^"]*)" gate$`, f.delayed)
+	sc.Step(`^the gate writes the raw diagnostic "([^"]*)"$`, f.rawDiagnostic)
+	sc.Step(`^the report contains the "([^"]*)" and "([^"]*)" gates$`, f.gates)
+	sc.Step(`^the report contains both shipped findings$`, f.twoReported)
+	sc.Step(`^the report contains only the "([^"]*)" gate$`, f.only)
+	sc.Step(`^the finding records its gate, language, rule, severity, file, line, message, and fingerprint$`, f.public)
+	sc.Step(`^the report contains one finding with two occurrences$`, f.grouped)
+	sc.Step(`^the finding fingerprint is identical in both reports$`, f.stable)
+	sc.Step(`^the report orders gates as "([^"]*)"$`, f.order)
+	sc.Step(`^the findings are shown in compiler-style output$`, f.compiler)
+	sc.Step(`^the raw diagnostic exists only in a persisted raw artifact$`, f.persisted)
+	sc.Step(`^a sibling gate experiences (.*)$`, f.problem)
+	sc.Step(`^the sibling gate is errored$`, f.errored)
+	sc.Step(`^the healthy gate finding remains in the report$`, f.healthyFinding)
+	sc.Step(`^the tool version is outside the gate constraint$`, func() error { return nil })
+	sc.Step(`^the gate has a version warning$`, f.warning)
+	sc.Step(`^the gate is not errored$`, f.notErrored)
 }
 func (f *gauntletFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {
 	f.selected = nil

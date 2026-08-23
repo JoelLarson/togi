@@ -28,20 +28,13 @@ func newPlatformFeature(factory harness.DriverFactory) *platformFeature {
 func (f *platformFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Before(f.before)
 	sc.After(f.after)
-	for _, bind := range []struct {
-		expression string
-		step       any
-	}{
-		{`^a committed Go repository with a clear gate$`, f.clearGate},
-		{`^a committed Go repository with a gate that records whether it starts$`, f.startupProbeGate},
-		{`^the runtime platform is (.*)$`, f.runtimePlatform},
-		{`^I run the gauntlet on the real host$`, f.runOnRealHost},
-		{`^I run the gauntlet$`, f.run},
-		{`^a completed unverified report is persisted$`, f.completedUnverified},
-		{`^the platform is rejected before repository, gate, or ledger access$`, f.rejectedBeforeStartup},
-	} {
-		sc.Step(bind.expression, bind.step)
-	}
+	sc.Step(`^a committed Go repository with a clear gate$`, f.clearGate)
+	sc.Step(`^a committed Go repository with a gate that records whether it starts$`, f.startupProbeGate)
+	sc.Step(`^the runtime platform is (.*)$`, f.runtimePlatform)
+	sc.Step(`^I run the gauntlet on the real host$`, f.runOnRealHost)
+	sc.Step(`^I run the gauntlet$`, f.run)
+	sc.Step(`^a completed unverified report is persisted$`, f.completedUnverified)
+	sc.Step(`^the platform is rejected before repository, gate, or ledger access$`, f.rejectedBeforeStartup)
 }
 
 func (f *platformFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {

@@ -25,29 +25,22 @@ func newPrinciplePagesFeature(factory harness.DriverFactory) *principlePagesFeat
 func (f *principlePagesFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Before(f.before)
 	sc.After(f.world.After)
-	for _, binding := range []struct {
-		expression string
-		step       any
-	}{
-		{`^no operator copy of "([^"]*)"$`, f.noOperatorCopy},
-		{`^an operator copy of "([^"]*)"$`, f.operatorCopy},
-		{`^several gate aliases for "([^"]*)"$`, f.severalAliases},
-		{`^a gate alias whose principle page does not exist$`, f.danglingAlias},
-		{`^one rule is aliased to two principle pages$`, f.conflictingAliases},
-		{`^an existing operator copy of "([^"]*)"$`, f.existingOperatorCopy},
-		{`^I show the "([^"]*)" principle page$`, f.show},
-		{`^I lint the principle pages$`, f.lint},
-		{`^I eject the "([^"]*)" principle page$`, f.eject},
-		{`^the shipped page body and provenance are displayed$`, f.shippedPageDisplayed},
-		{`^the operator page body and provenance are displayed$`, f.operatorPageDisplayed},
-		{`^its aliases are displayed in gate, language, and rule order$`, f.aliasesDisplayed},
-		{`^the dangling alias is warned and the outcome is (\d+)$`, f.danglingWarned},
-		{`^both conflicting pages are reported and the outcome is (\d+)$`, f.conflictsReported},
-		{`^the operator copy equals the shipped page$`, f.operatorCopyEqualsShipped},
-		{`^the eject is rejected and the operator copy is unchanged$`, f.ejectRejected},
-	} {
-		sc.Step(binding.expression, binding.step)
-	}
+	sc.Step(`^no operator copy of "([^"]*)"$`, f.noOperatorCopy)
+	sc.Step(`^an operator copy of "([^"]*)"$`, f.operatorCopy)
+	sc.Step(`^several gate aliases for "([^"]*)"$`, f.severalAliases)
+	sc.Step(`^a gate alias whose principle page does not exist$`, f.danglingAlias)
+	sc.Step(`^one rule is aliased to two principle pages$`, f.conflictingAliases)
+	sc.Step(`^an existing operator copy of "([^"]*)"$`, f.existingOperatorCopy)
+	sc.Step(`^I show the "([^"]*)" principle page$`, f.show)
+	sc.Step(`^I lint the principle pages$`, f.lint)
+	sc.Step(`^I eject the "([^"]*)" principle page$`, f.eject)
+	sc.Step(`^the shipped page body and provenance are displayed$`, f.shippedPageDisplayed)
+	sc.Step(`^the operator page body and provenance are displayed$`, f.operatorPageDisplayed)
+	sc.Step(`^its aliases are displayed in gate, language, and rule order$`, f.aliasesDisplayed)
+	sc.Step(`^the dangling alias is warned and the outcome is (\d+)$`, f.danglingWarned)
+	sc.Step(`^both conflicting pages are reported and the outcome is (\d+)$`, f.conflictsReported)
+	sc.Step(`^the operator copy equals the shipped page$`, f.operatorCopyEqualsShipped)
+	sc.Step(`^the eject is rejected and the operator copy is unchanged$`, f.ejectRejected)
 }
 
 func (f *principlePagesFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {

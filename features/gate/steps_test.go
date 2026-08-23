@@ -27,24 +27,17 @@ func (f *gateCustomizationFeature) initialize(sc *godog.ScenarioContext) {
 	sc.After(f.world.After)
 	f.world.BindReports(sc)
 	f.world.BindGates(sc)
-	for _, bind := range []struct {
-		expression string
-		step       any
-	}{
-		{`^a committed Go repository with a changed function$`, f.changedRepository},
-		{`^the shipped Go gates report representative findings$`, f.shippedFindings},
-		{`^the shipped findings are normalized without repository configuration$`, f.shippedNormalized},
-		{`^a committed Go repository with an XDG override for the "([^"]*)" gate$`, f.override},
-		{`^the report contains the overridden lint behavior only$`, f.overriddenOnly},
-		{`^a committed Go repository with an additional "([^"]*)" gate in XDG config$`, f.additional},
-		{`^the report contains the shipped gates and the "([^"]*)" gate$`, f.includesAdditional},
-		{`^a committed Go repository with an invalid XDG gate definition$`, f.invalidDefinition},
-		{`^every available gate records whether it starts$`, f.recordStarts},
-		{`^the run is rejected for invalid gate data$`, f.invalidRejected},
-		{`^no gate, ledger, or target-repository file is created$`, f.noSideEffects},
-	} {
-		sc.Step(bind.expression, bind.step)
-	}
+	sc.Step(`^a committed Go repository with a changed function$`, f.changedRepository)
+	sc.Step(`^the shipped Go gates report representative findings$`, f.shippedFindings)
+	sc.Step(`^the shipped findings are normalized without repository configuration$`, f.shippedNormalized)
+	sc.Step(`^a committed Go repository with an XDG override for the "([^"]*)" gate$`, f.override)
+	sc.Step(`^the report contains the overridden lint behavior only$`, f.overriddenOnly)
+	sc.Step(`^a committed Go repository with an additional "([^"]*)" gate in XDG config$`, f.additional)
+	sc.Step(`^the report contains the shipped gates and the "([^"]*)" gate$`, f.includesAdditional)
+	sc.Step(`^a committed Go repository with an invalid XDG gate definition$`, f.invalidDefinition)
+	sc.Step(`^every available gate records whether it starts$`, f.recordStarts)
+	sc.Step(`^the run is rejected for invalid gate data$`, f.invalidRejected)
+	sc.Step(`^no gate, ledger, or target-repository file is created$`, f.noSideEffects)
 }
 
 func (f *gateCustomizationFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {

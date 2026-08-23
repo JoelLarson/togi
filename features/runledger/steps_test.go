@@ -37,34 +37,27 @@ func (f *runHistoryFeature) initialize(sc *godog.ScenarioContext) {
 	sc.After(f.after)
 	f.world.BindReports(sc)
 	f.world.BindHistory(sc)
-	for _, bind := range []struct {
-		expression string
-		step       any
-	}{
-		{`^a committed Go repository with one gate finding$`, f.oneGateFinding},
-		{`^report.json and both raw gate streams are persisted under XDG state$`, f.persistedOutsideRepository},
-		{`^the target repository tree and status are unchanged$`, f.targetUnchanged},
-		{`^a repository with primary and linked feature worktrees$`, f.primaryAndLinked},
-		{`^a completed run in the linked worktree$`, f.completedLinkedRun},
-		{`^I inspect status from the primary worktree$`, f.statusPrimary},
-		{`^status renders the linked worktree run$`, f.rendersLinkedRun},
-		{`^a committed Go repository with a gate paused after startup$`, f.pausedGate},
-		{`^I start another gauntlet run for the repository$`, f.startSecondRun},
-		{`^the second run is rejected as locked$`, f.secondLocked},
-		{`^the first run can complete after the gate resumes$`, f.firstCompletes},
-		{`^a committed Go repository with an abandoned unlocked lock file$`, f.abandonedLock},
-		{`^a completed report is persisted$`, f.reportPersisted},
-		{`^a committed Go repository with 20 completed runs$`, f.twentyCompletedRuns},
-		{`^I complete one more run$`, f.completeOneMoreRun},
-		{`^only the newest 20 run directories remain$`, f.twentyNewestRemain},
-		{`^a committed Go repository with two completed runs$`, f.twoCompletedRuns},
-		{`^status renders the newer completed run$`, f.rendersNewerRun},
-		{`^a committed Go repository with one completed run$`, f.oneCompletedRun},
-		{`^newer incomplete and corrupt run directories$`, f.newerInvalidRuns},
-		{`^status renders the completed run$`, f.rendersCompletedRun},
-	} {
-		sc.Step(bind.expression, bind.step)
-	}
+	sc.Step(`^a committed Go repository with one gate finding$`, f.oneGateFinding)
+	sc.Step(`^report.json and both raw gate streams are persisted under XDG state$`, f.persistedOutsideRepository)
+	sc.Step(`^the target repository tree and status are unchanged$`, f.targetUnchanged)
+	sc.Step(`^a repository with primary and linked feature worktrees$`, f.primaryAndLinked)
+	sc.Step(`^a completed run in the linked worktree$`, f.completedLinkedRun)
+	sc.Step(`^I inspect status from the primary worktree$`, f.statusPrimary)
+	sc.Step(`^status renders the linked worktree run$`, f.rendersLinkedRun)
+	sc.Step(`^a committed Go repository with a gate paused after startup$`, f.pausedGate)
+	sc.Step(`^I start another gauntlet run for the repository$`, f.startSecondRun)
+	sc.Step(`^the second run is rejected as locked$`, f.secondLocked)
+	sc.Step(`^the first run can complete after the gate resumes$`, f.firstCompletes)
+	sc.Step(`^a committed Go repository with an abandoned unlocked lock file$`, f.abandonedLock)
+	sc.Step(`^a completed report is persisted$`, f.reportPersisted)
+	sc.Step(`^a committed Go repository with 20 completed runs$`, f.twentyCompletedRuns)
+	sc.Step(`^I complete one more run$`, f.completeOneMoreRun)
+	sc.Step(`^only the newest 20 run directories remain$`, f.twentyNewestRemain)
+	sc.Step(`^a committed Go repository with two completed runs$`, f.twoCompletedRuns)
+	sc.Step(`^status renders the newer completed run$`, f.rendersNewerRun)
+	sc.Step(`^a committed Go repository with one completed run$`, f.oneCompletedRun)
+	sc.Step(`^newer incomplete and corrupt run directories$`, f.newerInvalidRuns)
+	sc.Step(`^status renders the completed run$`, f.rendersCompletedRun)
 }
 
 func (f *runHistoryFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {
