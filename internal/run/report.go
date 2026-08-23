@@ -25,7 +25,10 @@ type Verdict string
 const (
 	VerdictUnverified Verdict = "unverified"
 	VerdictFindings   Verdict = "findings"
+	VerdictBlocked    Verdict = "blocked"
+	VerdictRails      Verdict = "rails"
 	VerdictErrored    Verdict = "errored"
+	VerdictUnsealed   Verdict = "unsealed"
 )
 
 // GateReport records one gate's normalized result.

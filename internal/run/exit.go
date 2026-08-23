@@ -48,7 +48,7 @@ func ResolveExit(err error) int {
 		return 70
 	}
 	code := exitCoder.ExitCode()
-	if code < 1 || code > 5 {
+	if code < 1 || code > 6 {
 		return 70
 	}
 	return code
@@ -69,10 +69,16 @@ func ExitCode(verdict Verdict) int {
 	switch verdict {
 	case VerdictFindings:
 		return 1
+	case VerdictBlocked:
+		return 2
+	case VerdictRails:
+		return 3
 	case VerdictErrored:
 		return 4
 	case VerdictUnverified:
 		return 5
+	case VerdictUnsealed:
+		return 6
 	default:
 		return 70
 	}

@@ -929,7 +929,8 @@ func TestExitCodeAndError(t *testing.T) {
 		verdict Verdict
 		want    int
 	}{
-		{VerdictUnverified, 5}, {VerdictFindings, 1}, {VerdictErrored, 4},
+		{VerdictFindings, 1}, {VerdictBlocked, 2}, {VerdictRails, 3},
+		{VerdictErrored, 4}, {VerdictUnverified, 5}, {VerdictUnsealed, 6},
 	} {
 		if got := ExitCode(tc.verdict); got != tc.want {
 			t.Fatalf("%s = %d, want %d", tc.verdict, got, tc.want)
@@ -939,5 +940,18 @@ func TestExitCodeAndError(t *testing.T) {
 	err := &ExitError{Code: 1, Err: cause}
 	if !errors.Is(err, cause) || err.Error() != cause.Error() {
 		t.Fatalf("exit error does not wrap cause: %v", err)
+	}
+}
+
+func TestFixModeOptionContracts(t *testing.T) {
+	want := Options{
+		Root: ".", Agent: "codex", MaxIterations: 7,
+		MaxWallClock: 12 * time.Minute,
+	}
+	if want.Agent != "codex" || want.MaxIterations != 7 || want.MaxWallClock != 12*time.Minute {
+		t.Fatalf("fix options = %#v", want)
+	}
+	if DefaultMaxIterations != 20 || DefaultMaxWallClock != 30*time.Minute {
+		t.Fatalf("defaults = %d/%s, want 20/30m", DefaultMaxIterations, DefaultMaxWallClock)
 	}
 }

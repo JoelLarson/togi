@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/enricher"
@@ -30,6 +31,7 @@ func TestVersionCommand(t *testing.T) {
 type fakeService struct {
 	ctx           context.Context
 	runOptions    runpkg.Options
+	runCalls      int
 	runErr        error
 	statusRoot    string
 	statusNoColor bool
@@ -46,6 +48,7 @@ func (e commandExitError) ExitCode() int { return e.code }
 func (service *fakeService) Run(ctx context.Context, opts runpkg.Options) (runpkg.Report, error) {
 	service.ctx = ctx
 	service.runOptions = opts
+	service.runCalls++
 	return runpkg.Report{}, service.runErr
 }
 
@@ -64,9 +67,64 @@ func TestRunCommandPassesFlags(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.Code != 4 {
 		t.Fatalf("Execute error = %v", err)
 	}
-	want := runpkg.Options{Root: ".", Base: "refs/heads/main", GateNames: []string{"lint", "complexity"}, ReportOnly: true, Verbose: true, NoColor: true}
+	want := runpkg.Options{
+		Root: ".", Base: "refs/heads/main", GateNames: []string{"lint", "complexity"}, ReportOnly: true,
+		MaxIterations: runpkg.DefaultMaxIterations, MaxWallClock: runpkg.DefaultMaxWallClock,
+		Verbose: true, NoColor: true,
+	}
 	if got := service.runOptions; !reflect.DeepEqual(got, want) {
 		t.Fatalf("options = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunCommandPassesFixFlags(t *testing.T) {
+	service := &fakeService{}
+	cmd := newRootCommandWithService(streams{out: io.Discard, err: io.Discard}, service)
+	cmd.SetArgs([]string{
+		"run", "--agent", "codex",
+		"--max-iterations", "7", "--max-wall-clock", "12m",
+	})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	want := runpkg.Options{
+		Root: ".", Agent: "codex", MaxIterations: 7,
+		MaxWallClock: 12 * time.Minute,
+	}
+	if got := service.runOptions; !reflect.DeepEqual(got, want) {
+		t.Fatalf("options = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunCommandRejectsInvalidFixFlagsBeforeService(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{name: "missing agent", args: []string{"run"}},
+		{name: "report only agent", args: []string{"run", "--report-only", "--agent", "codex"}},
+		{name: "report only explicit iterations", args: []string{"run", "--report-only", "--max-iterations", "20"}},
+		{name: "report only explicit wall clock", args: []string{"run", "--report-only", "--max-wall-clock", "30m"}},
+		{name: "claude is not installed", args: []string{"run", "--agent", "claude"}},
+		{name: "kimi is not installed", args: []string{"run", "--agent", "kimi"}},
+		{name: "unsupported agent", args: []string{"run", "--agent", "unknown"}},
+		{name: "zero iterations", args: []string{"run", "--agent", "codex", "--max-iterations", "0"}},
+		{name: "negative iterations", args: []string{"run", "--agent", "codex", "--max-iterations", "-1"}},
+		{name: "zero wall clock", args: []string{"run", "--agent", "codex", "--max-wall-clock", "0s"}},
+		{name: "negative wall clock", args: []string{"run", "--agent", "codex", "--max-wall-clock", "-1s"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &fakeService{}
+			cmd := newRootCommandWithService(streams{out: io.Discard, err: io.Discard}, service)
+			cmd.SetArgs(tc.args)
+			if err := cmd.Execute(); err == nil {
+				t.Fatalf("%v unexpectedly succeeded", tc.args)
+			}
+			if service.runCalls != 0 {
+				t.Fatalf("service.Run calls = %d, want 0", service.runCalls)
+			}
+		})
 	}
 }
 
@@ -116,7 +174,7 @@ func TestExecuteCommandPassesCanceledContextToService(t *testing.T) {
 	cmd := newRootCommandWithService(streams{out: io.Discard, err: io.Discard}, service)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if got := executeCommand(ctx, []string{"run"}, io.Discard, cmd); got != 0 {
+	if got := executeCommand(ctx, []string{"run", "--report-only"}, io.Discard, cmd); got != 0 {
 		t.Fatalf("status = %d", got)
 	}
 	if service.ctx == nil || !errors.Is(service.ctx.Err(), context.Canceled) {
@@ -134,15 +192,16 @@ func TestMainRunMapsTypedAndInternalErrors(t *testing.T) {
 		{name: "typed", err: &runpkg.ExitError{Code: 5, Err: errors.New("unverified")}, want: 5},
 		{name: "generic exit coder", err: commandExitError{code: 3}, want: 3},
 		{name: "blocked", err: &runpkg.ExitError{Code: 2, Err: errors.New("blocked")}, want: 2},
+		{name: "unsealed", err: &runpkg.ExitError{Code: 6, Err: errors.New("unsealed")}, want: 6},
 		{name: "typed nil", err: typedNil, want: 70},
 		{name: "zero", err: &runpkg.ExitError{Code: 0}, want: 70},
-		{name: "invalid", err: &runpkg.ExitError{Code: 6}, want: 70},
+		{name: "invalid", err: &runpkg.ExitError{Code: 7}, want: 70},
 		{name: "internal", err: errors.New("broken"), want: 70},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr bytes.Buffer
 			service := &fakeService{runErr: tc.err}
-			got := runWithService([]string{"run"}, io.Discard, &stderr, service)
+			got := runWithService([]string{"run", "--report-only"}, io.Discard, &stderr, service)
 			if got != tc.want {
 				t.Fatalf("status = %d, want %d", got, tc.want)
 			}

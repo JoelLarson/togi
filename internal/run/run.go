@@ -18,15 +18,23 @@ import (
 	"github.com/joellarson/togi/internal/repoid"
 )
 
-// Options controls one report-only run.
+const (
+	DefaultMaxIterations = 20
+	DefaultMaxWallClock  = 30 * time.Minute
+)
+
+// Options controls one run.
 type Options struct {
 	Root      string
 	Base      string
 	GateNames []string
 	// ReportOnly stabilizes the pre-phase-3 CLI surface; see docs/implementation.md.
-	ReportOnly bool
-	Verbose    bool
-	NoColor    bool
+	ReportOnly    bool
+	Agent         string
+	MaxIterations int
+	MaxWallClock  time.Duration
+	Verbose       bool
+	NoColor       bool
 }
 
 // Service ties repository identity, gate data, execution, and external state together.

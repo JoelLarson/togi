@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/enricher"
@@ -109,11 +110,14 @@ func newRootCommandWithServices(s streams, service commandService, pages wikiSer
 }
 
 type runFlags struct {
-	reportOnly bool
-	base       string
-	gates      []string
-	verbose    bool
-	noColor    bool
+	reportOnly    bool
+	base          string
+	gates         []string
+	agent         string
+	maxIterations int
+	maxWallClock  time.Duration
+	verbose       bool
+	noColor       bool
 }
 
 func newRunCommand(service commandService) *cobra.Command {
@@ -123,13 +127,19 @@ func newRunCommand(service commandService) *cobra.Command {
 		Short: "Run the configured quality gates",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateRunFlags(cmd, flags); err != nil {
+				return err
+			}
 			_, err := service.Run(cmd.Context(), runpkg.Options{
-				Root:       ".",
-				Base:       flags.base,
-				GateNames:  append([]string(nil), flags.gates...),
-				ReportOnly: flags.reportOnly,
-				Verbose:    flags.verbose,
-				NoColor:    flags.noColor,
+				Root:          ".",
+				Base:          flags.base,
+				GateNames:     append([]string(nil), flags.gates...),
+				ReportOnly:    flags.reportOnly,
+				Agent:         flags.agent,
+				MaxIterations: flags.maxIterations,
+				MaxWallClock:  flags.maxWallClock,
+				Verbose:       flags.verbose,
+				NoColor:       flags.noColor,
 			})
 			return err
 		},
@@ -137,9 +147,37 @@ func newRunCommand(service commandService) *cobra.Command {
 	command.Flags().BoolVar(&flags.reportOnly, "report-only", false, "report findings without fixing")
 	command.Flags().StringVar(&flags.base, "base", "", "base ref for diff scoping")
 	command.Flags().StringArrayVar(&flags.gates, "gate", nil, "run only the named gate")
+	command.Flags().StringVar(&flags.agent, "agent", "", "agent adapter for fix mode")
+	command.Flags().IntVar(&flags.maxIterations, "max-iterations", runpkg.DefaultMaxIterations, "maximum fix iterations")
+	command.Flags().DurationVar(&flags.maxWallClock, "max-wall-clock", runpkg.DefaultMaxWallClock, "maximum fix wall-clock time")
 	command.Flags().BoolVar(&flags.verbose, "verbose", false, "print gate execution details")
 	command.Flags().BoolVar(&flags.noColor, "no-color", false, "disable colored output")
 	return command
+}
+
+func validateRunFlags(command *cobra.Command, flags runFlags) error {
+	if flags.maxIterations <= 0 {
+		return errors.New("--max-iterations must be positive")
+	}
+	if flags.maxWallClock <= 0 {
+		return errors.New("--max-wall-clock must be positive")
+	}
+	if flags.reportOnly {
+		if flags.agent != "" {
+			return errors.New("--agent cannot be used with --report-only")
+		}
+		if command.Flags().Changed("max-iterations") || command.Flags().Changed("max-wall-clock") {
+			return errors.New("fix-mode rails cannot be used with --report-only")
+		}
+		return nil
+	}
+	if flags.agent == "" {
+		return errors.New("--agent is required unless --report-only is set")
+	}
+	if flags.agent != "codex" {
+		return fmt.Errorf("unsupported agent %q", flags.agent)
+	}
+	return nil
 }
 
 func newStatusCommand(service commandService) *cobra.Command {
