@@ -2,10 +2,43 @@ package runner
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("TOGI_RUNNER_STDIN_HELPER") != "" {
+		if _, err := io.Copy(os.Stdout, os.Stdin); err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func TestRunSuppliesStdin(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	result := Run(context.Background(), ".", []string{executable, "-test.run=TestRunStdinHelper"}, Options{
+		Env:         append(os.Environ(), "TOGI_RUNNER_STDIN_HELPER=1"),
+		Stdin:       strings.NewReader("batch brief\n"),
+		StdoutLimit: 64,
+		StderrLimit: 64,
+	})
+	if result.RunErr != nil || result.CleanupErr != nil {
+		t.Fatalf("Run() errors = (%v, %v), stderr = %q", result.RunErr, result.CleanupErr, result.Stderr.Bytes())
+	}
+	if got, want := string(result.Stdout.Bytes()), "batch brief\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
 
 func TestBufferTruncatesOnceAtLimitWithMarker(t *testing.T) {
 	marker := []byte("[cut]")

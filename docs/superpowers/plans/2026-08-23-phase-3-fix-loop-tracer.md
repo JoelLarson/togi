@@ -180,9 +180,9 @@ Invoke exactly:
 
 ```go
 []string{
-    executable, "exec", "--ephemeral", "--json",
+    executable, "--ask-for-approval", "never",
+    "exec", "--ephemeral", "--json",
     "--sandbox", "workspace-write",
-    "--ask-for-approval", "never",
     "--ignore-user-config",
     "--cd", request.Root, "-",
 }

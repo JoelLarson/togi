@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"time"
@@ -18,7 +19,8 @@ const DefaultWaitDelay = 100 * time.Millisecond
 
 // Options configures one execution.
 type Options struct {
-	Env              []string      // nil inherits the parent environment
+	Env              []string // nil inherits the parent environment
+	Stdin            io.Reader
 	WaitDelay        time.Duration // 0 means DefaultWaitDelay
 	StdoutLimit      int           // capture limit in bytes, including the marker
 	StderrLimit      int
@@ -58,6 +60,7 @@ func Run(ctx context.Context, dir string, argv []string, opts Options) Result {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = opts.Env
+	cmd.Stdin = opts.Stdin
 	waitDelay := opts.WaitDelay
 	if waitDelay <= 0 {
 		waitDelay = DefaultWaitDelay

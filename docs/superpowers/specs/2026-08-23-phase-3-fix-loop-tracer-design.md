@@ -159,11 +159,10 @@ is written to the ledger before being sent to the adapter.
 Every attempt launches a new Codex process with no persistent session:
 
 ```sh
-codex exec \
+codex --ask-for-approval never exec \
   --ephemeral \
   --json \
   --sandbox workspace-write \
-  --ask-for-approval never \
   --ignore-user-config \
   --cd <cache-worktree> \
   -
