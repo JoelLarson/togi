@@ -21,6 +21,10 @@ disagree with nothing:
 | [docs/implementation.md](./docs/implementation.md) | Go-level choices: module, deps, layout, CLI surface, ledger, TOML schemas, testing. |
 | [docs/roadmap.md](./docs/roadmap.md) | The five phases, with exit criteria. |
 
+Not a source of truth, but the fastest way in:
+[docs/language.md](./docs/language.md) tours the vocabulary — which terms are
+built, which name later phases, and which pairs get confused.
+
 **Do not re-litigate settled decisions.** If you think one is wrong, say so
 and stop — don't quietly build something else. If two of them genuinely
 contradict each other, that's worth surfacing immediately.

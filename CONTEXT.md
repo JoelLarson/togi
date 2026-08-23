@@ -7,6 +7,10 @@ until the diff is merge-ready or a rail stops it. This context covers the
 gauntlet (v1); the wider pipeline (spec → gather → build → verify) will join
 it later.
 
+Struggling to hold it all? [docs/language.md](docs/language.md) is a guided
+tour — which terms are real today, what order they happen in, and which pairs
+get confused. This file stays the definitions; that one defines nothing.
+
 ## Language
 
 ### People
