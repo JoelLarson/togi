@@ -30,8 +30,8 @@ func TestFeatureIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("find module root: %v", err)
 	}
-	acceptanceRoot := filepath.Join(root, "acceptance")
-	readmePath := filepath.Join(acceptanceRoot, "README.md")
+	featuresRoot := filepath.Join(root, "features")
+	readmePath := filepath.Join(featuresRoot, "README.md")
 
 	readme, err := os.ReadFile(readmePath)
 	if err != nil {
@@ -39,11 +39,11 @@ func TestFeatureIndex(t *testing.T) {
 	}
 
 	indexed := parseFeatureIndex(t, string(readme))
-	discovered := discoverFeatures(t, acceptanceRoot)
+	discovered := discoverFeatures(t, featuresRoot)
 	compareFeatureSets(t, indexed, discovered)
 
 	for feature := range discovered {
-		testPath := strings.TrimSuffix(filepath.Join(acceptanceRoot, feature), ".feature") + "_test.go"
+		testPath := strings.TrimSuffix(filepath.Join(featuresRoot, feature), ".feature") + "_test.go"
 		if _, err := os.Stat(testPath); err != nil {
 			t.Errorf("feature %q has no adjacent test %q: %v", feature, filepath.ToSlash(testPath), err)
 		}
@@ -55,7 +55,7 @@ func TestDriverCapabilityMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("find module root: %v", err)
 	}
-	readme, err := os.ReadFile(filepath.Join(root, "acceptance", "README.md"))
+	readme, err := os.ReadFile(filepath.Join(root, "features", "README.md"))
 	if err != nil {
 		t.Fatalf("read acceptance catalog: %v", err)
 	}
@@ -92,7 +92,7 @@ func indexedScenarioTags(t *testing.T, root string, indexed map[string]struct{})
 	tags := make(map[string]bool)
 	for _, feature := range features {
 		parsed, err := (godog.TestSuite{Options: &godog.Options{
-			Paths: []string{filepath.Join(root, "acceptance", feature)},
+			Paths: []string{filepath.Join(root, "features", feature)},
 		}}).RetrieveFeatures()
 		if err != nil {
 			t.Fatalf("parse indexed feature %q: %v", feature, err)
@@ -168,11 +168,11 @@ func parseFeatureIndex(t *testing.T, readme string) map[string]struct{} {
 	return features
 }
 
-func discoverFeatures(t *testing.T, acceptanceRoot string) map[string]struct{} {
+func discoverFeatures(t *testing.T, featuresRoot string) map[string]struct{} {
 	t.Helper()
 
 	features := make(map[string]struct{})
-	err := filepath.WalkDir(acceptanceRoot, func(path string, entry os.DirEntry, err error) error {
+	err := filepath.WalkDir(featuresRoot, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -183,7 +183,7 @@ func discoverFeatures(t *testing.T, acceptanceRoot string) map[string]struct{} {
 			return nil
 		}
 
-		relative, err := filepath.Rel(acceptanceRoot, path)
+		relative, err := filepath.Rel(featuresRoot, path)
 		if err != nil {
 			return err
 		}

@@ -149,5 +149,5 @@ mapping is direct: read a term, open `internal/<term>`. `finding`, `gate`,
 `normalizer`, `enricher`, `wiki`, `repoid`, `config`, `run`, `runner`,
 `gitcmd` are all live; `triage`, `flywheel`, and `adapter` are the stubs.
 
-The acceptance specs in [`acceptance/`](../acceptance/README.md) are the other
+The acceptance specs in [`features/`](../features/README.md) are the other
 way in — they describe the same vocabulary as behaviour you can run.

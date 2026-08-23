@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/cucumber/godog"
-	"github.com/joellarson/togi/acceptance/internal/harness"
+	"github.com/joellarson/togi/features/internal/harness"
 	internalwiki "github.com/joellarson/togi/internal/wiki"
 )
 

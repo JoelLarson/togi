@@ -21,12 +21,12 @@ domain: history, gate customization, principle pages, and platform support.
 The default command runs the application service driver:
 
 ```sh
-go test ./acceptance/... -v
+go test ./features/... -v
 ```
 
 Use the compiled process boundary explicitly:
 
 ```sh
-go test ./acceptance/... -v -args -acceptance.driver=cli
-go test ./acceptance/... -v -args -acceptance.driver=all
+go test ./features/... -v -args -acceptance.driver=cli
+go test ./features/... -v -args -acceptance.driver=all
 ```

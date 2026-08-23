@@ -185,5 +185,5 @@ of `I can` in the report.
 **C6. Testable.** Exempt by construction. The file executes, so a scenario whose
 steps do not bind fails the harness — which is exactly what the `undefined`,
 `pending`, and `ambiguous` fixtures under
-`acceptance/internal/harness/testdata/` exist to prove. Never report a scenario
+`features/internal/harness/testdata/` exist to prove. Never report a scenario
 as untestable.

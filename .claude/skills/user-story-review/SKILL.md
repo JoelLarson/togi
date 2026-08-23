@@ -41,9 +41,9 @@ all outside this review.
 design.md says to use it only when it makes a feature easier to scan, so whether
 a file groups its scenarios is an authoring choice, never a finding.
 
-The tags in `acceptance/platform/supporting_platforms.feature` (`@linux`,
+The tags in `features/platform/supporting_platforms.feature` (`@linux`,
 `@unsupported-host`, `@simulated-platform`) are functional — `selector.go` and
-`godog.go` under `acceptance/internal/harness/` consume them to select scenarios
+`godog.go` under `features/internal/harness/` consume them to select scenarios
 by host — not decorative.
 
 ## Procedure
@@ -59,7 +59,7 @@ by host — not decorative.
 3. Find the specs:
 
    ```sh
-   find acceptance -name '*.feature' -not -path '*/testdata/*'
+   find features -name '*.feature' -not -path '*/testdata/*'
    ```
 
    **Never report on `**/testdata/*.feature`.** Those are harness fixtures
@@ -75,7 +75,7 @@ by host — not decorative.
 One section per file, in `find` order:
 
 ```
-### acceptance/<path>.feature
+### features/<path>.feature
 
 - **[severity] <check name>** — <what is wrong, one sentence>
   Suggested: <concrete rewrite, quoting the replacement line(s)>

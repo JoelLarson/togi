@@ -1,10 +1,10 @@
-package platform
+package runledger
 
 import (
 	"os"
 	"testing"
 
-	"github.com/joellarson/togi/acceptance/internal/harness"
+	"github.com/joellarson/togi/features/internal/harness"
 )
 
 func TestMain(m *testing.M) {

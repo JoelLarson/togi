@@ -39,15 +39,15 @@ test command runs only the application-level suite:
 
 ```sh
 go test ./...
-go test ./acceptance/... -v -args -acceptance.driver=cli
-go test ./acceptance/... -v -args -acceptance.driver=all
+go test ./features/... -v -args -acceptance.driver=cli
+go test ./features/... -v -args -acceptance.driver=all
 ```
 
 Selecting `cli` runs only the compiled-CLI driver. For each feature test,
 selecting `all` runs the service driver first and the CLI driver second. An
 unknown or unavailable driver is an error, never a skip or an empty successful
 matrix. Because package-specific flags cannot safely be passed through
-`go test ./...`, the explicit driver forms target `./acceptance/...`
+`go test ./...`, the explicit driver forms target `./features/...`
 directly.
 
 Every example runs through every selected driver except an example that
@@ -73,7 +73,7 @@ Linux-only feature groups skip with an explicit reason. Host eligibility is a
 suite precondition independent of the selected driver's capability tags.
 
 The shared harness is an ordinary Go package under
-`acceptance/internal/harness` so separate acceptance-domain packages can
+`features/internal/harness` so separate acceptance-domain packages can
 import it. Consequently `go build ./...` compiles the harness, but
 `go build ./cmd/togi` does not include it in the production binary because
 production code never imports it. Feature-specific state and bindings remain
@@ -87,7 +87,7 @@ tests the assembled application rather than one production package boundary.
 Its own nested `internal/harness` is shared acceptance infrastructure:
 
 ```text
-acceptance/
+features/
 ├── README.md
 ├── internal/
 │   └── harness/
@@ -128,7 +128,7 @@ acceptance/
     └── steps_test.go
 ```
 
-`acceptance/README.md` is the mandatory human entry point. It explains the
+`features/README.md` is the mandatory human entry point. It explains the
 purpose of the suite, gives a short capability index and reading order, and
 shows the service, CLI, and all-driver commands. A reader follows the index
 into a domain directory and opens its `.feature` files before any Go code. A
@@ -136,8 +136,8 @@ harness catalog test keeps that entry point complete. The index lives between
 `<!-- feature-index:start -->` and `<!-- feature-index:end -->` markers and
 contains one list item per line in the exact form
 `- [Title](domain/name.feature)`. The test recursively discovers
-`acceptance/<domain>/*.feature`, excluding `internal` and `testdata`, normalizes
-paths to slash-separated paths relative to `acceptance/`, and requires the
+`features/<domain>/*.feature`, excluding `internal` and `testdata`, normalizes
+paths to slash-separated paths relative to `features/`, and requires the
 discovered paths and indexed paths to match exactly once. It also requires
 each feature to have an adjacent `_test.go` file with the same stem.
 
@@ -148,10 +148,10 @@ point, scenario-local state, and feature-specific actions. The domain's
 declare the package name matching their directory, such as `package gauntlet`;
 there is no empty production package to test externally.
 
-`acceptance/internal/harness` owns driver selection, domain driver ports,
+`features/internal/harness` owns driver selection, domain driver ports,
 service and CLI implementations, raw observations, repository fixtures, fake
 gate tools, and cross-domain step primitives. It contains no story text. The
-`internal` placement prevents production packages outside `acceptance/` from
+`internal` placement prevents production packages outside `features/` from
 importing it.
 
 These acceptance packages describe tests rather than application modules.
@@ -454,9 +454,9 @@ not sufficient.
 Implementation is complete when:
 
 ```sh
-go test ./acceptance/... -v
-go test ./acceptance/... -v -args -acceptance.driver=cli
-go test ./acceptance/... -v -args -acceptance.driver=all
+go test ./features/... -v
+go test ./features/... -v -args -acceptance.driver=cli
+go test ./features/... -v -args -acceptance.driver=all
 go test ./...
 go build ./...
 ```

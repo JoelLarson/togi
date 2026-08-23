@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/cucumber/godog"
-	"github.com/joellarson/togi/acceptance/internal/harness"
+	"github.com/joellarson/togi/features/internal/harness"
 )
 
 type runHistoryFeature struct {

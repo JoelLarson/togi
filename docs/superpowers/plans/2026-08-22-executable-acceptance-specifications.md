@@ -4,7 +4,7 @@
 
 **Goal:** Add a human-first Gherkin catalog that executes togi's user-visible behavior through the service boundary by default and the compiled CLI boundary on demand.
 
-**Architecture:** Independent acceptance-domain test packages co-locate each feature with its Godog entry point. `acceptance/internal/harness` owns isolated scenario fixtures, raw observations, domain driver ports, the service and CLI drivers, strict suite options, and driver selection; `acceptance/README.md` is the human entry point and mechanically indexes every feature.
+**Architecture:** Independent acceptance-domain test packages co-locate each feature with its Godog entry point. `features/internal/harness` owns isolated scenario fixtures, raw observations, domain driver ports, the service and CLI drivers, strict suite options, and driver selection; `features/README.md` is the human entry point and mechanically indexes every feature.
 
 **Tech Stack:** Go 1.25, `github.com/cucumber/godog` v0.16.0, Cobra through the compiled CLI, standard-library Git/process/filesystem fixtures, and the existing togi services.
 
@@ -20,7 +20,7 @@
 - Do not delete or weaken existing package tests. Acceptance scenarios add a
   user-story view; package tests retain exhaustive edge and security coverage.
 - Do not install golangci-lint or gocyclo. Every gate process in this suite is
-  controlled by `acceptance/internal/harness`.
+  controlled by `features/internal/harness`.
 - Run Linux-only domain packages on Linux. On other hosts they must compile
   and skip with the reason specified in Task 7.
 
@@ -28,42 +28,42 @@
 
 ### Human entry point
 
-- `acceptance/README.md`: purpose, reading order, feature index, and driver
+- `features/README.md`: purpose, reading order, feature index, and driver
   commands.
 
 ### Shared acceptance harness
 
-- `acceptance/internal/harness/main.go`: module-root discovery, `TestMain`
+- `features/internal/harness/main.go`: module-root discovery, `TestMain`
   lifecycle, and one CLI build per domain test process.
-- `acceptance/internal/harness/selector.go`: `-acceptance.driver`, selected
+- `features/internal/harness/selector.go`: `-acceptance.driver`, selected
   factory order, driver capability tags, and host eligibility.
-- `acceptance/internal/harness/driver.go`: scenario environment, domain driver
+- `features/internal/harness/driver.go`: scenario environment, domain driver
   ports, requests, and factory contract.
-- `acceptance/internal/harness/observation.go`: raw service/process
+- `features/internal/harness/observation.go`: raw service/process
   observations, persisted-artifact decoding, and provenance-preserving outcome
   classification.
-- `acceptance/internal/harness/service_driver.go`: assembly of `run.Service`
+- `features/internal/harness/service_driver.go`: assembly of `run.Service`
   and `wiki.Service` with deterministic seams.
-- `acceptance/internal/harness/cli_driver.go`: compiled-process invocation with
+- `features/internal/harness/cli_driver.go`: compiled-process invocation with
   isolated streams, working directory, and environment.
-- `acceptance/internal/harness/repository.go`: error-returning, hermetic real
+- `features/internal/harness/repository.go`: error-returning, hermetic real
   Git repository builder.
-- `acceptance/internal/harness/gate_tool.go`: scenario-owned executable gate
+- `features/internal/harness/gate_tool.go`: scenario-owned executable gate
   doubles and external TOML definitions.
-- `acceptance/internal/harness/steps.go`: step primitives whose exact meaning
+- `features/internal/harness/steps.go`: step primitives whose exact meaning
   is shared by more than one acceptance domain.
-- `acceptance/internal/harness/*_test.go`: focused harness contracts, catalog
+- `features/internal/harness/*_test.go`: focused harness contracts, catalog
   enforcement, and driver conformance.
-- `acceptance/internal/harness/testdata/*.feature`: deliberately invalid
+- `features/internal/harness/testdata/*.feature`: deliberately invalid
   strict-mode fixtures, excluded from the human catalog.
 
 ### Acceptance domains
 
-- `acceptance/gauntlet`: running gates and judging a feature diff.
-- `acceptance/gate`: XDG gate customization.
-- `acceptance/runledger`: durable history and status selection.
-- `acceptance/wiki`: principle-page inspection and customization.
-- `acceptance/platform`: supported and unsupported platform behavior.
+- `features/gauntlet`: running gates and judging a feature diff.
+- `features/gate`: XDG gate customization.
+- `features/runledger`: durable history and status selection.
+- `features/wiki`: principle-page inspection and customization.
+- `features/platform`: supported and unsupported platform behavior.
 
 Each domain has `main_test.go`, one `.feature`/matching `_test.go` pair per
 feature, and `steps_test.go`. Test files use the package name matching the
@@ -173,14 +173,14 @@ actions/assertions unique to that story.
 **Files:**
 - Modify: `go.mod`
 - Modify: `go.sum`
-- Create: `acceptance/README.md`
-- Create: `acceptance/internal/harness/main.go`
-- Create: `acceptance/internal/harness/catalog_test.go`
+- Create: `features/README.md`
+- Create: `features/internal/harness/main.go`
+- Create: `features/internal/harness/catalog_test.go`
 
 - [ ] **Step 1: Write the failing catalog test**
 
 Create `TestFeatureIndex` in `catalog_test.go`. It must locate the module by
-walking upward to `go.mod`, read `acceptance/README.md`, and enforce all of
+walking upward to `go.mod`, read `features/README.md`, and enforce all of
 these conditions in one test:
 
 ```go
@@ -194,17 +194,17 @@ var indexLine = regexp.MustCompile(`^- \[[^]]+\]\(([^)]+\.feature)\)$`)
 
 - exactly one start marker and one end marker, in that order;
 - every nonblank line between them matches `indexLine`;
-- recursively discover `acceptance/<domain>/*.feature` while excluding path
+- recursively discover `features/<domain>/*.feature` while excluding path
   components named `internal` or `testdata`;
-- compare slash-normalized paths relative to `acceptance/` as sets with no
+- compare slash-normalized paths relative to `features/` as sets with no
   duplicates on either side;
 - require `name_test.go` beside every `name.feature`.
 
 - [ ] **Step 2: Verify the test is red**
 
-Run: `go test ./acceptance/internal/harness -run TestFeatureIndex -v`
+Run: `go test ./features/internal/harness -run TestFeatureIndex -v`
 
-Expected: FAIL because `acceptance/README.md` does not exist.
+Expected: FAIL because `features/README.md` does not exist.
 
 - [ ] **Step 3: Add the module-root helper and initial README**
 
@@ -235,7 +235,7 @@ func findModuleRoot(start string) (string, error) {
 }
 ```
 
-Create `acceptance/README.md` with this initial body. Later domain tasks add
+Create `features/README.md` with this initial body. Later domain tasks add
 links between the markers.
 
 ~~~markdown
@@ -255,20 +255,20 @@ domain: history, gate customization, principle pages, and platform support.
 The default command runs the application service driver:
 
 ```sh
-go test ./acceptance/... -v
+go test ./features/... -v
 ```
 
 Use the compiled process boundary explicitly:
 
 ```sh
-go test ./acceptance/... -v -args -acceptance.driver=cli
-go test ./acceptance/... -v -args -acceptance.driver=all
+go test ./features/... -v -args -acceptance.driver=cli
+go test ./features/... -v -args -acceptance.driver=all
 ```
 ~~~
 
 - [ ] **Step 4: Verify the empty catalog is green**
 
-Run: `go test ./acceptance/internal/harness -run TestFeatureIndex -v`
+Run: `go test ./features/internal/harness -run TestFeatureIndex -v`
 
 Expected: PASS with zero discovered feature files.
 
@@ -282,21 +282,21 @@ this point `go get` may classify it as indirect temporarily.
 
 - [ ] **Step 6: Verify and commit**
 
-Run: `go test ./acceptance/internal/harness -v`
+Run: `go test ./features/internal/harness -v`
 
 Expected: PASS.
 
 ```bash
-git add go.mod go.sum acceptance/README.md acceptance/internal/harness/main.go acceptance/internal/harness/catalog_test.go
+git add go.mod go.sum features/README.md features/internal/harness/main.go features/internal/harness/catalog_test.go
 git commit -m "Establish the acceptance specification catalog" -m "Give human readers one checked entry point and pin the Gherkin runner before adding executable stories."
 ```
 
 ### Task 2: Preserve Raw Observations Across Driver Boundaries
 
 **Files:**
-- Create: `acceptance/internal/harness/driver.go`
-- Create: `acceptance/internal/harness/observation.go`
-- Create: `acceptance/internal/harness/observation_test.go`
+- Create: `features/internal/harness/driver.go`
+- Create: `features/internal/harness/observation.go`
+- Create: `features/internal/harness/observation_test.go`
 
 - [ ] **Step 1: Write failing provenance tests**
 
@@ -328,7 +328,7 @@ separate from rendered stdout, and defensive copies of byte slices/maps.
 
 - [ ] **Step 2: Verify the tests are red**
 
-Run: `go test ./acceptance/internal/harness -run 'TestReport|TestOutcome|TestRaw' -v`
+Run: `go test ./features/internal/harness -run 'TestReport|TestOutcome|TestRaw' -v`
 
 Expected: compilation fails because the observation types are undefined.
 
@@ -478,7 +478,7 @@ status. It never consults report bytes or a decoded verdict.
 
 - [ ] **Step 5: Verify, tidy, and commit**
 
-Run: `go test ./acceptance/internal/harness -v`
+Run: `go test ./features/internal/harness -v`
 
 Expected: PASS.
 
@@ -487,15 +487,15 @@ Run: `go mod tidy`
 Expected: Godog v0.16.0 is a direct requirement.
 
 ```bash
-git add go.mod go.sum acceptance/internal/harness/driver.go acceptance/internal/harness/observation.go acceptance/internal/harness/observation_test.go
+git add go.mod go.sum features/internal/harness/driver.go features/internal/harness/observation.go features/internal/harness/observation_test.go
 git commit -m "Define acceptance driver observations" -m "Keep process outcomes and persisted reports as independent evidence so the harness cannot recreate togi's verdict semantics."
 ```
 
 ### Task 3: Build Hermetic Repository Fixtures
 
 **Files:**
-- Create: `acceptance/internal/harness/repository.go`
-- Create: `acceptance/internal/harness/repository_test.go`
+- Create: `features/internal/harness/repository.go`
+- Create: `features/internal/harness/repository_test.go`
 
 - [ ] **Step 1: Write failing repository-builder tests**
 
@@ -527,7 +527,7 @@ escaping `Root`.
 
 - [ ] **Step 2: Verify the tests are red**
 
-Run: `go test ./acceptance/internal/harness -run TestRepository -v`
+Run: `go test ./features/internal/harness -run TestRepository -v`
 
 Expected: compilation fails because `Repository` is undefined.
 
@@ -547,20 +547,20 @@ output of `git ls-tree -r --name-only HEAD`.
 
 - [ ] **Step 4: Verify and commit**
 
-Run: `go test ./acceptance/internal/harness -run TestRepository -v`
+Run: `go test ./features/internal/harness -run TestRepository -v`
 
 Expected: PASS.
 
 ```bash
-git add acceptance/internal/harness/repository.go acceptance/internal/harness/repository_test.go
+git add features/internal/harness/repository.go features/internal/harness/repository_test.go
 git commit -m "Add acceptance repository fixtures" -m "Build user-visible Git histories with the same hermetic command policy used by production tests."
 ```
 
 ### Task 4: Build Executable Gate Fixtures
 
 **Files:**
-- Create: `acceptance/internal/harness/gate_tool.go`
-- Create: `acceptance/internal/harness/gate_tool_test.go`
+- Create: `features/internal/harness/gate_tool.go`
+- Create: `features/internal/harness/gate_tool_test.go`
 
 - [ ] **Step 1: Write failing fake-tool and gate-definition tests**
 
@@ -611,7 +611,7 @@ shipped gate, and an additional override-only gate.
 
 - [ ] **Step 2: Verify the tests are red**
 
-Run: `go test ./acceptance/internal/harness -run 'TestInstallTool|TestWriteGate' -v`
+Run: `go test ./features/internal/harness -run 'TestInstallTool|TestWriteGate' -v`
 
 Expected: compilation fails because the gate-fixture API is undefined.
 
@@ -634,20 +634,20 @@ five seconds, `golangci-json`, and warning severity.
 
 - [ ] **Step 4: Verify and commit**
 
-Run: `go test ./acceptance/internal/harness -run 'TestInstallTool|TestWriteGate' -v`
+Run: `go test ./features/internal/harness -run 'TestInstallTool|TestWriteGate' -v`
 
 Expected: PASS on Linux; executable-tool cases skip explicitly on Windows.
 
 ```bash
-git add acceptance/internal/harness/gate_tool.go acceptance/internal/harness/gate_tool_test.go
+git add features/internal/harness/gate_tool.go features/internal/harness/gate_tool_test.go
 git commit -m "Add executable acceptance gate fixtures" -m "Control tool output, timing, versions, and failures without requiring operator-installed gate binaries."
 ```
 
 ### Task 5: Assemble the Service Driver
 
 **Files:**
-- Create: `acceptance/internal/harness/service_driver.go`
-- Create: `acceptance/internal/harness/service_driver_test.go`
+- Create: `features/internal/harness/service_driver.go`
+- Create: `features/internal/harness/service_driver_test.go`
 
 - [ ] **Step 1: Write failing service-driver contract tests**
 
@@ -670,7 +670,7 @@ Use a committed repository and external gate definition to assert:
 
 - [ ] **Step 2: Verify the tests are red**
 
-Run: `go test ./acceptance/internal/harness -run TestServiceDriver -v`
+Run: `go test ./features/internal/harness -run TestServiceDriver -v`
 
 Expected: compilation fails because `serviceFactory` is undefined.
 
@@ -712,24 +712,24 @@ execution without redesigning environment injection.
 
 - [ ] **Step 4: Verify and commit**
 
-Run: `go test ./acceptance/internal/harness -run TestServiceDriver -v`
+Run: `go test ./features/internal/harness -run TestServiceDriver -v`
 
 Expected: PASS on Linux; runtime cases skip elsewhere.
 
 ```bash
-git add acceptance/internal/harness/service_driver.go acceptance/internal/harness/service_driver_test.go
+git add features/internal/harness/service_driver.go features/internal/harness/service_driver_test.go
 git commit -m "Add the acceptance service driver" -m "Exercise assembled application services while observing only their public output and persisted artifacts."
 ```
 
 ### Task 6: Select and Run the Compiled CLI Driver
 
 **Files:**
-- Modify: `acceptance/internal/harness/main.go`
-- Create: `acceptance/internal/harness/selector.go`
-- Create: `acceptance/internal/harness/cli_driver.go`
-- Create: `acceptance/internal/harness/main_test.go`
-- Create: `acceptance/internal/harness/selector_test.go`
-- Create: `acceptance/internal/harness/driver_conformance_test.go`
+- Modify: `features/internal/harness/main.go`
+- Create: `features/internal/harness/selector.go`
+- Create: `features/internal/harness/cli_driver.go`
+- Create: `features/internal/harness/main_test.go`
+- Create: `features/internal/harness/selector_test.go`
+- Create: `features/internal/harness/driver_conformance_test.go`
 
 - [ ] **Step 1: Write failing selection and lifecycle tests**
 
@@ -776,7 +776,7 @@ raw artifacts outside the target repository.
 
 - [ ] **Step 3: Verify the tests are red**
 
-Run: `go test ./acceptance/internal/harness -run 'TestSelect|TestMain|TestDriverConformance' -v`
+Run: `go test ./features/internal/harness -run 'TestSelect|TestMain|TestDriverConformance' -v`
 
 Expected: compilation fails because selection, `Main`, and the CLI factory are
 undefined.
@@ -838,24 +838,24 @@ report chosen by the driver.
 
 - [ ] **Step 6: Verify and commit**
 
-Run: `go test ./acceptance/internal/harness -run 'TestSelect|TestMain|TestDriverConformance' -v`
+Run: `go test ./features/internal/harness -run 'TestSelect|TestMain|TestDriverConformance' -v`
 
 Expected: PASS.
 
 ```bash
-git add acceptance/internal/harness/main.go acceptance/internal/harness/main_test.go acceptance/internal/harness/selector.go acceptance/internal/harness/selector_test.go acceptance/internal/harness/cli_driver.go acceptance/internal/harness/driver_conformance_test.go
+git add features/internal/harness/main.go features/internal/harness/main_test.go features/internal/harness/selector.go features/internal/harness/selector_test.go features/internal/harness/cli_driver.go features/internal/harness/driver_conformance_test.go
 git commit -m "Add selectable acceptance drivers" -m "Keep service execution as the default while making the compiled process boundary and all-driver matrix explicit."
 ```
 
 ### Task 7: Enforce Strict, Deterministic Godog Suites
 
 **Files:**
-- Modify: `acceptance/internal/harness/selector.go`
-- Create: `acceptance/internal/harness/godog.go`
-- Create: `acceptance/internal/harness/godog_test.go`
-- Create: `acceptance/internal/harness/testdata/undefined.feature`
-- Create: `acceptance/internal/harness/testdata/pending.feature`
-- Create: `acceptance/internal/harness/testdata/ambiguous.feature`
+- Modify: `features/internal/harness/selector.go`
+- Create: `features/internal/harness/godog.go`
+- Create: `features/internal/harness/godog_test.go`
+- Create: `features/internal/harness/testdata/undefined.feature`
+- Create: `features/internal/harness/testdata/pending.feature`
+- Create: `features/internal/harness/testdata/ambiguous.feature`
 
 - [ ] **Step 1: Write failing suite-option tests**
 
@@ -897,7 +897,7 @@ testing interface and that options never allow concurrency above one.
 
 - [ ] **Step 2: Verify the tests are red**
 
-Run: `go test ./acceptance/internal/harness -run 'TestFeatureOptions|TestStrict|TestDriverTags' -v`
+Run: `go test ./features/internal/harness -run 'TestFeatureOptions|TestStrict|TestDriverTags' -v`
 
 Expected: compilation fails because the Godog helpers are undefined.
 
@@ -924,24 +924,24 @@ equivalence between differently worded steps.
 
 - [ ] **Step 4: Verify and commit**
 
-Run: `go test ./acceptance/internal/harness -v`
+Run: `go test ./features/internal/harness -v`
 
 Expected: PASS, including the nonzero strict-mode meta-tests.
 
 ```bash
-git add acceptance/internal/harness/selector.go acceptance/internal/harness/godog.go acceptance/internal/harness/godog_test.go acceptance/internal/harness/testdata
+git add features/internal/harness/selector.go features/internal/harness/godog.go features/internal/harness/godog_test.go features/internal/harness/testdata
 git commit -m "Enforce strict acceptance suite execution" -m "Fail empty, undefined, pending, ambiguous, randomized, or unexpectedly parallel feature runs instead of accepting an incomplete specification."
 ```
 
 ### Task 8: Specify Running the Gauntlet
 
 **Files:**
-- Modify: `acceptance/README.md`
-- Create: `acceptance/gauntlet/main_test.go`
-- Create: `acceptance/gauntlet/running_the_gauntlet.feature`
-- Create: `acceptance/gauntlet/running_the_gauntlet_test.go`
-- Create: `acceptance/gauntlet/steps_test.go`
-- Create: `acceptance/internal/harness/steps.go`
+- Modify: `features/README.md`
+- Create: `features/gauntlet/main_test.go`
+- Create: `features/gauntlet/running_the_gauntlet.feature`
+- Create: `features/gauntlet/running_the_gauntlet_test.go`
+- Create: `features/gauntlet/steps_test.go`
+- Create: `features/internal/harness/steps.go`
 
 - [ ] **Step 1: Author the feature and index it**
 
@@ -1055,7 +1055,7 @@ visible in review.
 
 - [ ] **Step 3: Verify strict mode makes the feature red**
 
-Run: `go test ./acceptance/gauntlet -run '^TestRunningTheGauntlet$' -v`
+Run: `go test ./features/gauntlet -run '^TestRunningTheGauntlet$' -v`
 
 Expected: FAIL with pending-step diagnostics for the first scenario.
 
@@ -1092,28 +1092,28 @@ They never call `t.Fatal` and never inspect a service-returned report.
 
 - [ ] **Step 5: Verify both drivers and commit**
 
-Run: `go test ./acceptance/gauntlet -run '^TestRunningTheGauntlet$' -v`
+Run: `go test ./features/gauntlet -run '^TestRunningTheGauntlet$' -v`
 
 Expected: PASS through the default service driver.
 
-Run: `go test ./acceptance/gauntlet -run '^TestRunningTheGauntlet$' -v -args -acceptance.driver=all`
+Run: `go test ./features/gauntlet -run '^TestRunningTheGauntlet$' -v -args -acceptance.driver=all`
 
 Expected: every example runs first under `service`, then under `cli`, and
 passes without installed gate tools.
 
 ```bash
-git add acceptance/README.md acceptance/gauntlet acceptance/internal/harness/steps.go
+git add features/README.md features/gauntlet features/internal/harness/steps.go
 git commit -m "Specify running the gauntlet" -m "Describe gate execution, normalized findings, infrastructure errors, and verdicts as one executable user story."
 ```
 
 ### Task 9: Specify Judging a Feature Diff
 
 **Files:**
-- Modify: `acceptance/README.md`
-- Create: `acceptance/gauntlet/judging_a_feature_diff.feature`
-- Create: `acceptance/gauntlet/judging_a_feature_diff_test.go`
-- Modify: `acceptance/gauntlet/steps_test.go`
-- Modify: `acceptance/internal/harness/steps.go`
+- Modify: `features/README.md`
+- Create: `features/gauntlet/judging_a_feature_diff.feature`
+- Create: `features/gauntlet/judging_a_feature_diff_test.go`
+- Modify: `features/gauntlet/steps_test.go`
+- Modify: `features/internal/harness/steps.go`
 
 - [ ] **Step 1: Author and index the diff feature**
 
@@ -1215,7 +1215,7 @@ Create `TestJudgingAFeatureDiff` with the same initializer pattern and
 Linux precondition as Task 8. Reuse exact shared expressions by binding the
 harness step set; do not copy them into the gauntlet package.
 
-Run: `go test ./acceptance/gauntlet -run '^TestJudgingAFeatureDiff$' -v`
+Run: `go test ./features/gauntlet -run '^TestJudgingAFeatureDiff$' -v`
 
 Expected: FAIL on pending diff-specific steps.
 
@@ -1244,28 +1244,28 @@ substring, not concrete wrapped error types.
 
 - [ ] **Step 4: Verify both drivers and commit**
 
-Run: `go test ./acceptance/gauntlet -run '^TestJudgingAFeatureDiff$' -v -args -acceptance.driver=all`
+Run: `go test ./features/gauntlet -run '^TestJudgingAFeatureDiff$' -v -args -acceptance.driver=all`
 
 Expected: PASS under service and CLI.
 
-Run: `go test ./acceptance/gauntlet -v`
+Run: `go test ./features/gauntlet -v`
 
 Expected: both gauntlet features PASS under service.
 
 ```bash
-git add acceptance/README.md acceptance/gauntlet/judging_a_feature_diff.feature acceptance/gauntlet/judging_a_feature_diff_test.go acceptance/gauntlet/steps_test.go acceptance/internal/harness/steps.go
+git add features/README.md features/gauntlet/judging_a_feature_diff.feature features/gauntlet/judging_a_feature_diff_test.go features/gauntlet/steps_test.go features/internal/harness/steps.go
 git commit -m "Specify judging a feature diff" -m "Make merge-base scope and repository preconditions readable at the user-story boundary."
 ```
 
 ### Task 10: Specify Durable Run History
 
 **Files:**
-- Modify: `acceptance/README.md`
-- Create: `acceptance/runledger/main_test.go`
-- Create: `acceptance/runledger/keeping_run_history.feature`
-- Create: `acceptance/runledger/keeping_run_history_test.go`
-- Create: `acceptance/runledger/steps_test.go`
-- Modify: `acceptance/internal/harness/steps.go`
+- Modify: `features/README.md`
+- Create: `features/runledger/main_test.go`
+- Create: `features/runledger/keeping_run_history.feature`
+- Create: `features/runledger/keeping_run_history_test.go`
+- Create: `features/runledger/steps_test.go`
+- Modify: `features/internal/harness/steps.go`
 
 - [ ] **Step 1: Author and index the history feature**
 
@@ -1335,7 +1335,7 @@ Feature: Keeping run history
 Create the exact `TestMain` wrapper and `TestKeepingRunHistory`; call
 `RequireLinux` before driver iteration.
 
-Run: `go test ./acceptance/runledger -run '^TestKeepingRunHistory$' -v`
+Run: `go test ./features/runledger -run '^TestKeepingRunHistory$' -v`
 
 Expected: FAIL on pending history steps.
 
@@ -1366,24 +1366,24 @@ step cannot strand the test process.
 
 - [ ] **Step 4: Verify both drivers and commit**
 
-Run: `go test ./acceptance/runledger -v -args -acceptance.driver=all`
+Run: `go test ./features/runledger -v -args -acceptance.driver=all`
 
 Expected: PASS under service and CLI.
 
 ```bash
-git add acceptance/README.md acceptance/runledger acceptance/internal/harness/steps.go
+git add features/README.md features/runledger features/internal/harness/steps.go
 git commit -m "Specify durable run history" -m "Exercise external persistence, repository-wide locking, pruning, and latest-valid status selection as user behavior."
 ```
 
 ### Task 11: Specify Gate Customization
 
 **Files:**
-- Modify: `acceptance/README.md`
-- Create: `acceptance/gate/main_test.go`
-- Create: `acceptance/gate/customizing_gates.feature`
-- Create: `acceptance/gate/customizing_gates_test.go`
-- Create: `acceptance/gate/steps_test.go`
-- Modify: `acceptance/internal/harness/steps.go`
+- Modify: `features/README.md`
+- Create: `features/gate/main_test.go`
+- Create: `features/gate/customizing_gates.feature`
+- Create: `features/gate/customizing_gates_test.go`
+- Create: `features/gate/steps_test.go`
+- Modify: `features/internal/harness/steps.go`
 
 - [ ] **Step 1: Author and index the gate feature**
 
@@ -1435,7 +1435,7 @@ Feature: Customizing gates
 Create the domain `TestMain`, call `RequireLinux`, and assemble one suite for
 `customizing_gates.feature`.
 
-Run: `go test ./acceptance/gate -v`
+Run: `go test ./features/gate -v`
 
 Expected: FAIL on pending customization steps.
 
@@ -1454,23 +1454,23 @@ tree is unchanged.
 
 - [ ] **Step 4: Verify both drivers and commit**
 
-Run: `go test ./acceptance/gate -v -args -acceptance.driver=all`
+Run: `go test ./features/gate -v -args -acceptance.driver=all`
 
 Expected: PASS under service and CLI.
 
 ```bash
-git add acceptance/README.md acceptance/gate acceptance/internal/harness/steps.go
+git add features/README.md features/gate features/internal/harness/steps.go
 git commit -m "Specify gate customization" -m "Show that operator-owned XDG definitions replace and extend shipped gates without touching collaborator repositories."
 ```
 
 ### Task 12: Specify Principle Pages
 
 **Files:**
-- Modify: `acceptance/README.md`
-- Create: `acceptance/wiki/main_test.go`
-- Create: `acceptance/wiki/using_principle_pages.feature`
-- Create: `acceptance/wiki/using_principle_pages_test.go`
-- Create: `acceptance/wiki/steps_test.go`
+- Modify: `features/README.md`
+- Create: `features/wiki/main_test.go`
+- Create: `features/wiki/using_principle_pages.feature`
+- Create: `features/wiki/using_principle_pages_test.go`
+- Create: `features/wiki/steps_test.go`
 
 - [ ] **Step 1: Author and index the wiki feature**
 
@@ -1532,7 +1532,7 @@ Feature: Using principle pages
 Create the domain `TestMain` and Godog suite. Do not call `RequireLinux`; wiki
 service and CLI behavior are portable and use no gate executables.
 
-Run: `go test ./acceptance/wiki -v`
+Run: `go test ./features/wiki -v`
 
 Expected: FAIL on pending page steps.
 
@@ -1550,24 +1550,24 @@ for inability to create/read fixtures or invoke a driver.
 
 - [ ] **Step 4: Verify both drivers and commit**
 
-Run: `go test ./acceptance/wiki -v -args -acceptance.driver=all`
+Run: `go test ./features/wiki -v -args -acceptance.driver=all`
 
 Expected: PASS under service and CLI on every build host.
 
 ```bash
-git add acceptance/README.md acceptance/wiki
+git add features/README.md features/wiki
 git commit -m "Specify principle page behavior" -m "Make shipped guidance, XDG overrides, alias diagnostics, and non-destructive ejection executable user stories."
 ```
 
 ### Task 13: Specify Platform Support
 
 **Files:**
-- Modify: `acceptance/README.md`
-- Create: `acceptance/platform/main_test.go`
-- Create: `acceptance/platform/supporting_platforms.feature`
-- Create: `acceptance/platform/supporting_platforms_test.go`
-- Create: `acceptance/platform/steps_test.go`
-- Modify: `acceptance/internal/harness/selector.go`
+- Modify: `features/README.md`
+- Create: `features/platform/main_test.go`
+- Create: `features/platform/supporting_platforms.feature`
+- Create: `features/platform/supporting_platforms_test.go`
+- Create: `features/platform/steps_test.go`
+- Modify: `features/internal/harness/selector.go`
 
 - [ ] **Step 1: Author and index the platform feature**
 
@@ -1622,7 +1622,7 @@ non-Linux: exclude @linux
 CLI:       additionally exclude @simulated-platform
 ```
 
-Run: `go test ./acceptance/platform -v`
+Run: `go test ./features/platform -v`
 
 Expected on Linux: FAIL on the real-Linux and simulated-platform pending
 steps. Expected elsewhere: FAIL on the real-unsupported and simulated-platform
@@ -1648,30 +1648,30 @@ resolution, gate startup, and ledger access.
 
 - [ ] **Step 4: Verify driver matrices and commit**
 
-Run: `go test ./acceptance/platform -v`
+Run: `go test ./features/platform -v`
 
 Expected: service runs all host-eligible scenarios.
 
-Run: `go test ./acceptance/platform -v -args -acceptance.driver=cli`
+Run: `go test ./features/platform -v -args -acceptance.driver=cli`
 
 Expected: CLI runs exactly the real-host scenario and never silently succeeds
 with zero examples.
 
-Run: `go test ./acceptance/platform -v -args -acceptance.driver=all`
+Run: `go test ./features/platform -v -args -acceptance.driver=all`
 
 Expected: service includes simulated examples; CLI excludes only those
 examples and runs the real-host example.
 
 ```bash
-git add acceptance/README.md acceptance/platform acceptance/internal/harness/selector.go
+git add features/README.md features/platform features/internal/harness/selector.go
 git commit -m "Specify supported platform outcomes" -m "Prove unsupported systems stop before repository, gate, or ledger work and cannot look like a passing gauntlet."
 ```
 
 ### Task 14: Audit the Executable Catalog and Full Driver Matrix
 
 **Files:**
-- Modify: `acceptance/README.md`
-- Modify: `acceptance/internal/harness/catalog_test.go`
+- Modify: `features/README.md`
+- Modify: `features/internal/harness/catalog_test.go`
 - Modify: acceptance files only when the audit finds a concrete gap
 
 - [ ] **Step 1: Add the static driver-exclusion audit**
@@ -1694,7 +1694,7 @@ when an exclusion has an empty reason. Treat `@linux` and
 
 - [ ] **Step 2: Verify the human catalog mechanically**
 
-Run: `go test ./acceptance/internal/harness -run 'TestFeatureIndex|TestDriverCapabilityMatrix' -v`
+Run: `go test ./features/internal/harness -run 'TestFeatureIndex|TestDriverCapabilityMatrix' -v`
 
 Expected: PASS with exactly six indexed features, six adjacent matching test
 files, and one declared CLI capability exclusion.
@@ -1727,7 +1727,7 @@ With module dependencies already present, disable network access for the test
 process using the environment's available network sandbox and run:
 
 ```sh
-go test ./acceptance/... -v
+go test ./features/... -v
 go test ./...
 go build ./...
 ```
@@ -1740,8 +1740,8 @@ no scenario requires installed gate tools or network access.
 Still without network access or installed gate tools, run:
 
 ```sh
-go test ./acceptance/... -v -args -acceptance.driver=cli
-go test ./acceptance/... -v -args -acceptance.driver=all
+go test ./features/... -v -args -acceptance.driver=cli
+go test ./features/... -v -args -acceptance.driver=all
 ```
 
 Expected: PASS. CLI-only runs no service examples; all-driver output shows
@@ -1753,7 +1753,7 @@ skipped.
 Run:
 
 ```sh
-go list -deps ./cmd/togi | rg 'cucumber|acceptance/internal/harness'
+go list -deps ./cmd/togi | rg 'cucumber|features/internal/harness'
 ```
 
 Expected: no output and exit 1 from `rg`, proving the production command does
@@ -1762,7 +1762,7 @@ not depend on Godog or the acceptance harness.
 Then run:
 
 ```sh
-go build ./acceptance/internal/harness
+go build ./features/internal/harness
 ```
 
 Expected: PASS, proving the ordinary shared harness still compiles under
@@ -1785,9 +1785,9 @@ Before declaring implementation complete, record the exit status and scenario
 counts from:
 
 ```sh
-go test ./acceptance/... -v
-go test ./acceptance/... -v -args -acceptance.driver=cli
-go test ./acceptance/... -v -args -acceptance.driver=all
+go test ./features/... -v
+go test ./features/... -v -args -acceptance.driver=cli
+go test ./features/... -v -args -acceptance.driver=all
 go test ./...
 go build ./...
 ```

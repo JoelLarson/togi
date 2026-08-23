@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/cucumber/godog"
-	"github.com/joellarson/togi/acceptance/internal/harness"
+	"github.com/joellarson/togi/features/internal/harness"
 )
 
 func TestSupportingPlatforms(t *testing.T) {
