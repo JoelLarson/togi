@@ -14,13 +14,15 @@ immediately rather than at the end.
   shipped Go gates, external run ledger, and Linux runtime boundary are built.
 - **Phase 2: complete.** Committed-diff scoping, Go entity enrichment, clean
   repository preconditions, and conventional local trunk discovery are built.
-- **Phase 3: next.** The fix loop has no approved implementation plan yet;
-  `internal/adapter`, `internal/flywheel`, and `internal/triage` remain package
-  seams rather than working loop components.
+- **Phase 3: tracer complete.** The safe serial fix loop is implemented with
+  file-based batching, a Codex adapter, Go behavioral-suite evidence,
+  integrity checks, retry, iteration/wall-clock rails, immutable validation,
+  and guarded squash landing. Fingerprint-keyed waivers and Claude/Kimi
+  conformance adapters remain before Phase 4.
 - **Phase 4: partially implemented ahead of sequence.** Principle-page
   loading, alias resolution, `wiki show`, `wiki lint`, `wiki eject`, and the
-  first shipped page are built. Triage, `plan.json`, brief assembly, and resume
-  behavior remain.
+  first shipped page are built. Richer containment triage, principle-aware
+  plan/brief enrichment, and resume behavior remain.
 - **Phase 5: not started.**
 
 The completed executable-specification detour added the human-readable catalog
@@ -144,28 +146,43 @@ largest and riskiest phase.
   cache dir; commit per validated batch; squash-land on success; refuse to
   land if the feature branch moved (ADR-0010).
 - **Agent adapter** — the vendor-neutral interface; brief on stdin, cwd is
-  the worktree, results read back as the diff (ADR-0009). Claude first, then
-  codex and kimi to prove the seam is real.
+  the worktree, results read back as the diff (ADR-0009). Codex first; Claude
+  and Kimi remain as conformance adapters.
 - **Naive batching** — group by file, no intelligence. The loop has to run
   before phase 4 can make it smart; phase 4 replaces this wholesale.
-- **Suite discovery** — per-language defaults, baseline check reported before
-  any fixing, `unverified` verdict when there's no green suite. Overrides are
-  deferred with the general configuration surface.
-- **Batch validation** — instant/fast gates must not regress, integrity gates
-  clean, suite green; failure resets to the last green batch.
-- **Integrity gates** — suppression counter, test integrity, naming
-  integrity. All diff-based, so they depend on phase 2.
-- **Retry policy** — one fresh-context retry with a deterministic failure
-  note, then the batch is marked stuck.
-- **Rails and stalemate** — max iterations, wall-clock, spend; the finding
-  set must strictly shrink each iteration.
+- **Suite discovery** — the Go default is discovered and run before any
+  adapter. An absent/red baseline returns `unverified`; an errored initial gate
+  still reports all sibling gate signal, then prevents adapter execution.
+  Overrides are deferred with the general configuration surface.
+- **Batch validation** — instant/fast plus the assigned finding's owning gate
+  must strictly improve blockers, integrity gates must be clean, and changed Go
+  packages (or the full suite when selection is unsafe) must be green; semantic
+  failure resets to the last green batch.
+- **Integrity gates** — suppression and test-integrity checks are implemented.
+  Compilation-only test edits required by an unambiguous production rename are
+  allowed; test discovery identities, behavior, and fixtures remain protected.
+- **Retry policy** — semantic failures receive one fresh-context retry with a
+  deterministic failure note, then the batch is marked stuck. A repeated
+  retryable adapter error is `errored`; other infrastructure failure remains
+  terminally distinct from stuck code.
+- **Rails and stalemate** — max iterations and wall-clock are enforced, and
+  the finding set must strictly shrink each iteration. Spend rails are
+  deferred; adapter usage is optional evidence.
 - **`togi waive`** — fingerprint-keyed operator approvals, persisted with
-  reason and timestamp.
+  reason and timestamp, remain the final Phase 3 slice.
 
-**Exit criteria:** on a deliberately-degraded branch, togi fixes the findings
-and lands one squashed commit; an agent that deletes a test trips integrity
-and blocks; a waiver unblocks the re-run; a repo with a red baseline suite
-reports that *before* fixing and never claims merge-ready.
+**Tracer exit criteria: complete.** On a deliberately degraded branch, togi
+fixes the findings in a togi-owned external worktree and updates the original
+worktree once with one guarded squashed commit. Test weakening and new
+suppressions block; compilation-only test edits required by a witnessed
+production rename pass without weakening test behavior. An absent/red baseline
+or errored initial gate runs no adapter. Iteration and wall-clock rails bound
+work. A successful Phase 3 run is `unsealed` with exit 6 because the Phase 5
+seal is not implemented.
+
+**Remaining Phase 3 exit criterion:** a fingerprint-keyed waiver unblocks an
+otherwise accepted integrity violation; Claude and Kimi pass the adapter
+conformance contract without weakening Codex isolation.
 
 > **Risk: spend rails depend on the vendor CLIs.** Iteration and wall-clock
 > rails are togi's to enforce, but token/cost accounting has to come from
@@ -176,7 +193,7 @@ reports that *before* fixing and never claims merge-ready.
 
 ---
 
-## Phase 4 — Triage, the flywheel, and the wiki
+## Phase 4 — Triage, enriched plans and briefs, resume, and the wiki
 
 **Goal:** fixes happen in the right order, with the right context.
 
@@ -187,13 +204,13 @@ reports that *before* fixing and never claims merge-ready.
   (ADR-0005). Consumes `end_line` from phase 2's enricher.
 - **Grouping and ordering** — by (file, principle page), falling back to
   (file, rule_id); ordered by gauntlet position, then path.
-- **`plan.json`** — the ordered batch list with statuses; resumable and
-  inspectable. Replaces phase 3's naive batching.
+- **`plan.json`** — enrich Phase 3's inspectable primary-file plan with
+  triage ordering, principle-page references, and resumable execution.
 - **Wiki mechanics** — principle page format, alias resolution from language
   bindings, `togi wiki lint` for dangling and conflicting mappings,
   `togi wiki show <page>` for the computed reverse index.
-- **Brief assembly** — deterministic concatenation: findings → principle
-  pages → addenda → file:line pointers → constraints (ADR-0006).
+- **Brief assembly** — enrich Phase 3's bounded finding brief with principle
+  pages and addenda while preserving deterministic ordering (ADR-0006).
 - **The first principle pages** — written lazily, driven by fixes that
   actually came out wrong while dogfooding. Not written speculatively.
 

@@ -39,14 +39,19 @@ need to vary.
 
 ## Behavioral suite discovery
 
-Per-language defaults: `go test ./...` / `cargo test` for the suite,
-`go build ./...` / `cargo check` for the build. **Green means exit 0.**
+The Phase 3 Go suite uses `go list` to discover packages containing runnable
+tests or examples selected by the pinned build environment. When it finds any,
+the baseline and final barriers run `go test ./...`; local batch validation may
+run only the safely identified changed packages. **Green means exit 0.** A
+separate `go build ./...` behavioral check is not implemented. Rust discovery
+and its future `cargo test` / `cargo check` defaults arrive in Phase 5.
 Overrides for monorepos, build tags, and service subsets are deferred with the
 rest of the general configuration surface.
 
 If no suite exists, or the suite is red at baseline, togi reports that
-*before* any fixing starts, and the run's verdict caps at **unverified** — the
-fix loop may still run, but merge-ready is unreachable by definition.
+*before* any fixing starts and returns **unverified**. No adapter runs: an
+absent or red baseline provides no behavioral evidence against which an agent
+mutation could be judged.
 
 ## Severity and what blocks
 
@@ -65,20 +70,27 @@ findings. An infrastructure failure must never silently become "zero
 findings," which is how a missing mutation tool would let a seal pass that
 shouldn't.
 
-Consequences: other gates keep running (you still get their signal), the fix
-loop may proceed on healthy gates' findings, and merge-ready is impossible
-while any enabled gate is errored. Errored gates are surfaced loudly in the
-report.
+Consequences: other initial gates keep running so the report retains all gate
+signal, but no adapter runs when any enabled initial gate is errored.
+Merge-ready is impossible and errored gates are surfaced loudly in the report.
 
 ## Batch validation and retry
 
-A batch is validated before commit: instant/fast gates must not regress,
-integrity gates must be clean, the suite must be green.
+A batch is validated from immutable staged tree evidence before commit:
+suppression and test integrity must be clean; instant/fast and assigned-owner
+gates must strictly improve blockers; and the changed Go packages, or the full
+suite when package selection is unsafe, must be green. Related cross-file edits
+are permitted even though deterministic Phase 3 batching is keyed by the
+finding's primary file.
 
-On failure: reset to the last green batch, then **retry once in a fresh agent
+On semantic failure (no change, integrity violation, regression, or failed
+validation), reset to the last green batch, then **retry once in a fresh agent
 context** with a deterministic failure note appended to the brief ("the
-previous attempt broke X"). A second failure marks the batch **stuck**; its
-findings carry into stalemate accounting and the flywheel moves on.
+previous attempt broke X"). A second semantic failure marks the batch
+**stuck**; its findings carry into stalemate accounting and the flywheel moves
+on. Retryable adapter failures may receive one retry, but a repeated adapter
+failure is `errored`; non-retryable adapter and other infrastructure failures
+are terminally `errored`, never stuck code.
 
 One retry catches a flaky test or a bad sample. A batch that fails twice
 usually needs a wiki page or a different threshold — an operator decision, not
@@ -87,8 +99,10 @@ promising work available.
 
 ## Rails and stalemate
 
-Hard rails: max iterations, wall-clock, agent spend/tokens — initially using
-shipped defaults with explicit per-run flags.
+Phase 3 enforces max-iteration and wall-clock rails, using shipped defaults
+with explicit per-run flags. Spend/token rails are deferred until additional
+adapters establish a trustworthy conformance and usage-accounting contract;
+Codex usage remains optional report evidence, not a rail.
 
 Stalemate: the **finding set must strictly shrink** each iteration, compared
 by `(fingerprint, occurrence count)`. Comparing sets rather than counts catches
@@ -100,6 +114,8 @@ stops with a `blocked` report naming the persistent fingerprints — a stuck
 finding usually means a missing wiki page or a wrong threshold.
 
 ## Operator approvals: waivers
+
+**Deferred Phase 3 slice.** The contract remains:
 
 Integrity violations halt the run as `blocked`, listing each violation's
 fingerprint. The operator runs:
@@ -136,21 +152,23 @@ the natural consequence of one writer in the worktree (ADR-0007).
 |---|---|
 | 0 | merge-ready |
 | 1 | findings remain (report-only mode) |
-| 2 | blocked (integrity violation or stalemate) |
+| 2 | blocked (integrity/stalemate/stuck code, final-suite failure, or landing refusal) |
 | 3 | rails exhausted |
-| 4 | a gate errored |
+| 4 | recorded run infrastructure errored (gate, adapter, suite, or Git) |
 | 5 | unverified (no green suite) |
-| 70 | togi internal error |
+| 6 | unsealed (Phase 3 passed without the Phase 5 seal) |
+| 70 | togi internal error, including inability to produce or publish a valid completed report |
 
-A human summary goes to stdout; the machine-readable `report.json` (findings,
-batches, timings, spend, verdict) lands in the run state dir. `togi status`
-reads the latest run ledger.
+A human summary goes to stdout; schema-4 `report.json` records findings, fix
+batches, suite evidence, integrity results, rails, optional agent usage,
+landing, and verdict in the external run state dir. `togi status` reads only
+the latest completed `report.json`.
 
 ## Brief assembly
 
-Deterministic concatenation, in order: findings (with their snippets) →
-matching principle pages → language addenda where they exist → explicit
-`file:line` pointers → constraints.
+Phase 3 assembles bounded normalized finding JSON, explicit `file:line`
+pointers, and authoritative constraints in a stable order. Phase 4 extends
+that order with matching principle pages and language addenda.
 
 **No code is embedded beyond the finding snippets.** The agent runs inside the
 worktree with its own file tools; embedding code duplicates what it will read
@@ -159,7 +177,10 @@ This is what "minimal code context" resolves to.
 
 ## Cost-class scheduling
 
-- `instant` / `fast` — every fix iteration, and in batch validation.
+The Phase 3 tracer selects `instant`/`fast` plus the assigned finding's owning
+gate for each attempt, then runs every enabled gate at the immutable
+pre-landing barrier. Phase 5 adds the full scheduler:
+
 - `slow` — periodically across iterations.
 - `glacial` — exactly once, as the **seal**, before declaring merge-ready.
   Mutation testing must never sit in the inner loop.
@@ -168,8 +189,8 @@ This is what "minimal code context" resolves to.
 
 1. Run engine, findings schema, two report-only Go gates, XDG state, repo-id
 2. Diff scoping and Go range enrichment
-3. The fix loop — worktree, adapter, integrity gates, rails
-4. Triage, the flywheel, and the wiki
+3. The tracer fix loop — worktree, Codex adapter, integrity gates, rails
+4. Triage, enriched plans and briefs, resume, and the wiki
 5. Rust, cost-class scheduling, ratchet, and the seal
 
 Full detail, dependencies, and exit criteria: [roadmap.md](./roadmap.md).

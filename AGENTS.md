@@ -4,10 +4,15 @@ togi (研ぎ) is a Go CLI that takes a feature diff, runs it through a
 **gauntlet** of deterministic quality gates, then loops an agent-driven fix
 cycle until the diff is merge-ready or a budget rail stops it.
 
-**Current state:** Phases 1 and 2 are implemented. `togi run` resolves a
-committed feature diff, executes data-defined Go gates concurrently, normalizes
-and enriches their findings, filters them to touched entities, and persists a
-report in the external run ledger. `togi status` reads completed history.
+**Current state:** Phases 1 and 2 and the Phase 3 tracer are implemented.
+`togi run` resolves a committed feature diff, executes data-defined Go gates
+concurrently, normalizes and enriches their findings, filters them to touched
+entities, and persists a schema-4 report in the external run ledger. In fix
+mode it requires the Codex adapter, establishes a green Go behavioral baseline
+and healthy initial gates, then fixes file-based batches in a togi-owned
+external worktree. Accepted batches pass validation and integrity checks before
+one guarded squash landing. Successful Phase 3 runs are `unsealed` with exit 6.
+`togi status` reads completed history.
 Principle-page loading and the `togi wiki show`, `lint`, and `eject` commands
 also landed early from Phase 4.
 
@@ -36,33 +41,24 @@ built, which name later phases, and which pairs get confused.
 and stop; do not quietly build something else. If two sources of truth
 genuinely contradict each other, surface that immediately.
 
-## Active boundary: Phase 3
+## Active boundary: finish Phase 3
 
-Phase 3, the fix loop, is next. It is the largest and riskiest phase, and no
-Phase 3 implementation plan has been approved yet. Read
-[`docs/roadmap.md` § Phase 3](./docs/roadmap.md#phase-3--the-fix-loop) before
-designing or assigning work.
+The Phase 3 tracer is implemented. It includes the external worktree and
+guarded landing lifecycle, the vendor-neutral adapter seam with Codex, primary
+file batching, Go suite discovery, validation and rollback, integrity checks,
+one retry, stalemate detection, and iteration/wall-clock rails. An absent/red
+baseline is `unverified` and an errored initial gate retains all sibling gate
+signal; neither condition invokes the adapter. Spend rails remain deferred.
 
-The remaining Phase 3 surface is:
+The next slices are fingerprint-keyed waivers and Claude/Kimi adapter
+conformance. Complete those before Phase 4's richer containment triage,
+principle-aware plan and brief assembly, and resume behavior. Phase 3 already
+persists its simple `plan.json`, bounded briefs, private adapter logs, and
+schema-4 fix report; do not confuse those tracer artifacts with Phase 4's
+richer semantics.
 
-1. togi-owned worktree lifecycle and guarded squash landing;
-2. vendor-neutral agent adapters;
-3. initial file-based batching;
-4. behavioral-suite discovery and baseline classification;
-5. batch validation, rollback, integrity gates, and retry policy;
-6. iteration, wall-clock, and optional spend rails plus stalemate detection;
-7. fingerprint-keyed waivers.
-
-`internal/adapter`, `internal/flywheel`, and `internal/triage` are currently
-documentation-only package seams. Do not mistake their presence for an
-implemented fix loop. Phase 4 triage, `plan.json`, brief assembly, and resume
-behavior also remain unimplemented even though the wiki mechanics landed
-early.
-
-Before spawning implementation agents, establish an approved Phase 3 design
-and plan with independently testable ownership boundaries. The completed plans
-under `docs/superpowers/plans/` are historical execution records, not the
-current task queue.
+Completed plans under `docs/superpowers/plans/` are historical execution
+records, not the current task queue.
 
 ## Non-negotiables
 
@@ -83,8 +79,9 @@ current task queue.
 - **Every production Git invocation goes through `internal/gitcmd`.** Callers
   choose the declared hermetic or config-honouring policy. Real-repository test
   fixtures may invoke Git directly to construct their inputs.
-- **Tests pass without external gate tools or network access.** Normalizers
-  use recorded fixtures; acceptance scenarios use controlled fake tools.
+- **Tests pass without external gate or agent tools and without network
+  access.** Normalizers use recorded fixtures; acceptance scenarios use
+  controlled fake gates and adapters.
 - **Production dependencies are Cobra and pelletier/go-toml/v2.** Godog
   v0.16.0 is the pinned acceptance-test exception. Ask before adding another
   dependency.
@@ -110,13 +107,18 @@ on a clean committed feature branch with a discoverable or explicit base:
 go run ./cmd/togi run --report-only
 ```
 
+Dogfood fix mode only when Codex is also installed, by replacing
+`--report-only` with `--agent codex`. The automated verification matrix uses
+controlled fakes and needs neither Codex nor external gate binaries.
+
 ## Things to check rather than assume
 
 - **External CLI contracts.** Confirm real gate and agent command formats
   against the pinned versions before relying on them. Vendor usage reporting
   may be approximate or absent; adapters must treat it as optional.
-- **Phase 3 boundaries.** Worktree, adapter, validation, integrity, retry,
-  rail, and waiver behavior needs an approved design before implementation.
+- **Remaining Phase 3 boundaries.** Waiver persistence and additional adapter
+  conformance must preserve the implemented worktree, validation, integrity,
+  rail, and guarded-landing contracts.
 - **`go 1.25`.** The module version against a Go 1.26 local toolchain is
   deliberate.
 - **Platform support.** Runtime orchestration remains Linux-only. Other

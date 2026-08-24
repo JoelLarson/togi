@@ -134,16 +134,17 @@ version flag; the installed module is pinned operationally instead.
 ## CLI surface
 
 ```
-togi run [--report-only] [--base <ref>] [--gate <name>] [--verbose] [--no-color]
+togi run --report-only [--base <ref>] [--gate <name>] [--verbose] [--no-color]
+togi run --agent codex [--base <ref>] [--gate <name>] [--max-iterations <n>] [--max-wall-clock <duration>] [--verbose] [--no-color]
 togi status [--no-color]
 togi version
 togi wiki show <page> | lint | eject <page>
-togi waive <fingerprint> --reason ""  # phase 3
 ```
 
-`--report-only` exists from day one even though it is phase 1's only
-behaviour, so that when fixing becomes the default in phase 3 the flag surface
-doesn't change under existing scripts or shell history.
+Fix mode requires the implemented `codex` adapter. Claude and Kimi remain
+later conformance adapters. The default rails are 20 iterations and 30 minutes;
+token usage is recorded when the adapter reports it, while spend/token rails
+are not enforced. Fingerprint-keyed `togi waive` is a remaining Phase 3 slice.
 
 ## Report output
 
@@ -159,6 +160,13 @@ Every line is clickable in editors and greppable in terminals. A tail
 summarises counts, per-gate status including `errored`, and the verdict.
 Colour only when stdout is a TTY; `--no-color` forces it off.
 
+The persisted report schema is version 4. Fix-mode reports add the original
+HEAD and feature branch, baseline and final suite evidence, agent identity and
+optional usage, iteration/wall-clock rails, batches with attempts and commits,
+integrity findings, and guarded-landing status. Phase 3 success is `unsealed`
+with exit 6 because the Phase 5 seal is not implemented; a clean run with no
+blocking findings is also unsealed and records landing as not needed.
+
 ## Run ledger
 
 Run IDs are nanosecond-resolution UTC timestamps with a random suffix —
@@ -170,10 +178,12 @@ pointer file.
 $XDG_STATE_HOME/togi/<repo-id>/
 ├── runs/<run-id>/
 │   ├── report.json
-│   ├── plan.json          # phase 4
-│   ├── briefs/            # phase 4
-│   └── raw/gate-<digest>.stdout
-├── waivers.toml
+│   ├── report.pre-cleanup.json
+│   ├── plan.json
+│   ├── briefs/attempt-<digest>.txt
+│   ├── adapter/attempt-<digest>.jsonl
+│   └── raw/gate-<digest>.{stdout,stderr}
+├── waivers.toml          # deferred Phase 3 slice
 ├── ratchet.json           # phase 5
 └── lock
 ```
@@ -199,10 +209,28 @@ unlocks and closes without unlinking. Ledger directories and artifacts are
 opened through retained `os.Root` handles, so replacing a state pathname cannot
 redirect pruning, raw output, report publication, or status reads.
 
-Completed reports publish by linking a synced same-directory temporary file to
-`report.json`. The hard-link operation is atomic and refuses an existing name,
-so concurrent publishers cannot clobber one another and readers cannot observe
-partial JSON. Linux uses `flock`. Before opening the lock file, the backend
+Fix mode first composes and validates the final evidence and stages its human
+rendering, then atomically publishes a private, bounded
+`report.pre-cleanup.json` audit artifact. If a workspace was created, cleanup
+then removes the owned worktree and removes the run branch when its disposition
+permits, while retaining the ledger lock. A branch containing validated
+unlanded work is preserved. If cleanup changes the public outcome, the report
+is recomposed and restaged;
+only then is bounded `report.json` published and made visible to `togi status`,
+after which stdout is emitted and the ledger closes. The audit artifact is
+immutable and excluded from latest-run discovery, preserving pre-cleanup
+evidence even when cleanup fails. If audit publication fails, deferred cleanup
+still runs and no completed report is published.
+
+Reports publish by linking a synced same-directory temporary file to their
+final name. The hard-link operation is atomic and refuses an existing name, so
+concurrent publishers cannot clobber one another and readers cannot observe
+partial JSON. Report files are capped at 16 MiB. Plan updates use atomic
+replacement; briefs and adapter JSONL logs are immutable per batch attempt,
+and adapter logs are capped at 1 MiB with an explicit truncation marker.
+Artifact names fold untrusted identities into bounded SHA-256 digests. Files
+are mode `0600` under the external `0700` ledger and never enter the target
+repository. Linux uses `flock`. Before opening the lock file, the backend
 acquires a unique process-local claim keyed by the canonical lock path and
 retained repository identity. Only the matching owner releases it, after
 successful OS unlock and handle close. Linux verifies `0700` directory modes
@@ -219,10 +247,8 @@ so capturing only on failure would miss the case that matters most.
 ## Tool version handling
 
 A binding may declare a version command, an extraction regex, and a semver
-constraint. Phase 1 records the observed version in report.json and warns on
-mismatch; hard enforcement — mismatch produces `errored` — lands in phase 3
-with the rest of the reproducibility story. This keeps phase 1 from stalling
-on `--version` parsing for two tools before a single finding exists.
+constraint. The observed version is recorded in report.json; a mismatch is an
+`errored` gate and therefore prevents adapter execution in fix mode.
 
 ## Scheduling
 
@@ -243,7 +269,7 @@ CPU is the real risk.
   real git's behaviour, so mocking the subprocess boundary would mock exactly
   the layer worth testing.
 - **Acceptance**: service and compiled-CLI drivers use scenario-owned fake
-  tools, real temporary Git repositories, and isolated XDG roots.
+  gates and adapters, real temporary Git repositories, and isolated XDG roots.
 - **Real tools**: verify their external CLI contracts separately when
   installed; the automated suite does not require them.
 - No network in any test.

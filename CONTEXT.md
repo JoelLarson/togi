@@ -144,34 +144,41 @@ Never overwrites an existing operator copy.
 **Triage**:
 The deterministic post-barrier step: containment subordination, grouping by
 (file, principle page), ordering by gauntlet position — producing the
-action plan.
+action plan. Phase 3 uses deterministic primary-file batching; this richer
+triage remains a Phase 4 refinement.
 
 **Action plan**:
 `plan.json` in the run state dir: the ordered batch list with embedded
-findings, page refs, and pending/done/stuck statuses; the resumable
-artifact the flywheel consumes.
+findings and pending/running/done/stuck statuses; the flywheel consumes and
+rewrites it after each state transition. Phase 4 adds principle-page references
+and resume behavior.
 
 **Flywheel**:
 The single serial fix worker consuming the action plan batch-by-batch;
 never more than one writer in the worktree.
 
 **Batch**:
-One fix unit (grouped by file or rule), executed in one fresh agent
-context, committed only when validation passes.
+One fix unit. The Phase 3 tracer groups findings by primary file; each attempt
+runs in one fresh agent context and commits only when validation passes. Phase
+4 replaces that grouping with (file, principle page), falling back to (file,
+rule_id).
 
 **Brief**:
-The deterministic concatenation handed to the fix agent: findings (with
-their snippets), principle pages, addenda, file:line pointers, constraints
-— no embedded code beyond finding snippets; the agent reads the worktree
-itself.
+The bounded, deterministic document handed to the fix agent: normalized
+finding JSON, explicit file:line pointers, and authoritative constraints. It
+contains no code beyond finding snippets; the agent reads the worktree itself.
+Phase 4 adds matching principle pages and language addenda.
 
 **Adapter**:
-The vendor-neutral interface wrapping headless agent CLIs (claude / codex /
-kimi): brief in on stdin, results read back as the worktree diff.
+The vendor-neutral interface wrapping headless agent CLIs: brief in on stdin,
+results read back as the worktree diff. Codex is the implemented adapter;
+Claude and Kimi remain later conformance adapters.
 
 **Landing**:
 Squash-applying the togi branch's finished result onto the feature branch
-as one commit; refused if the feature branch moved during the run.
+as one commit; refused if the feature branch moved during the run. Fixing is
+isolated from the original worktree, which is updated only by this guarded
+landing.
 
 ### Execution
 
@@ -199,8 +206,13 @@ The passing verdict: all enabled gates pass, none errored, integrity clean,
 behavioral suite green, seal passed.
 
 **Unverified**:
-The verdict cap when no green behavioral suite exists; fixes may still run,
-merge-ready may not be declared.
+The terminal verdict when the behavioral baseline is absent or red. No agent
+adapter runs.
+
+**Unsealed**:
+The successful Phase 3 verdict after every implemented barrier passes and the
+guarded landing completes or is not needed. Phase 5's seal is absent, so
+merge-ready is not yet reachable and the CLI exits 6.
 
 **Stalemate**:
 The finding set, compared by fingerprint and occurrence count, failed to
@@ -208,7 +220,8 @@ strictly shrink across an iteration — covering both stalls and whack-a-mole
 churn; togi stops with a `blocked` report naming persistent fingerprints.
 
 **Rail**:
-A hard budget limit: max iterations, wall-clock, agent spend/tokens.
+A hard budget limit. Phase 3 enforces max iterations and wall-clock; agent
+spend/tokens are deferred until adapter usage contracts are proven.
 
 **Ratchet**:
 "Never worse than last time" — optional repo-wide metric high-water marks
@@ -227,8 +240,9 @@ hash. Its full hexadecimal value is the external directory name; checkout
 names and shortened forms are not path identity.
 
 **Run ledger**:
-Everything a run persists in its state dir: report.json, plan.json, briefs,
-timings, spend.
+Everything a run persists in its state dir: public `report.json`, fix-loop
+`plan.json`, briefs, private adapter protocol logs and gate output, plus the
+private pre-cleanup report audit.
 
 ## Relationships
 
@@ -239,25 +253,27 @@ timings, spend.
 - A **binding** produces **findings** through exactly one **normalizer**.
 - **Triage** turns the collected **findings** into an **action plan** of
   **batches**; the **flywheel** executes them serially via the **adapter**.
-- A **batch** commits only when instant/fast gates, **integrity gates**, and
-  the behavioral suite all pass; otherwise it is reset and retried once.
+- A **batch** commits only when instant/fast gates plus the assigned finding's
+  owning gate, **integrity gates**, and the behavioral suite all pass; otherwise
+  semantic failure is reset and retried once. Compilation-only test edits
+  required by a witnessed production rename are allowed; test discovery
+  identities and behavior remain protected.
 - A **waiver** neutralizes exactly one **fingerprint**; the **ratchet** and
   **stalemate** accounting are both keyed by **fingerprint**.
-- **Merge-ready** requires the **seal**; **unverified** overrides
-  merge-ready when no green suite exists.
+- **Merge-ready** requires the **seal**; Phase 3 success is **unsealed**, and
+  **unverified** prevents adapter execution when no green baseline exists.
 
 ## Example dialogue
 
-> **Dev:** "clippy crashed on the fix branch — does that show up as a
-> **finding**?"
+> **Dev:** "clippy crashed — does that show up as a **finding**?"
 > **Domain expert:** "No — that gate goes **errored**, which is a different
-> channel. The **flywheel** keeps working the other gates' findings, but you
-> can't reach **merge-ready** while anything is errored."
+> channel. Initial collection still reports sibling gates, but no adapter runs;
+> a validation or barrier error terminates the flywheel as infrastructure."
 >
 > **Dev:** "And if the agent just deletes the failing test?"
 > **Domain expert:** "The test-integrity **integrity gate** trips and the run
-> blocks. If the deletion was legitimate, you issue a **waiver** for that
-> finding's **fingerprint** and re-run — there's no mid-run prompt."
+> blocks. The deferred waiver contract will allow an operator to approve that
+> finding's **fingerprint** and re-run — there will be no mid-run prompt."
 >
 > **Dev:** "The count of findings didn't go down this iteration but they're
 > all different ones."

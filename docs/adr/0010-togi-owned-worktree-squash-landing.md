@@ -26,3 +26,32 @@ manual merge rather than guessing.
   v1. A shared `CARGO_TARGET_DIR` is the obvious later fix.
 - A dirty user checkout is a warning, not an error: togi branches from HEAD,
   so uncommitted work simply isn't part of what gets judged.
+
+## Refinement: 2026-08-24
+
+The Phase 3 tracer preserves the isolation decision and tightens its admission
+and landing mechanics. The historical allowance for a dirty checkout above no
+longer applies: the Phase 2 clean-worktree precondition requires a clean,
+committed feature branch before the run ledger or any agent work begins.
+
+- After admission, the original worktree remains isolated from all fixing.
+  Agents and validators operate only in a togi-owned external worktree; the
+  original worktree is updated once, at guarded landing.
+- Each accepted batch is committed only from a validated immutable tree.
+  Before landing, the all-gate barrier and full behavioral suite run against
+  immutable snapshots of that exact candidate.
+- Landing creates one verified squash commit with the exact validated tree,
+  the original feature commit as its sole parent, a fixed subject, and explicit
+  identity, then performs a hook-disabled fast-forward through descriptor-bound
+  Git directories.
+- A concurrent dirty checkout, detach, feature-ref move, or relevant Git
+  ownership/config/control-state change refuses landing or triggers guarded
+  recovery that preserves concurrent state. The validated `togi/run-<id>`
+  branch remains available whenever landing is incomplete.
+- Cleanup removes the cache worktree after every resolved disposition. It
+  removes the run branch after a complete landing or when it contains no
+  validated work beyond the original HEAD; a validated but unlanded branch is
+  preserved for inspection. Any ambiguous cleanup state fails closed.
+
+This refinement changes neither the external-worktree decision nor the
+one-squash outcome; it records the evidence required to make both enforceable.
