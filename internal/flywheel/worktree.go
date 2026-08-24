@@ -1,6 +1,7 @@
 package flywheel
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -10,9 +11,11 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -22,6 +25,10 @@ import (
 
 const gitOutputLimit = 4 << 20
 const indexByteLimit = 64 << 20
+const batchIgnoredInventoryLimit = 1 << 20
+const batchDirectoryEntryLimit = 1 << 16
+const batchDirectoryPathLimit = 4 << 20
+const batchDirectoryDepthLimit = 64
 
 var defaultLooseRefLimits = looseRefLimits{
 	maxEntries:   1 << 16,
@@ -33,6 +40,11 @@ var defaultLooseRefLimits = looseRefLimits{
 var defaultRawControlLimits = rawTreeLimits{
 	maxEntries: 1 << 16, maxPathBytes: gitOutputLimit, maxDepth: 64,
 	maxContents: gitOutputLimit, perFile: gitOutputLimit,
+}
+
+var validationSnapshotLimits = rawTreeLimits{
+	maxEntries: 1 << 16, maxPathBytes: 4 << 20, maxDepth: 64,
+	maxContents: indexByteLimit, perFile: indexByteLimit,
 }
 
 var defaultConfigIncludeBudget = configIncludeBudget{
@@ -64,24 +76,31 @@ type WorkspaceSpec struct {
 
 // Workspace owns the Git state used by the serial fix loop.
 type Workspace struct {
-	repositoryRoot     string
-	path               string
-	gitDir             string
-	commonDir          string
-	dotGit             exactFile
-	rootInfo           os.FileInfo
-	gitDirInfo         os.FileInfo
-	commonInfo         os.FileInfo
-	indexPath          string
-	indexInfo          os.FileInfo
-	indexBytes         []byte
-	cacheRoot          string
-	cacheRootInfo      os.FileInfo
-	branch             string
-	green              string
-	identity           Identity
-	beforeIndexInstall func() error
-	beforeResetFinal   func() error
+	repositoryRoot                string
+	path                          string
+	gitDir                        string
+	commonDir                     string
+	dotGit                        exactFile
+	rootInfo                      os.FileInfo
+	gitDirInfo                    os.FileInfo
+	commonInfo                    os.FileInfo
+	indexPath                     string
+	indexInfo                     os.FileInfo
+	indexBytes                    []byte
+	cacheRoot                     string
+	cacheRootInfo                 os.FileInfo
+	branch                        string
+	green                         string
+	identity                      Identity
+	beforeIndexInstall            func() error
+	beforeResetFinal              func() error
+	beforeBatchRefUpdate          func() error
+	afterBatchRefUpdate           func() error
+	updateBatchRef                func(context.Context, string, string, string) error
+	validationSnapshot            *validationSnapshot
+	validationMaterializeFailure  func() error
+	validationDiscardFailure      func() error
+	validationBeforePrivateRemove func() error
 }
 
 // Root returns the adapter-visible worktree root.
@@ -119,6 +138,78 @@ type GitState struct {
 	rawHooks     map[string]exactFile
 	rawRefs      map[string]exactFile
 	rawControl   map[string]exactFile
+}
+
+// BatchProof is opaque evidence binding a validated attempt to one staged
+// tree and the stable worktree state from which it was prepared.
+type BatchProof struct {
+	owner           any
+	tree            string
+	changed         []string
+	files           map[string]exactFile
+	dirs            map[string]os.FileInfo
+	protected       TreeSnapshot
+	index           exactFile
+	verify          func(context.Context, BatchProof) error
+	validation      *validationSnapshot
+	validationFiles map[string]exactFile
+}
+
+type validationSnapshot struct {
+	private *privateTempDir
+	files   map[string]exactFile
+}
+
+func (proof BatchProof) validFor(workspace *Workspace) bool {
+	return workspace != nil && proof.owner == workspace && proof.present() && len(proof.changed) != 0 &&
+		proof.files != nil && proof.dirs != nil && proof.protected.Files != nil && proof.index.exists &&
+		proof.validation != nil && proof.validation == workspace.validationSnapshot && proof.validationFiles != nil
+}
+
+func (proof BatchProof) present() bool {
+	return proof.owner != nil && validObjectID(proof.tree) && proof.verify != nil && proof.validation != nil
+}
+
+// ValidationRoot returns the private immutable root containing the exact
+// staged tree. It is intentionally omitted from serialized validation state.
+func (proof BatchProof) ValidationRoot() string {
+	if proof.validation == nil || proof.validation.private == nil {
+		return ""
+	}
+	return proof.validation.private.path
+}
+
+func cloneBatchProof(proof BatchProof) BatchProof {
+	proof.changed = slices.Clone(proof.changed)
+	proof.files = cloneExactFiles(proof.files)
+	proof.dirs = cloneDirectoryInfos(proof.dirs)
+	proof.protected = cloneTreeSnapshot(proof.protected)
+	proof.index.bytes = slices.Clone(proof.index.bytes)
+	proof.validationFiles = cloneExactFiles(proof.validationFiles)
+	return proof
+}
+
+func cloneExactFiles(files map[string]exactFile) map[string]exactFile {
+	if files == nil {
+		return nil
+	}
+	cloned := make(map[string]exactFile, len(files))
+	for name, file := range files {
+		file.bytes = slices.Clone(file.bytes)
+		cloned[name] = file
+	}
+	return cloned
+}
+
+func cloneDirectoryInfos(dirs map[string]os.FileInfo) map[string]os.FileInfo {
+	if dirs == nil {
+		return nil
+	}
+	cloned := make(map[string]os.FileInfo, len(dirs))
+	for name, info := range dirs {
+		cloned[name] = info
+	}
+	return cloned
 }
 
 var (
@@ -202,13 +293,14 @@ type exactFile struct {
 }
 
 type privateTempDir struct {
-	path       string
-	name       string
-	info       os.FileInfo
-	parentPath string
-	parentInfo os.FileInfo
-	parent     *os.Root
-	root       *os.Root
+	path         string
+	name         string
+	info         os.FileInfo
+	parentPath   string
+	parentInfo   os.FileInfo
+	parent       *os.Root
+	root         *os.Root
+	beforeRemove func() error
 }
 
 type privateTempHooks struct {
@@ -571,6 +663,9 @@ func validGitRelativePath(path string) bool {
 // ResetAttempt discards tracked, staged, and untracked attempt edits and
 // restores the latest validated batch commit.
 func (w *Workspace) ResetAttempt(ctx context.Context) error {
+	if err := w.discardValidationSnapshot(nil); err != nil {
+		return fmt.Errorf("discard validation snapshot: %w", err)
+	}
 	ref := "refs/heads/" + w.branch
 	if err := w.requireDirectRunRef(ctx, w.green, true); err != nil {
 		return fmt.Errorf("refuse attempt reset: %w", err)
@@ -607,24 +702,549 @@ func (w *Workspace) ResetAttempt(ctx context.Context) error {
 	return nil
 }
 
-// CommitBatch stages the complete observed tree and records one rollback
-// commit. The latest green commit advances only after the commit succeeds.
-func (w *Workspace) CommitBatch(ctx context.Context, primaryFile string) (string, error) {
+// PrepareBatch stages the exact complete attempt once and binds validation to
+// its tree, index, protected files, and stable worktree identities.
+func (w *Workspace) PrepareBatch(ctx context.Context, changed []string) (BatchProof, error) {
+	if ctx == nil {
+		return BatchProof{}, errors.New("batch preparation context is required")
+	}
+	if w.validationSnapshot != nil {
+		return BatchProof{}, errors.New("previous validation snapshot is still active")
+	}
+	want := slices.Clone(changed)
+	slices.Sort(want)
+	want = slices.Compact(want)
+	if len(want) == 0 {
+		return BatchProof{}, errors.New("cannot prepare an empty batch")
+	}
+	for _, name := range want {
+		if !validRelativePath(name) {
+			return BatchProof{}, errors.New("invalid changed batch path")
+		}
+	}
+	observed, err := w.ChangedFiles(ctx)
+	if err != nil || !slices.Equal(observed, want) {
+		return BatchProof{}, errors.New("changed batch set moved before preparation")
+	}
+	if err := w.requireDirectRunRef(ctx, w.green, false); err != nil {
+		return BatchProof{}, fmt.Errorf("refuse batch preparation: %w", err)
+	}
+	before, err := w.captureBatchWorktree(ctx, want)
+	if err != nil {
+		return BatchProof{}, err
+	}
+	tree, err := w.mutateOwnedIndex(ctx, false, "", "-c", "core.hooksPath="+os.DevNull, "add", "-A", "--", ".")
+	if err != nil {
+		return BatchProof{}, fmt.Errorf("stage prepared batch: %w", err)
+	}
+	observed, err = w.ChangedFiles(ctx)
+	if err != nil || !slices.Equal(observed, want) {
+		return BatchProof{}, errors.New("changed batch set moved during preparation")
+	}
+	proof, err := w.captureBatchProof(ctx, want, tree)
+	if err != nil {
+		return BatchProof{}, err
+	}
+	if !batchWorktreeStateEqual(before, proof) {
+		return BatchProof{}, errors.New("prepared batch worktree changed while staging")
+	}
+	validation, err := w.materializeValidationSnapshot(ctx, tree)
+	if err != nil {
+		return BatchProof{}, err
+	}
+	w.validationSnapshot = validation
+	proof.validation = validation
+	proof.validationFiles = cloneExactFiles(validation.files)
+	return cloneBatchProof(proof), nil
+}
+
+// VerifyBatch proves the staged tree and worktree still exactly match a
+// prepared batch without mutating either surface.
+func (w *Workspace) VerifyBatch(ctx context.Context, proof BatchProof) error {
+	return w.verifyBatch(ctx, proof, w.green, true, true)
+}
+
+func (w *Workspace) verifyBatch(ctx context.Context, proof BatchProof, expectedRef string, expectAttemptChanges, verifyValidation bool) error {
+	if ctx == nil {
+		return errors.New("batch verification context is required")
+	}
+	if (verifyValidation && !proof.validFor(w)) || (!verifyValidation && (proof.owner != w || !validObjectID(proof.tree) || !proof.index.exists)) {
+		return errors.New("batch proof is not owned by this workspace")
+	}
+	if err := w.requireDirectRunRef(ctx, expectedRef, false); err != nil {
+		return fmt.Errorf("refuse batch verification: %w", err)
+	}
+	observed, err := w.ChangedFiles(ctx)
+	wantChanged := proof.changed
+	if !expectAttemptChanges {
+		wantChanged = nil
+	}
+	if err != nil || !slices.Equal(observed, wantChanged) {
+		return errors.New("prepared batch changed set drifted")
+	}
+	current, err := w.captureBatchProof(ctx, proof.changed, proof.tree)
+	if err != nil {
+		return err
+	}
+	if !batchProofStateEqual(proof, current) {
+		return errors.New("prepared batch worktree or index drifted")
+	}
+	if verifyValidation {
+		currentValidation, err := snapshotRawTrees([]rawTreeRoot{{name: "validation", path: proof.ValidationRoot()}}, validationSnapshotLimits)
+		if err != nil || !exactFileStableMapsEqual(proof.validationFiles, currentValidation) {
+			return errors.New("prepared validation snapshot drifted")
+		}
+	}
+	return nil
+}
+
+func (w *Workspace) captureBatchProof(ctx context.Context, changed []string, tree string) (BatchProof, error) {
+	proof, err := w.captureBatchWorktree(ctx, changed)
+	if err != nil {
+		return BatchProof{}, err
+	}
+	index, err := snapshotExactPath(w.indexPath, indexByteLimit)
+	if err != nil || !index.exists || !index.mode.IsRegular() {
+		return BatchProof{}, errors.New("prepared batch index is unavailable")
+	}
+	indexTree, err := gitPath(ctx, w.path, "--git-dir="+w.gitDir, "--work-tree="+w.path, "write-tree")
+	if err != nil || indexTree != tree {
+		return BatchProof{}, errors.New("prepared batch index tree drifted")
+	}
+	if err := w.validateStagedDirectories(ctx, proof.dirs); err != nil {
+		return BatchProof{}, err
+	}
+	proof.owner = w
+	proof.tree = tree
+	proof.index = index
+	proof.verify = w.VerifyBatch
+	return proof, nil
+}
+
+func (w *Workspace) captureBatchWorktree(ctx context.Context, changed []string) (BatchProof, error) {
+	ignored, err := gitcmd.Output(ctx, w.path, gitcmd.Hermetic, batchIgnoredInventoryLimit,
+		"--git-dir="+w.gitDir, "--work-tree="+w.path, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--")
+	if err != nil {
+		return BatchProof{}, errors.New("inspect ignored worktree entries")
+	}
+	if len(ignored) != 0 {
+		return BatchProof{}, errors.New("unexpected ignored worktree entries")
+	}
+	protected, err := SnapshotAttempt(w.path)
+	if err != nil {
+		return BatchProof{}, fmt.Errorf("snapshot prepared protected tree: %w", err)
+	}
+	paths := make(map[string]struct{}, len(changed)+len(protected.Files))
+	for _, name := range changed {
+		paths[name] = struct{}{}
+	}
+	for name := range protected.Files {
+		paths[name] = struct{}{}
+	}
+	ordered := make([]string, 0, len(paths))
+	for name := range paths {
+		ordered = append(ordered, name)
+	}
+	sort.Strings(ordered)
+	files := make(map[string]exactFile, len(ordered))
+	dirs, err := snapshotWorktreeDirectories(w.path)
+	if err != nil {
+		return BatchProof{}, errors.New("snapshot prepared worktree directories")
+	}
+	total := 0
+	for _, name := range ordered {
+		if !validRelativePath(name) {
+			return BatchProof{}, errors.New("prepared batch contains invalid path")
+		}
+		current := w.path
+		components := strings.Split(filepath.ToSlash(filepath.Dir(name)), "/")
+		if filepath.Dir(name) != "." {
+			for _, component := range components {
+				current = filepath.Join(current, filepath.FromSlash(component))
+				info, statErr := os.Lstat(current)
+				if errors.Is(statErr, os.ErrNotExist) {
+					break
+				}
+				if statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+					return BatchProof{}, errors.New("prepared batch directory binding is unsafe")
+				}
+				relative, _ := filepath.Rel(w.path, current)
+				dirs[filepath.ToSlash(relative)] = info
+			}
+		}
+		file, snapErr := snapshotExactPath(filepath.Join(w.path, filepath.FromSlash(name)), gitOutputLimit)
+		if snapErr != nil || file.exists && !file.mode.IsRegular() {
+			return BatchProof{}, errors.New("prepared batch file binding is unsafe")
+		}
+		if len(file.bytes) > indexByteLimit-total {
+			return BatchProof{}, errors.New("prepared batch files exceed capture limit")
+		}
+		total += len(file.bytes)
+		files[name] = file
+	}
+	return BatchProof{changed: slices.Clone(changed), files: files, dirs: dirs, protected: protected}, nil
+}
+
+func (w *Workspace) validateStagedDirectories(ctx context.Context, directories map[string]os.FileInfo) error {
+	output, err := gitcmd.Output(ctx, w.path, gitcmd.Hermetic, batchIgnoredInventoryLimit,
+		"--git-dir="+w.gitDir, "--work-tree="+w.path, "ls-files", "--cached", "-z", "--")
+	if err != nil || len(output) != 0 && output[len(output)-1] != 0 {
+		return errors.New("inspect prepared index paths")
+	}
+	allowed := map[string]struct{}{".": {}}
+	for len(output) != 0 {
+		end := bytes.IndexByte(output, 0)
+		if end < 0 {
+			return errors.New("inspect prepared index paths")
+		}
+		name := string(output[:end])
+		output = output[end+1:]
+		if !validRelativePath(name) {
+			return errors.New("prepared index contains an invalid path")
+		}
+		for current := name; current != "."; current = path.Dir(current) {
+			allowed[current] = struct{}{}
+		}
+	}
+	for directory := range directories {
+		if _, ok := allowed[directory]; !ok {
+			return errors.New("worktree directory is absent from prepared index")
+		}
+	}
+	return nil
+}
+
+type batchDirectoryBudget struct {
+	entries   int
+	pathBytes int
+}
+
+func snapshotWorktreeDirectories(rootPath string) (map[string]os.FileInfo, error) {
+	rootInfo, err := noFollowDirectoryInfo(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	directories := map[string]os.FileInfo{".": rootInfo}
+	budget := &batchDirectoryBudget{}
+	if err := snapshotWorktreeDirectory(root, "", rootInfo, 0, budget, directories); err != nil {
+		return nil, err
+	}
+	return directories, nil
+}
+
+func snapshotWorktreeDirectory(root *os.Root, relative string, expected os.FileInfo, depth int, budget *batchDirectoryBudget, directories map[string]os.FileInfo) error {
+	directory, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	bound, err := directory.Stat()
+	if err != nil || !stableFileInfo(expected, bound) {
+		return errors.New("worktree directory binding changed")
+	}
+	for {
+		entries, readErr := directory.ReadDir(256)
+		for _, entry := range entries {
+			name := entry.Name()
+			childRelative := name
+			if relative != "" {
+				childRelative = relative + "/" + name
+			}
+			budget.entries++
+			budget.pathBytes += len(childRelative)
+			if budget.entries > batchDirectoryEntryLimit || budget.pathBytes > batchDirectoryPathLimit || depth+1 > batchDirectoryDepthLimit {
+				return errors.New("worktree directory inventory exceeds limits")
+			}
+			info, err := root.Lstat(name)
+			if err != nil {
+				return errors.New("inspect worktree directory entry")
+			}
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
+			child, err := root.OpenRoot(name)
+			if err != nil {
+				return errors.New("open worktree child directory")
+			}
+			childBound, childErr := child.Stat(".")
+			namedAgain, namedErr := root.Lstat(name)
+			if childErr != nil || namedErr != nil || !stableFileInfo(info, childBound) || !stableFileInfo(info, namedAgain) {
+				_ = child.Close()
+				return errors.New("worktree child directory binding changed")
+			}
+			directories[childRelative] = childBound
+			if err := snapshotWorktreeDirectory(child, childRelative, childBound, depth+1, budget, directories); err != nil {
+				_ = child.Close()
+				return err
+			}
+			_ = child.Close()
+			namedAfter, err := root.Lstat(name)
+			if err != nil || !stableFileInfo(childBound, namedAfter) {
+				return errors.New("worktree child directory changed")
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return errors.New("read worktree directory")
+		}
+	}
+	final, err := root.Stat(".")
+	namedFinal, namedErr := root.Lstat(".")
+	if err != nil || namedErr != nil || !stableFileInfo(expected, final) || !stableFileInfo(expected, namedFinal) {
+		return errors.New("worktree directory changed while reading")
+	}
+	return nil
+}
+
+func batchWorktreeStateEqual(expected, current BatchProof) bool {
+	return slices.Equal(expected.changed, current.changed) && exactFileStableMapsEqual(expected.files, current.files) &&
+		directoryInfosEqual(expected.dirs, current.dirs) && reflect.DeepEqual(expected.protected.Files, current.protected.Files)
+}
+
+func batchProofStateEqual(expected, current BatchProof) bool {
+	return expected.owner == current.owner && expected.tree == current.tree && slices.Equal(expected.changed, current.changed) &&
+		exactFileStableMapsEqual(expected.files, current.files) && directoryInfosEqual(expected.dirs, current.dirs) &&
+		reflect.DeepEqual(expected.protected.Files, current.protected.Files) && exactFileStableEqual(expected.index, current.index)
+}
+
+func directoryInfosEqual(expected, current map[string]os.FileInfo) bool {
+	if len(expected) != len(current) {
+		return false
+	}
+	for name, left := range expected {
+		right, exists := current[name]
+		if !exists || !stableFileInfo(left, right) {
+			return false
+		}
+	}
+	return true
+}
+
+func (w *Workspace) rawValidationArchive(ctx context.Context, tree string) ([]byte, error) {
+	listing, err := gitcmd.Output(ctx, w.repositoryRoot, gitcmd.Hermetic, 16<<20,
+		"--git-dir="+w.commonDir, "ls-tree", "-rz", "-r", "--full-tree", tree)
+	if err != nil || len(listing) != 0 && listing[len(listing)-1] != 0 {
+		return nil, errors.New("list prepared validation tree")
+	}
+	records := bytes.Split(listing, []byte{0})
+	if len(records) > 0 && len(records[len(records)-1]) == 0 {
+		records = records[:len(records)-1]
+	}
+	if len(records) > validationSnapshotLimits.maxEntries {
+		return nil, errors.New("prepared validation tree exceeds shape limits")
+	}
+	var archive bytes.Buffer
+	writer := tar.NewWriter(&archive)
+	pathBytes := 0
+	var contentBytes int64
+	seen := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		metadata, rawName, found := bytes.Cut(record, []byte{'\t'})
+		fields := strings.Fields(string(metadata))
+		name := string(rawName)
+		pathBytes += len(name)
+		if !found || len(fields) != 3 || fields[1] != "blob" || !validObjectID(fields[2]) || name == "" ||
+			path.Clean(name) != name || !validRelativePath(filepath.FromSlash(name)) || strings.Contains(name, `\`) ||
+			pathBytes > validationSnapshotLimits.maxPathBytes || strings.Count(name, "/")+1 > validationSnapshotLimits.maxDepth {
+			return nil, errors.New("prepared validation tree contains an unsafe entry")
+		}
+		if _, duplicate := seen[name]; duplicate {
+			return nil, errors.New("prepared validation tree contains duplicate entries")
+		}
+		seen[name] = struct{}{}
+		mode := int64(0o644)
+		if fields[0] == "100755" {
+			mode = 0o755
+		} else if fields[0] != "100644" {
+			return nil, errors.New("prepared validation tree contains links or special entries")
+		}
+		contents, err := gitcmd.Output(ctx, w.repositoryRoot, gitcmd.Hermetic, int(validationSnapshotLimits.perFile)+1,
+			"--git-dir="+w.commonDir, "cat-file", "blob", fields[2])
+		contentBytes += int64(len(contents))
+		if err != nil || contentBytes > validationSnapshotLimits.maxContents {
+			return nil, errors.New("read prepared validation blob")
+		}
+		if err := writer.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(contents)), Typeflag: tar.TypeReg}); err != nil {
+			return nil, errors.New("encode prepared validation tree")
+		}
+		if _, err := writer.Write(contents); err != nil {
+			return nil, errors.New("encode prepared validation blob")
+		}
+	}
+	if err := writer.Close(); err != nil || archive.Len() > int(indexByteLimit)+(16<<20) {
+		return nil, errors.New("encode prepared validation tree")
+	}
+	return archive.Bytes(), nil
+}
+
+func (w *Workspace) materializeValidationSnapshot(ctx context.Context, tree string) (snapshot *validationSnapshot, resultErr error) {
+	archive, err := w.rawValidationArchive(ctx, tree)
+	if err != nil {
+		return nil, errors.New("materialize prepared validation tree")
+	}
+	private, err := w.createPrivateTempDir()
+	if err != nil {
+		return nil, errors.New("create private validation snapshot")
+	}
+	private.beforeRemove = w.validationBeforePrivateRemove
+	remove := true
+	defer func() {
+		if remove {
+			if discardErr := w.discardPrivateValidation(private); discardErr != nil {
+				w.validationSnapshot = &validationSnapshot{private: private}
+				resultErr = errors.Join(resultErr, errors.New("discard incomplete validation snapshot"))
+			}
+		}
+	}()
+	if w.validationMaterializeFailure != nil {
+		if err := w.validationMaterializeFailure(); err != nil {
+			return nil, errors.New("materialize prepared validation tree")
+		}
+	}
+	reader := tar.NewReader(bytes.NewReader(archive))
+	types := make(map[string]byte)
+	files := make(map[string]os.FileMode)
+	directories := map[string]struct{}{".": {}}
+	entries, pathBytes := 0, 0
+	var contentBytes int64
+	for {
+		header, readErr := reader.Next()
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return nil, errors.New("decode prepared validation tree")
+		}
+		name := strings.TrimSuffix(header.Name, "/")
+		if name == "" || path.Clean(name) != name || !validRelativePath(filepath.FromSlash(name)) || strings.Contains(name, `\`) {
+			return nil, errors.New("prepared validation tree contains an unsafe path")
+		}
+		entries++
+		pathBytes += len(name)
+		if entries > validationSnapshotLimits.maxEntries || pathBytes > validationSnapshotLimits.maxPathBytes || strings.Count(name, "/")+1 > validationSnapshotLimits.maxDepth {
+			return nil, errors.New("prepared validation tree exceeds shape limits")
+		}
+		native := filepath.FromSlash(name)
+		for parent := filepath.Dir(native); parent != "."; parent = filepath.Dir(parent) {
+			directories[parent] = struct{}{}
+		}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if prior, exists := types[name]; exists && prior != tar.TypeDir {
+				return nil, errors.New("prepared validation tree contains conflicting entries")
+			}
+			if err := private.root.MkdirAll(native, 0o700); err != nil {
+				return nil, errors.New("create prepared validation directory")
+			}
+			types[name] = tar.TypeDir
+			directories[native] = struct{}{}
+		case tar.TypeReg, tar.TypeRegA:
+			contentBytes += header.Size
+			if _, exists := types[name]; exists || header.Size < 0 || header.Size > indexByteLimit || contentBytes > indexByteLimit {
+				return nil, errors.New("prepared validation tree contains an invalid file")
+			}
+			if err := private.root.MkdirAll(filepath.Dir(native), 0o700); err != nil {
+				return nil, errors.New("create prepared validation parent")
+			}
+			file, err := private.root.OpenFile(native, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if err != nil {
+				return nil, errors.New("create prepared validation file")
+			}
+			written, copyErr := io.CopyN(file, reader, header.Size)
+			closeErr := file.Close()
+			if copyErr != nil || closeErr != nil || written != header.Size {
+				return nil, errors.New("write prepared validation file")
+			}
+			types[name] = tar.TypeReg
+			mode := os.FileMode(0o444)
+			if header.Mode&0o111 != 0 {
+				mode = 0o555
+			}
+			files[native] = mode
+		default:
+			return nil, errors.New("prepared validation tree contains links or special entries")
+		}
+	}
+	for name, mode := range files {
+		info, err := private.root.Lstat(name)
+		if err != nil || !info.Mode().IsRegular() {
+			return nil, errors.New("bind prepared validation file")
+		}
+		if err := private.root.Chmod(name, mode); err != nil {
+			return nil, errors.New("seal prepared validation file")
+		}
+	}
+	directoryNames := make([]string, 0, len(directories))
+	for name := range directories {
+		directoryNames = append(directoryNames, name)
+	}
+	slices.SortFunc(directoryNames, func(left, right string) int {
+		return strings.Count(right, string(filepath.Separator)) - strings.Count(left, string(filepath.Separator))
+	})
+	for _, name := range directoryNames {
+		if err := private.root.Chmod(name, 0o555); err != nil {
+			return nil, errors.New("seal prepared validation directory")
+		}
+	}
+	captured, err := snapshotRawTrees([]rawTreeRoot{{name: "validation", path: private.path}}, validationSnapshotLimits)
+	if err != nil {
+		return nil, errors.New("snapshot prepared validation tree")
+	}
+	remove = false
+	return &validationSnapshot{private: private, files: captured}, nil
+}
+
+func (w *Workspace) discardValidationSnapshot(proof *BatchProof) error {
+	snapshot := w.validationSnapshot
+	if snapshot == nil {
+		return nil
+	}
+	if proof != nil && proof.validation != snapshot {
+		return errors.New("validation snapshot is not owned by batch proof")
+	}
+	if snapshot.private == nil {
+		return errors.New("validation snapshot private state is unavailable")
+	}
+	if err := w.discardPrivateValidation(snapshot.private); err != nil {
+		return err
+	}
+	w.validationSnapshot = nil
+	return nil
+}
+
+func (w *Workspace) discardPrivateValidation(private *privateTempDir) error {
+	if w.validationDiscardFailure != nil {
+		if err := w.validationDiscardFailure(); err != nil {
+			return err
+		}
+	}
+	return private.discard()
+}
+
+// CommitBatch records the exact prepared tree without restaging it. The
+// latest green commit advances only after the proof survives final checks.
+func (w *Workspace) CommitBatch(ctx context.Context, primaryFile string, proof BatchProof) (string, error) {
 	if !validRelativePath(primaryFile) {
 		return "", fmt.Errorf("invalid primary file %q", primaryFile)
 	}
-	changed, err := w.ChangedFiles(ctx)
-	if err != nil {
-		return "", err
-	}
-	if len(changed) == 0 {
-		return "", errors.New("cannot commit an empty batch")
-	}
-	if err := w.requireDirectRunRef(ctx, w.green, false); err != nil {
+	if err := w.VerifyBatch(ctx, proof); err != nil {
+		if discardErr := w.discardValidationSnapshot(&proof); discardErr != nil {
+			return "", fmt.Errorf("refuse batch commit and discard validation snapshot: %w", discardErr)
+		}
 		return "", fmt.Errorf("refuse batch commit: %w", err)
 	}
-	if _, err := w.mutateOwnedIndex(ctx, false, "", "-c", "core.hooksPath="+os.DevNull, "add", "-A", "--", "."); err != nil {
-		return "", fmt.Errorf("verify staged batch index: %w", err)
+	if err := w.discardValidationSnapshot(&proof); err != nil {
+		return "", fmt.Errorf("discard validated snapshot before commit: %w", err)
+	}
+	if err := w.verifyBatch(ctx, proof, w.green, true, false); err != nil {
+		return "", fmt.Errorf("refuse batch commit after snapshot cleanup: %w", err)
 	}
 	environment := map[string]string{
 		"GIT_AUTHOR_NAME":     w.identity.Name,
@@ -635,10 +1255,7 @@ func (w *Workspace) CommitBatch(ctx context.Context, primaryFile string) (string
 	if err := w.requireDirectRunRef(ctx, w.green, false); err != nil {
 		return "", fmt.Errorf("refuse staged batch commit: %w", err)
 	}
-	tree, err := gitPath(ctx, w.path, "--git-dir="+w.gitDir, "--work-tree="+w.path, "write-tree")
-	if err != nil {
-		return "", fmt.Errorf("write batch tree: %w", err)
-	}
+	tree := proof.tree
 	if err := w.validateControlBinding(); err != nil {
 		return "", fmt.Errorf("refuse batch object creation: %w", err)
 	}
@@ -651,16 +1268,71 @@ func (w *Workspace) CommitBatch(ctx context.Context, primaryFile string) (string
 	if !validObjectID(commit) {
 		return "", errors.New("create batch commit returned an invalid object ID")
 	}
+	if err := w.verifyBatch(ctx, proof, w.green, true, false); err != nil {
+		return "", fmt.Errorf("refuse batch ref update: %w", err)
+	}
 	if err := w.requireDirectRunRef(ctx, w.green, false); err != nil {
 		return "", fmt.Errorf("refuse batch ref update: %w", err)
 	}
+	if w.beforeBatchRefUpdate != nil {
+		if err := w.beforeBatchRefUpdate(); err != nil {
+			return "", fmt.Errorf("before batch ref update: %w", err)
+		}
+	}
+	if err := w.verifyBatch(ctx, proof, w.green, true, false); err != nil {
+		return "", fmt.Errorf("refuse final batch ref update: %w", err)
+	}
 	ref := "refs/heads/" + w.branch
-	if _, err := gitcmd.Output(ctx, w.repositoryRoot, gitcmd.Hermetic, gitOutputLimit,
-		"--git-dir="+w.commonDir, "-c", "core.hooksPath="+os.DevNull, "update-ref", "--no-deref", ref, commit, w.green); err != nil {
+	if err := w.compareAndSwapBatchRef(ctx, ref, commit, w.green); err != nil {
+		recoveryCtx, cancelRecovery := recoveryContext(ctx)
+		defer cancelRecovery()
+		if w.requireDirectRunRef(recoveryCtx, commit, false) == nil {
+			if rollbackErr := w.updateBatchRefDirect(recoveryCtx, ref, w.green, commit); rollbackErr != nil {
+				return "", errors.New("batch ref update was ambiguous and rollback failed")
+			}
+		} else if w.requireDirectRunRef(recoveryCtx, w.green, false) != nil {
+			return "", errors.New("batch ref update failed with an unexpected run ref")
+		}
 		return "", errors.New("advance batch run ref by compare-and-swap")
+	}
+	recoveryCtx, cancelRecovery := recoveryContext(ctx)
+	defer cancelRecovery()
+	postUpdateErr := error(nil)
+	if w.afterBatchRefUpdate != nil {
+		postUpdateErr = w.afterBatchRefUpdate()
+	}
+	if postUpdateErr == nil {
+		if cause := context.Cause(ctx); cause != nil {
+			postUpdateErr = cause
+		}
+	}
+	if verifyErr := w.verifyBatch(recoveryCtx, proof, commit, false, false); postUpdateErr == nil {
+		postUpdateErr = verifyErr
+	}
+	if postUpdateErr == nil {
+		postUpdateErr = context.Cause(ctx)
+	}
+	if postUpdateErr != nil {
+		if rollbackErr := w.updateBatchRefDirect(recoveryCtx, ref, w.green, commit); rollbackErr != nil {
+			return "", errors.New("batch proof drifted after ref update and rollback failed")
+		}
+		return "", fmt.Errorf("batch proof drifted after ref update: %w", postUpdateErr)
 	}
 	w.green = commit
 	return commit, nil
+}
+
+func (w *Workspace) compareAndSwapBatchRef(ctx context.Context, ref, next, previous string) error {
+	if w.updateBatchRef != nil {
+		return w.updateBatchRef(ctx, ref, next, previous)
+	}
+	return w.updateBatchRefDirect(ctx, ref, next, previous)
+}
+
+func (w *Workspace) updateBatchRefDirect(ctx context.Context, ref, next, previous string) error {
+	_, err := gitcmd.Output(ctx, w.repositoryRoot, gitcmd.Hermetic, gitOutputLimit,
+		"--git-dir="+w.commonDir, "-c", "core.hooksPath="+os.DevNull, "update-ref", "--no-deref", ref, next, previous)
+	return err
 }
 
 // RollbackBatch restores the parent of the exact most recently committed
@@ -1921,6 +2593,83 @@ func (d *privateTempDir) close() {
 		_ = d.parent.Remove(d.name)
 	}
 	_ = d.parent.Close()
+}
+
+func (d *privateTempDir) discard() error {
+	if d == nil || d.root == nil || d.parent == nil {
+		return errors.New("private state directory is unavailable")
+	}
+	if err := d.validatePathBinding(); err != nil {
+		return err
+	}
+	if err := makePrivateTreeWritable(d.root); err != nil {
+		return errors.New("make private state removable")
+	}
+	directory, err := d.root.Open(".")
+	if err != nil {
+		return errors.New("open private state for removal")
+	}
+	entries, readErr := directory.ReadDir(-1)
+	_ = directory.Close()
+	if readErr != nil {
+		return errors.New("read private state for removal")
+	}
+	for _, entry := range entries {
+		if err := d.root.RemoveAll(entry.Name()); err != nil {
+			return errors.New("remove private state contents")
+		}
+	}
+	if d.beforeRemove != nil {
+		if err := d.beforeRemove(); err != nil {
+			return err
+		}
+	}
+	current, err := d.parent.Lstat(d.name)
+	if err != nil || d.info == nil || !os.SameFile(d.info, current) {
+		return errors.New("private state directory binding changed before removal")
+	}
+	if err := d.parent.Remove(d.name); err != nil {
+		return errors.New("remove private state directory")
+	}
+	_ = d.root.Close()
+	d.root = nil
+	_ = d.parent.Close()
+	d.parent = nil
+	return nil
+}
+
+func makePrivateTreeWritable(root *os.Root) error {
+	if err := root.Chmod(".", 0o700); err != nil {
+		return err
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	entries, readErr := directory.ReadDir(-1)
+	_ = directory.Close()
+	if readErr != nil {
+		return readErr
+	}
+	for _, entry := range entries {
+		info, err := root.Lstat(entry.Name())
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		child, err := root.OpenRoot(entry.Name())
+		if err != nil {
+			return err
+		}
+		err = makePrivateTreeWritable(child)
+		_ = child.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func randomPrivateName(prefix string) (string, error) {

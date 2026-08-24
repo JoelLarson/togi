@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -42,6 +43,81 @@ type Executor struct {
 }
 
 type commandRunner func(context.Context, string, []string) runner.Result
+
+// validationRequests selects the deterministic per-attempt gate subset.
+// Malformed assigned evidence fails closed by retaining every selected gate.
+func validationRequests(requests []Request, assigned []finding.Finding) []Request {
+	owners := make(map[string]struct{}, len(assigned))
+	available := make(map[string]struct{}, len(requests))
+	malformed := false
+	for _, request := range requests {
+		available[request.Gate.Manifest.Name] = struct{}{}
+		if !request.Gate.Valid() || !request.Binding.Valid() || !request.Gate.Owns(request.Binding) {
+			malformed = true
+		}
+	}
+	for _, item := range assigned {
+		grouped, err := finding.Group([]finding.Finding{item})
+		_, ownerAvailable := available[item.Gate]
+		if len(item.Occurrences) == 0 {
+			item.Occurrences = nil
+		}
+		if len(grouped) == 1 && len(grouped[0].Occurrences) == 0 {
+			grouped[0].Occurrences = nil
+		}
+		if err != nil || item.Fingerprint == "" || len(grouped) != 1 || !reflect.DeepEqual(grouped[0], item) || !ownerAvailable {
+			malformed = true
+			break
+		}
+		owners[item.Gate] = struct{}{}
+	}
+	selected := make([]Request, 0, len(requests))
+	for _, request := range requests {
+		cost := request.Gate.Manifest.CostClass
+		_, assignedOwner := owners[request.Gate.Manifest.Name]
+		if !malformed && cost != gate.Instant && cost != gate.Fast && !assignedOwner {
+			continue
+		}
+		selected = append(selected, cloneExecutionRequest(request))
+	}
+	sort.SliceStable(selected, func(left, right int) bool {
+		if selected[left].Position != selected[right].Position {
+			return selected[left].Position < selected[right].Position
+		}
+		if selected[left].Gate.Manifest.Name != selected[right].Gate.Manifest.Name {
+			return selected[left].Gate.Manifest.Name < selected[right].Gate.Manifest.Name
+		}
+		if selected[left].Binding.Language != selected[right].Binding.Language {
+			return selected[left].Binding.Language < selected[right].Binding.Language
+		}
+		return selected[left].Root < selected[right].Root
+	})
+	return selected
+}
+
+func cloneExecutionRequest(request Request) Request {
+	if request.ChangedLines != nil {
+		cloned := make(finding.ChangedLines, len(request.ChangedLines))
+		for file, ranges := range request.ChangedLines {
+			cloned[file] = slices.Clone(ranges)
+		}
+		request.ChangedLines = cloned
+	}
+	if !request.Gate.Valid() || !request.Binding.Valid() || !request.Gate.Owns(request.Binding) {
+		request.Gate = gate.Gate{}
+		request.Binding = gate.Binding{}
+		return request
+	}
+	cloned, err := gate.Compile(request.Gate.Manifest, request.Gate.Bindings)
+	if err != nil {
+		request.Gate = gate.Gate{}
+		request.Binding = gate.Binding{}
+		return request
+	}
+	request.Gate = cloned
+	request.Binding = cloned.Bindings[request.Binding.Language]
+	return request
+}
 
 // gateCommand is the production runner for gate and version commands: raw
 // output limits match what the ledger will persist.

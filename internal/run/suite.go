@@ -20,6 +20,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/joellarson/togi/internal/flywheel"
 	"github.com/joellarson/togi/internal/runner"
 )
 
@@ -53,10 +54,12 @@ type SuiteResult struct {
 type GoSuite struct {
 	executable       string
 	now              func() time.Time
-	runCommand       commandRunner
+	runCommand       suiteCommandRunner
 	inspectFile      suiteFileInspector
 	discoverPackages func(context.Context, string) ([]string, error)
 }
+
+type suiteCommandRunner func(context.Context, string, []string, []string) runner.Result
 
 type suiteFileInspector func(context.Context, string, string) (bool, error)
 
@@ -73,6 +76,10 @@ type listedGoPackage struct {
 // Discover asks the configured Go executable for the active package universe,
 // then inspects only test files selected by that tool invocation.
 func (s *GoSuite) Discover(ctx context.Context, root string) ([]string, error) {
+	return s.discover(ctx, root, goSuiteBuildEnvironment(os.Environ()))
+}
+
+func (s *GoSuite) discover(ctx context.Context, root string, environment []string) ([]string, error) {
 	if ctx == nil {
 		return nil, errors.New("behavioral suite context is required")
 	}
@@ -85,14 +92,13 @@ func (s *GoSuite) Discover(ctx context.Context, root string) ([]string, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("behavioral suite root is required")
 	}
+	if err := flywheel.ValidateModuleConfinement(root); err != nil {
+		return nil, errors.New("behavioral suite module is not confined")
+	}
 	if ctx.Err() != nil {
 		return nil, suiteCancellationError(ctx, nil, nil)
 	}
-	run := s.runCommand
-	if run == nil {
-		run = runGoListCommand
-	}
-	process := run(ctx, root, []string{s.executable, "list", "-e", "-json=Dir,TestGoFiles,XTestGoFiles", "./..."})
+	process := s.run(ctx, root, []string{s.executable, "list", "-e", "-json=Dir,TestGoFiles,XTestGoFiles", "./..."}, environment, true)
 	if ctx.Err() != nil {
 		return nil, suiteCancellationError(ctx, nil, nil)
 	}
@@ -373,15 +379,23 @@ func (s *GoSuite) Run(ctx context.Context, root string, packages []string, full 
 	if strings.TrimSpace(root) == "" {
 		return invalidSuiteResult(result, "behavioral suite root is required")
 	}
+	if err := flywheel.ValidateModuleConfinement(root); err != nil {
+		result.Status = SuiteErrored
+		result.Diagnostic = "behavioral suite module is not confined"
+		return result, nil
+	}
 	if err := ctx.Err(); err != nil {
 		result.Status = SuiteErrored
 		result.Diagnostic, resultErr = suiteCancellation(ctx, nil, nil)
 		return result, resultErr
 	}
+	environment := goSuiteBuildEnvironment(os.Environ())
 	if full {
 		discover := s.discoverPackages
 		if discover == nil {
-			discover = s.Discover
+			discover = func(ctx context.Context, root string) ([]string, error) {
+				return s.discover(ctx, root, environment)
+			}
 		}
 		discovered, err := discover(ctx, root)
 		if ctx.Err() != nil {
@@ -422,11 +436,7 @@ func (s *GoSuite) Run(ctx context.Context, root string, packages []string, full 
 		return result, resultErr
 	}
 
-	run := s.runCommand
-	if run == nil {
-		run = runSuiteCommand
-	}
-	process := run(ctx, root, result.Command)
+	process := s.run(ctx, root, result.Command, environment, false)
 	result.Diagnostic = combineSuiteDiagnostic(process.Stdout, process.Stderr)
 	if err := ctx.Err(); err != nil {
 		result.Status = SuiteErrored
@@ -452,20 +462,69 @@ func (s *GoSuite) Run(ctx context.Context, root string, packages []string, full 
 	return result, nil
 }
 
-func runSuiteCommand(ctx context.Context, root string, command []string) runner.Result {
+func (s *GoSuite) run(ctx context.Context, root string, command, environment []string, list bool) runner.Result {
+	if s.runCommand != nil {
+		return s.runCommand(ctx, root, slices.Clone(command), slices.Clone(environment))
+	}
+	if list {
+		return runGoListCommand(ctx, root, command, environment)
+	}
+	return runSuiteCommand(ctx, root, command, environment)
+}
+
+func runSuiteCommand(ctx context.Context, root string, command, environment []string) runner.Result {
 	return runner.Run(ctx, root, command, runner.Options{
+		Env:              slices.Clone(environment),
 		StdoutLimit:      suiteDiagnosticLimit,
 		StderrLimit:      suiteDiagnosticLimit,
 		TruncationMarker: suiteTruncationMarker,
 	})
 }
 
-func runGoListCommand(ctx context.Context, root string, command []string) runner.Result {
+func runGoListCommand(ctx context.Context, root string, command, environment []string) runner.Result {
 	return runner.Run(ctx, root, command, runner.Options{
+		Env:              slices.Clone(environment),
 		StdoutLimit:      suiteListOutputLimit,
 		StderrLimit:      suiteDiagnosticLimit,
 		TruncationMarker: suiteTruncationMarker,
 	})
+}
+
+func goSuiteBuildEnvironment(inherited []string) []string {
+	owned := map[string]struct{}{
+		"GOOS": {}, "GOARCH": {}, "CGO_ENABLED": {}, "GOFLAGS": {}, "GOENV": {}, "GOWORK": {}, "GOEXPERIMENT": {}, "GOTOOLCHAIN": {}, "GO111MODULE": {},
+		"GOAMD64": {}, "GO386": {}, "GOARM": {}, "GOARM64": {}, "GOMIPS": {}, "GOMIPS64": {}, "GOPPC64": {}, "GORISCV64": {}, "GOWASM": {},
+	}
+	environment := make([]string, 0, len(inherited)+len(owned))
+	for _, entry := range inherited {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok {
+			if _, controlled := owned[strings.ToUpper(key)]; controlled {
+				continue
+			}
+		}
+		environment = append(environment, entry)
+	}
+	buildContext := flywheel.ValidationGoBuildContext()
+	cgo := "0"
+	if buildContext.CgoEnabled {
+		cgo = "1"
+	}
+	environment = append(environment,
+		"GOOS="+buildContext.GOOS,
+		"GOARCH="+buildContext.GOARCH,
+		"CGO_ENABLED="+cgo,
+		"GOFLAGS=",
+		"GOENV=off",
+		"GOWORK=off",
+		"GOEXPERIMENT=none",
+		"GOTOOLCHAIN=local",
+		"GO111MODULE=on",
+	)
+	if key, value, _ := flywheel.ValidationGoArchitecture(); key != "" {
+		environment = append(environment, key+"="+value)
+	}
+	return environment
 }
 
 func bufferTruncated(buffer *runner.Buffer) bool {
@@ -514,6 +573,12 @@ func canonicalSuitePackage(rootAbs, resolvedRoot, pkg string) (string, error) {
 	if cleaned == "." {
 		return ".", nil
 	}
+	if excludedSuitePackage(cleaned) {
+		return "", errors.New("local behavioral suite package is outside the active module universe")
+	}
+	if nestedSuiteModule(rootAbs, cleaned) {
+		return "", errors.New("local behavioral suite package belongs to a nested module")
+	}
 	resolved, err := resolveNearestExisting(filepath.Join(rootAbs, filepath.FromSlash(cleaned)))
 	if err != nil {
 		return "", errors.New("resolve local behavioral suite package")
@@ -522,6 +587,24 @@ func canonicalSuitePackage(rootAbs, resolvedRoot, pkg string) (string, error) {
 		return "", errors.New("local behavioral suite package escapes the repository")
 	}
 	return "./" + cleaned, nil
+}
+
+func excludedSuitePackage(pkg string) bool {
+	for _, component := range strings.Split(pkg, "/") {
+		if component == "vendor" || strings.HasPrefix(component, ".") || strings.HasPrefix(component, "_") {
+			return true
+		}
+	}
+	return false
+}
+
+func nestedSuiteModule(root, pkg string) bool {
+	for current := pkg; current != "."; current = pathpkg.Dir(current) {
+		if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(current), "go.mod")); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func windowsVolumePath(path string) bool {

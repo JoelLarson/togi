@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"go/build"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joellarson/togi/internal/flywheel"
 	"github.com/joellarson/togi/internal/runner"
 )
 
@@ -216,7 +219,7 @@ func TestBehavior(t *testing.T) {}
 	wantTest := []string{"fake-go", "test", "./..."}
 	var commands [][]string
 	suite := NewGoSuite("fake-go")
-	suite.runCommand = func(_ context.Context, _ string, command []string) runner.Result {
+	suite.runCommand = func(_ context.Context, _ string, command, _ []string) runner.Result {
 		commands = append(commands, slices.Clone(command))
 		if len(commands) == 1 && slices.Equal(command, broadList) {
 			return suiteRunnerResult(strings.Repeat("x", suiteListOutputLimit+1), "", nil)
@@ -236,6 +239,143 @@ func TestBehavior(t *testing.T) {}
 	}
 	if result.Status != SuitePassed || len(commands) != 2 || !slices.Equal(commands[0], wantList) || !slices.Equal(commands[1], wantTest) {
 		t.Fatalf("result/commands = %#v/%v", result, commands)
+	}
+}
+
+func TestGoSuitePinsIdenticalBuildEnvironmentForListAndTest(t *testing.T) {
+	root := t.TempDir()
+	writeSuiteFile(t, root, "behavior_test.go", "package behavior\nimport \"testing\"\nfunc TestBehavior(t *testing.T) {}\n")
+	listed, err := json.Marshal(testGoListPackage{Dir: root, TestGoFiles: []string{"behavior_test.go"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOFLAGS", "-tags=custom")
+	t.Setenv("goflags", "-tags=hostile")
+	t.Setenv("GoOs", "plan9")
+	t.Setenv("GOWORK", filepath.Join(root, "hostile.work"))
+	t.Setenv("GOAMD64", "v3")
+	t.Setenv("goarm", "5")
+	var environments [][]string
+	suite := NewGoSuite("fake-go")
+	suite.runCommand = func(_ context.Context, _ string, command, environment []string) runner.Result {
+		environments = append(environments, slices.Clone(environment))
+		if len(command) > 1 && command[1] == "list" {
+			return suiteRunnerResult(string(listed)+"\n", "", nil)
+		}
+		return suiteRunnerResult("", "", nil)
+	}
+
+	result, err := suite.Run(context.Background(), root, nil, true)
+	if err != nil || result.Status != SuitePassed || len(environments) != 2 || !slices.Equal(environments[0], environments[1]) {
+		t.Fatalf("Run() = (%#v, %v), environments = %v", result, err, environments)
+	}
+	assertSuiteBuildEnvironment(t, environments[0], map[string]string{
+		"GOOS": build.Default.GOOS, "GOARCH": build.Default.GOARCH,
+		"CGO_ENABLED": map[bool]string{false: "0", true: "1"}[build.Default.CgoEnabled],
+		"GOFLAGS":     "", "GOENV": "off", "GOWORK": "off", "GOEXPERIMENT": "none", "GOTOOLCHAIN": "local", "GO111MODULE": "on",
+	})
+	if !environmentContainsExact(environments[0], "PATH="+os.Getenv("PATH")) {
+		t.Fatal("suite environment dropped PATH")
+	}
+	assertSuiteArchitectureEnvironment(t, environments[0])
+}
+
+func TestGoSuiteBuildEnvironmentStripsDuplicateMixedCaseOwnedKeys(t *testing.T) {
+	inherited := []string{
+		"PATH=/tools", "HOME=/home/test", "GOCACHE=/cache", "TMPDIR=/tmp/owned",
+		"GOFLAGS=-tags=custom", "goflags=-tags=other", "GoOs=plan9", "GOARCH=386",
+		"cgo_enabled=1", "GOENV=hostile", "goenv=other", "GOWORK=/tmp/go.work", "goexperiment=hostile", "gotoolchain=auto", "go111module=off", "GO111MODULE=auto",
+		"GOAMD64=v3", "goamd64=v4", "GOARM=5", "goarm=6", "GO386=softfloat",
+	}
+	environment := goSuiteBuildEnvironment(inherited)
+	assertSuiteBuildEnvironment(t, environment, map[string]string{
+		"GOOS": build.Default.GOOS, "GOARCH": build.Default.GOARCH,
+		"CGO_ENABLED": map[bool]string{false: "0", true: "1"}[build.Default.CgoEnabled],
+		"GOFLAGS":     "", "GOENV": "off", "GOWORK": "off", "GOEXPERIMENT": "none", "GOTOOLCHAIN": "local", "GO111MODULE": "on",
+	})
+	for _, preserved := range []string{"PATH=/tools", "HOME=/home/test", "GOCACHE=/cache", "TMPDIR=/tmp/owned"} {
+		if !environmentContainsExact(environment, preserved) {
+			t.Fatalf("suite environment dropped %q: %v", preserved, environment)
+		}
+	}
+	assertSuiteArchitectureEnvironment(t, environment)
+}
+
+func TestGoSuiteRejectsModuleReplacementOutsideValidationRootBeforeCommands(t *testing.T) {
+	root := t.TempDir()
+	writeSuiteFile(t, root, "go.mod", "module example.test/project\n\ngo 1.25\nreplace example.test/dep => ../outside\n")
+	commands := 0
+	suite := NewGoSuite("fake-go")
+	suite.runCommand = func(context.Context, string, []string, []string) runner.Result {
+		commands++
+		return suiteRunnerResult("", "", nil)
+	}
+	result, err := suite.Run(context.Background(), root, []string{"."}, false)
+	if err != nil || result.Status != SuiteErrored || commands != 0 || strings.Contains(result.Diagnostic, root) {
+		t.Fatalf("Run() = (%#v, %v), commands = %d", result, err, commands)
+	}
+}
+
+func TestGoSuiteAndChangedPackagesIgnoreInheritedCustomBuildTags(t *testing.T) {
+	root := t.TempDir()
+	writeSuiteFile(t, root, "go.mod", "module example.test/project\n\ngo 1.25\n")
+	writeSuiteFile(t, root, "custom/value.go", "//go:build custom\n\npackage custom\n")
+	t.Setenv("GOFLAGS", "-tags=custom")
+
+	packages, full, err := flywheel.ChangedGoPackages(root, []string{"custom/value.go"})
+	if err != nil || full || packages != nil {
+		t.Fatalf("ChangedGoPackages() = (%v, %t, %v), want inherited custom tag excluded", packages, full, err)
+	}
+	buildContext := flywheel.ValidationGoBuildContext()
+	assertSuiteBuildEnvironment(t, goSuiteBuildEnvironment(os.Environ()), map[string]string{
+		"GOOS": buildContext.GOOS, "GOARCH": buildContext.GOARCH,
+		"CGO_ENABLED": map[bool]string{false: "0", true: "1"}[buildContext.CgoEnabled],
+		"GOFLAGS":     "", "GOENV": "off", "GOWORK": "off", "GOEXPERIMENT": "none", "GOTOOLCHAIN": "local", "GO111MODULE": "on",
+	})
+}
+
+func TestGoSuiteAndChangedPackagesPinArchitectureFeatureTags(t *testing.T) {
+	root := t.TempDir()
+	writeSuiteFile(t, root, "go.mod", "module example.test/project\n\ngo 1.25\n")
+	writeSuiteFile(t, root, "feature/value.go", "//go:build amd64.v3\n\npackage feature\n")
+	t.Setenv("GOAMD64", "v3")
+	t.Setenv("GOARM", "5")
+
+	packages, full, err := flywheel.ChangedGoPackages(root, []string{"feature/value.go"})
+	if err != nil || full || packages != nil {
+		t.Fatalf("ChangedGoPackages() = (%v, %t, %v), want pinned architecture tags", packages, full, err)
+	}
+	buildContext := flywheel.ValidationGoBuildContext()
+	if buildContext.GOARCH == "amd64" && (!slices.Contains(buildContext.ToolTags, "amd64.v1") || slices.Contains(buildContext.ToolTags, "amd64.v3")) {
+		t.Fatalf("ToolTags = %v, want pinned cumulative amd64.v1", buildContext.ToolTags)
+	}
+	assertSuiteArchitectureEnvironment(t, goSuiteBuildEnvironment(os.Environ()))
+}
+
+func TestGoSuiteAndChangedPackagesPinExperimentTagsAtProcessStart(t *testing.T) {
+	const helper = "TOGI_EXPERIMENT_CONTEXT_HELPER"
+	if os.Getenv(helper) == "1" {
+		if slices.Contains(flywheel.ValidationGoBuildContext().ToolTags, "goexperiment.arenas") {
+			t.Fatal("ValidationGoBuildContext retained process-start experiment tag")
+		}
+		assertSuiteBuildEnvironment(t, goSuiteBuildEnvironment(os.Environ()), map[string]string{"GOEXPERIMENT": "none"})
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(executable, "-test.run=^TestGoSuiteAndChangedPackagesPinExperimentTagsAtProcessStart$")
+	command.Env = make([]string, 0, len(os.Environ())+2)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if !strings.EqualFold(key, "GOEXPERIMENT") {
+			command.Env = append(command.Env, entry)
+		}
+	}
+	command.Env = append(command.Env, helper+"=1", "GOEXPERIMENT=arenas")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("experiment helper failed: %v\n%s", err, output)
 	}
 }
 
@@ -407,7 +547,7 @@ func TestGoSuiteFullRunClassifiesGoListStartAndCleanupFailures(t *testing.T) {
 	})
 	t.Run("cleanup", func(t *testing.T) {
 		suite := NewGoSuite("fake-go")
-		suite.runCommand = func(context.Context, string, []string) runner.Result {
+		suite.runCommand = func(context.Context, string, []string, []string) runner.Result {
 			return runner.Result{
 				Stdout:     runner.NewBuffer(suiteListOutputLimit, suiteTruncationMarker),
 				Stderr:     runner.NewBuffer(suiteDiagnosticLimit, suiteTruncationMarker),
@@ -485,7 +625,7 @@ func TestGoSuitePostListCancellationPrecedesInspectionOutcome(t *testing.T) {
 			cause := errors.New("wall-clock rail exhausted during discovery")
 			calls := 0
 			suite := NewGoSuite("fake-go")
-			suite.runCommand = func(context.Context, string, []string) runner.Result {
+			suite.runCommand = func(context.Context, string, []string, []string) runner.Result {
 				calls++
 				return suiteRunnerResult(string(listed)+"\n", "", nil)
 			}
@@ -558,7 +698,7 @@ func TestGoSuiteRunRechecksCancellationAfterDiscovery(t *testing.T) {
 				return test.packages, test.err
 			}
 			runnerCalled := false
-			suite.runCommand = func(context.Context, string, []string) runner.Result {
+			suite.runCommand = func(context.Context, string, []string, []string) runner.Result {
 				runnerCalled = true
 				return suiteRunnerResult("", "", nil)
 			}
@@ -623,6 +763,24 @@ func TestGoSuiteLocalRunRejectsUnsafePackages(t *testing.T) {
 			}
 			if result.Status != SuiteErrored || result.Command != nil {
 				t.Fatalf("result = %#v", result)
+			}
+		})
+	}
+}
+
+func TestGoSuiteLocalRunRejectsPackagesOutsideActiveModuleUniverse(t *testing.T) {
+	root := t.TempDir()
+	writeSuiteFile(t, root, "go.mod", "module example.test/project\n\ngo 1.25\n")
+	writeSuiteFile(t, root, ".hidden/hidden.go", "package hidden\n")
+	writeSuiteFile(t, root, "_hidden/hidden.go", "package hidden\n")
+	writeSuiteFile(t, root, "vendor/lib/lib.go", "package lib\n")
+	writeSuiteFile(t, root, "nested/go.mod", "module example.test/nested\n\ngo 1.25\n")
+	writeSuiteFile(t, root, "nested/nested.go", "package nested\n")
+	for _, pkg := range []string{"./.hidden", "./_hidden", "./vendor/lib", "./nested"} {
+		t.Run(pkg, func(t *testing.T) {
+			result, err := fakeGoSuite(t, "must-not-run").Run(context.Background(), root, []string{pkg}, false)
+			if err == nil || result.Status != SuiteErrored || result.Command != nil {
+				t.Fatalf("Run(%q) = (%#v, %v), want programmer-input rejection", pkg, result, err)
 			}
 		})
 	}
@@ -728,7 +886,7 @@ func TestGoSuiteBoundsCombinedDiagnostic(t *testing.T) {
 
 func TestGoSuiteCleanupFailureIsErrored(t *testing.T) {
 	suite := fakeGoSuite(t, "pass")
-	suite.runCommand = func(context.Context, string, []string) runner.Result {
+	suite.runCommand = func(context.Context, string, []string, []string) runner.Result {
 		return runner.Result{
 			Stdout:     runner.NewBuffer(suiteDiagnosticLimit, suiteTruncationMarker),
 			Stderr:     runner.NewBuffer(suiteDiagnosticLimit, suiteTruncationMarker),
@@ -868,6 +1026,59 @@ func oppositeGOARCH() string {
 		return "amd64"
 	}
 	return "arm64"
+}
+
+func assertSuiteBuildEnvironment(t *testing.T, environment []string, expected map[string]string) {
+	t.Helper()
+	counts := make(map[string]int)
+	values := make(map[string]string)
+	for _, entry := range environment {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		upper := strings.ToUpper(key)
+		if _, owned := expected[upper]; owned {
+			counts[upper]++
+			values[upper] = value
+		}
+	}
+	for key, want := range expected {
+		if counts[key] != 1 || values[key] != want {
+			t.Fatalf("environment %s = %q (%d entries), want %q exactly once: %v", key, values[key], counts[key], want, environment)
+		}
+	}
+}
+
+func assertSuiteArchitectureEnvironment(t *testing.T, environment []string) {
+	t.Helper()
+	defaults := map[string]string{
+		"amd64": "GOAMD64=v1", "386": "GO386=sse2", "arm": "GOARM=7", "arm64": "GOARM64=v8.0",
+		"mips": "GOMIPS=hardfloat", "mipsle": "GOMIPS=hardfloat", "mips64": "GOMIPS64=hardfloat", "mips64le": "GOMIPS64=hardfloat",
+		"ppc64": "GOPPC64=power8", "ppc64le": "GOPPC64=power8", "riscv64": "GORISCV64=rva20u64", "wasm": "GOWASM=",
+	}
+	want := defaults[flywheel.ValidationGoBuildContext().GOARCH]
+	keys := []string{"GOAMD64", "GO386", "GOARM", "GOARM64", "GOMIPS", "GOMIPS64", "GOPPC64", "GORISCV64", "GOWASM"}
+	counts := make(map[string]int)
+	for _, entry := range environment {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && slices.Contains(keys, strings.ToUpper(key)) {
+			counts[strings.ToUpper(key)]++
+			if want == "" || entry != want {
+				t.Fatalf("unexpected architecture environment %q for %s: %v", entry, flywheel.ValidationGoBuildContext().GOARCH, environment)
+			}
+		}
+	}
+	if want != "" {
+		key, _, _ := strings.Cut(want, "=")
+		if counts[key] != 1 {
+			t.Fatalf("architecture environment %s count = %d, want exactly one: %v", key, counts[key], environment)
+		}
+	}
+}
+
+func environmentContainsExact(environment []string, want string) bool {
+	return slices.Contains(environment, want)
 }
 
 func writeSuiteFile(t *testing.T, root, name, content string) {

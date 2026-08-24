@@ -108,6 +108,25 @@ func TestBatchChangedFilesAreSortedAndIncludeRenames(t *testing.T) {
 	}
 }
 
+func mustChangedFiles(t *testing.T, workspace *Workspace) []string {
+	t.Helper()
+	changed, err := workspace.ChangedFiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return changed
+}
+
+func mustPrepareBatchProof(t *testing.T, workspace *Workspace) BatchProof {
+	t.Helper()
+	proof, err := workspace.PrepareBatch(context.Background(), mustChangedFiles(t, workspace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = workspace.discardValidationSnapshot(nil) })
+	return proof
+}
+
 func TestBatchChangedFilesIncludesBothPathsForStagedRename(t *testing.T) {
 	repo, head := workspaceRepository(t)
 	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "staged-rename")
@@ -199,7 +218,7 @@ func TestBatchResetAttemptRestoresLatestGreenCommit(t *testing.T) {
 	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "reset")
 	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
 	writeWorkspaceFile(t, workspace.Path(), ".gitignore", "ignored.log\n")
-	green, err := workspace.CommitBatch(context.Background(), "feature.txt")
+	green, err := workspace.CommitBatch(context.Background(), "feature.txt", mustPrepareBatchProof(t, workspace))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +251,7 @@ func TestBatchRollbackRestoresExactJustCommittedGreenState(t *testing.T) {
 	repo, head := workspaceRepository(t)
 	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "rollback-batch")
 	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
-	commit, err := workspace.CommitBatch(context.Background(), "feature.txt")
+	commit, err := workspace.CommitBatch(context.Background(), "feature.txt", mustPrepareBatchProof(t, workspace))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +276,7 @@ func TestBatchRollbackPreservesConcurrentlyMovedRunRef(t *testing.T) {
 	repo, head := workspaceRepository(t)
 	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "rollback-moved")
 	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
-	commit, err := workspace.CommitBatch(context.Background(), "feature.txt")
+	commit, err := workspace.CommitBatch(context.Background(), "feature.txt", mustPrepareBatchProof(t, workspace))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,6 +398,10 @@ func TestWorkspaceOperationsRejectSymlinkReboundRootToSameInode(t *testing.T) {
 			if operation == "commit" {
 				writeWorkspaceFile(t, workspace.Path(), "feature.txt", "changed\n")
 			}
+			var proof BatchProof
+			if operation == "commit" {
+				proof = mustPrepareBatchProof(t, workspace)
+			}
 			moved := workspace.Path() + "-moved"
 			if err := os.Rename(workspace.Path(), moved); err != nil {
 				t.Fatal(err)
@@ -391,7 +414,7 @@ func TestWorkspaceOperationsRejectSymlinkReboundRootToSameInode(t *testing.T) {
 			case "reset":
 				err = workspace.ResetAttempt(context.Background())
 			case "commit":
-				_, err = workspace.CommitBatch(context.Background(), "feature.txt")
+				_, err = workspace.CommitBatch(context.Background(), "feature.txt", proof)
 			case "snapshot":
 				_, err = workspace.SnapshotGitState(context.Background())
 			case "check":
@@ -423,6 +446,10 @@ func TestOperationsRejectSameByteIndexInodeReplacement(t *testing.T) {
 			if operation == "commit" {
 				writeWorkspaceFile(t, workspace.Path(), "feature.txt", "changed\n")
 			}
+			var proof BatchProof
+			if operation == "commit" {
+				proof = mustPrepareBatchProof(t, workspace)
+			}
 			indexPath := filepath.Join(workspace.gitDir, "index")
 			contents, err := os.ReadFile(indexPath)
 			if err != nil {
@@ -448,7 +475,7 @@ func TestOperationsRejectSameByteIndexInodeReplacement(t *testing.T) {
 			case "reset":
 				err = workspace.ResetAttempt(context.Background())
 			case "commit":
-				_, err = workspace.CommitBatch(context.Background(), "feature.txt")
+				_, err = workspace.CommitBatch(context.Background(), "feature.txt", proof)
 			case "check":
 				err = workspace.CheckGitState(context.Background(), before)
 			}
@@ -514,7 +541,7 @@ func TestOwnedIndexMutationRejectsSubstitutionAfterGitCommand(t *testing.T) {
 			if operation == "reset" {
 				err = workspace.ResetAttempt(context.Background())
 			} else {
-				_, err = workspace.CommitBatch(context.Background(), "feature.txt")
+				_, err = workspace.PrepareBatch(context.Background(), mustChangedFiles(t, workspace))
 			}
 			if err == nil {
 				t.Fatalf("%s accepted an index substitution after its Git command", operation)
@@ -672,7 +699,7 @@ func TestBatchCommitStagesWholeTreeUsesIdentityAndDisablesHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	commit, err := workspace.CommitBatch(context.Background(), "feature.txt")
+	commit, err := workspace.CommitBatch(context.Background(), "feature.txt", mustPrepareBatchProof(t, workspace))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -690,6 +717,398 @@ func TestBatchCommitStagesWholeTreeUsesIdentityAndDisablesHooks(t *testing.T) {
 	}
 }
 
+func TestBatchProofCommitsExactlyPreparedTreeWithoutRestaging(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-commit")
+	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
+	writeWorkspaceFile(t, workspace.Path(), "other.txt", "other\n")
+	changed, err := workspace.ChangedFiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := workspace.PrepareBatch(context.Background(), changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := workspace.CommitBatch(context.Background(), "feature.txt", proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commit == head {
+		t.Fatal("CommitBatch did not advance the prepared tree")
+	}
+	if got := gitcmdtest.Git(t, workspace.Path(), "show", "HEAD:feature.txt"); got != "validated" {
+		t.Fatalf("committed feature = %q", got)
+	}
+}
+
+func TestBatchProofMaterializesReadOnlyValidationSnapshot(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-validation-snapshot")
+	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "staged bytes\n")
+	proof := mustPrepareBatchProof(t, workspace)
+	root := proof.ValidationRoot()
+	if root == "" || root == workspace.Path() || filepath.Dir(root) != workspace.cacheRoot {
+		t.Fatalf("ValidationRoot() = %q, want cryptorandom private sibling", root)
+	}
+	contents, err := os.ReadFile(filepath.Join(root, "feature.txt"))
+	if err != nil || string(contents) != "staged bytes\n" {
+		t.Fatalf("validation feature = %q, %v", contents, err)
+	}
+	fileInfo, err := os.Lstat(filepath.Join(root, "feature.txt"))
+	if err != nil || fileInfo.Mode().Perm()&0o222 != 0 {
+		t.Fatalf("validation file mode = %v, %v; want read-only", fileInfo.Mode(), err)
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil || rootInfo.Mode().Perm()&0o222 != 0 {
+		t.Fatalf("validation root mode = %v, %v; want read-only", rootInfo.Mode(), err)
+	}
+
+	if _, err := workspace.CommitBatch(context.Background(), "feature.txt", proof); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("validation snapshot survived commit: %v", err)
+	}
+}
+
+func TestBatchProofValidationSnapshotIgnoresExportAttributes(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-raw-tree")
+	writeWorkspaceFile(t, workspace.Path(), ".gitattributes", "hidden.go export-ignore\nsubstitute.txt export-subst\n")
+	writeWorkspaceFile(t, workspace.Path(), "hidden.go", "package hidden\n")
+	writeWorkspaceFile(t, workspace.Path(), "substitute.txt", "$Format:%H$\n")
+	proof := mustPrepareBatchProof(t, workspace)
+	for name, want := range map[string]string{
+		"hidden.go":      "package hidden\n",
+		"substitute.txt": "$Format:%H$\n",
+	} {
+		contents, err := os.ReadFile(filepath.Join(proof.ValidationRoot(), name))
+		if err != nil || string(contents) != want {
+			t.Fatalf("validation %s = %q, %v; want raw staged bytes", name, contents, err)
+		}
+	}
+}
+
+func TestBatchProofRetainsIncompleteSnapshotForResetCleanup(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-cleanup-retry")
+	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "changed\n")
+	workspace.validationMaterializeFailure = func() error { return errors.New("injected materialization failure") }
+	discardCalls := 0
+	workspace.validationBeforePrivateRemove = func() error {
+		discardCalls++
+		if discardCalls == 1 {
+			return errors.New("injected cleanup failure")
+		}
+		return nil
+	}
+	if _, err := workspace.PrepareBatch(context.Background(), mustChangedFiles(t, workspace)); err == nil || !strings.Contains(err.Error(), "discard incomplete") {
+		t.Fatalf("PrepareBatch() error = %v, want cleanup failure", err)
+	}
+	if workspace.validationSnapshot == nil {
+		t.Fatal("failed cleanup lost ownership of incomplete validation snapshot")
+	}
+	root := workspace.validationSnapshot.private.path
+	if err := workspace.ResetAttempt(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("incomplete snapshot survived reset: %v", err)
+	}
+}
+
+func TestBatchProofCleanupRejectsPrivateDirectorySubstitution(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-cleanup-substitution")
+	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "changed\n")
+	workspace.validationMaterializeFailure = func() error { return errors.New("injected materialization failure") }
+	var owned, moved, replacement string
+	swapped := false
+	workspace.validationBeforePrivateRemove = func() error {
+		if swapped {
+			return nil
+		}
+		swapped = true
+		entries, err := os.ReadDir(workspace.cacheRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), ".togi-private-") {
+				owned = filepath.Join(workspace.cacheRoot, entry.Name())
+				break
+			}
+		}
+		moved = owned + ".moved"
+		if owned == "" || os.Rename(owned, moved) != nil {
+			t.Fatal("rename owned private directory")
+		}
+		if err := os.Mkdir(owned, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		replacement = owned
+		return nil
+	}
+	if _, err := workspace.PrepareBatch(context.Background(), mustChangedFiles(t, workspace)); err == nil || !strings.Contains(err.Error(), "discard incomplete") {
+		t.Fatalf("PrepareBatch() error = %v, want binding failure", err)
+	}
+	replacementInfo, err := os.Lstat(replacement)
+	if err != nil {
+		t.Fatalf("replacement was deleted: %v", err)
+	}
+	if err := os.Remove(replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(moved, owned); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.ResetAttempt(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(owned); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owned snapshot survived retry: %v (replacement inode %v)", err, replacementInfo)
+	}
+}
+
+func TestBatchProofPreparationRejectsMutationBetweenStagingAndCapture(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-prepare-race")
+	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "malicious\n")
+	workspace.beforeIndexInstall = func() error {
+		workspace.beforeIndexInstall = nil
+		return os.WriteFile(filepath.Join(workspace.Path(), "feature.txt"), []byte("safe\n"), 0o644)
+	}
+	changed, err := workspace.ChangedFiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.PrepareBatch(context.Background(), changed); err == nil {
+		t.Fatal("PrepareBatch accepted a staged tree different from captured worktree bytes")
+	}
+	if got := gitcmdtest.Git(t, repo, "rev-parse", "refs/heads/togi/run-proof-prepare-race"); got != head {
+		t.Fatalf("run ref = %q, want %q", got, head)
+	}
+}
+
+func TestBatchProofRejectsIgnoredEntriesAtPreparation(t *testing.T) {
+	repo, head := workspaceRepositoryWithIgnoredGenerated(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-ignored-baseline")
+	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
+	if err := os.Mkdir(filepath.Join(workspace.Path(), "generated"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceFile(t, workspace.Path(), "generated/output.txt", "ignored\n")
+	changed, err := workspace.ChangedFiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.PrepareBatch(context.Background(), changed); err == nil {
+		t.Fatal("PrepareBatch accepted an unexpected ignored entry")
+	}
+}
+
+func TestBatchProofRejectsUnrepresentableEmptyDirectoriesAtPreparation(t *testing.T) {
+	for _, directory := range []string{"empty", "generated", "outer/inner"} {
+		t.Run(directory, func(t *testing.T) {
+			repo, head := workspaceRepositoryWithIgnoredGenerated(t)
+			workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-empty-"+strings.ReplaceAll(directory, "/", "-"))
+			writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
+			if err := os.MkdirAll(filepath.Join(workspace.Path(), filepath.FromSlash(directory)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			changed, err := workspace.ChangedFiles(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := workspace.PrepareBatch(context.Background(), changed); err == nil {
+				t.Fatal("PrepareBatch accepted a directory absent from the staged tree")
+			}
+		})
+	}
+}
+
+func TestBatchProofAllowsDirectoryRepresentedByTrackedFile(t *testing.T) {
+	repo, _ := workspaceRepository(t)
+	if err := os.Mkdir(filepath.Join(repo, "tracked"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceFile(t, repo, "tracked/kept.txt", "kept\n")
+	gitcmdtest.Git(t, repo, "add", "--", "tracked/kept.txt")
+	gitcmdtest.Git(t, repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "track directory")
+	head := gitcmdtest.Git(t, repo, "rev-parse", "HEAD")
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-tracked-directory")
+	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
+	_ = mustPrepareBatchProof(t, workspace)
+}
+
+func TestBatchProofRejectsIgnoredEntriesAfterPreparation(t *testing.T) {
+	for _, name := range []string{"generated/output.txt", "existing/ignored.txt"} {
+		t.Run(name, func(t *testing.T) {
+			repo, head := workspaceRepositoryWithIgnoredGenerated(t)
+			if strings.HasPrefix(name, "existing/") {
+				if err := os.Mkdir(filepath.Join(repo, "existing"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeWorkspaceFile(t, repo, "existing/kept.txt", "kept\n")
+				gitcmdtest.Git(t, repo, "add", "--", "existing/kept.txt")
+				gitcmdtest.Git(t, repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "track existing directory")
+				head = gitcmdtest.Git(t, repo, "rev-parse", "HEAD")
+			}
+			workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-ignored-"+strings.ReplaceAll(name, "/", "-"))
+			writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
+			proof := mustPrepareBatchProof(t, workspace)
+			if strings.HasPrefix(name, "generated/") {
+				if err := os.Mkdir(filepath.Join(workspace.Path(), filepath.Dir(name)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeWorkspaceFile(t, workspace.Path(), name, "ignored\n")
+			if err := workspace.VerifyBatch(context.Background(), proof); err == nil {
+				t.Fatal("VerifyBatch accepted an ignored entry created after preparation")
+			}
+			if _, err := workspace.CommitBatch(context.Background(), "feature.txt", proof); err == nil {
+				t.Fatal("CommitBatch accepted an ignored entry created after validation")
+			}
+		})
+	}
+}
+
+func TestBatchProofRejectsPostValidationMutation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, *Workspace)
+	}{
+		{name: "same bytes restored", mutate: func(t *testing.T, workspace *Workspace) {
+			path := filepath.Join(workspace.Path(), "feature.txt")
+			writeWorkspaceFile(t, workspace.Path(), "feature.txt", "tampered!\n")
+			writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
+			if _, err := os.Lstat(path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "new untracked path", mutate: func(t *testing.T, workspace *Workspace) {
+			writeWorkspaceFile(t, workspace.Path(), "late.txt", "late\n")
+		}},
+		{name: "directory symlink swap", mutate: func(t *testing.T, workspace *Workspace) {
+			directory := filepath.Join(workspace.Path(), "pkg")
+			backup := filepath.Join(workspace.Path(), "pkg-real")
+			if err := os.Rename(directory, backup); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(backup, directory); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "index replacement", mutate: func(t *testing.T, workspace *Workspace) {
+			contents, err := os.ReadFile(workspace.indexPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacement := workspace.indexPath + ".replacement"
+			if err := os.WriteFile(replacement, contents, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(replacement, workspace.indexPath); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo, head := workspaceRepository(t)
+			workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-"+strings.ReplaceAll(test.name, " ", "-"))
+			writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
+			if err := os.Mkdir(filepath.Join(workspace.Path(), "pkg"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeWorkspaceFile(t, workspace.Path(), "pkg/value.go", "package pkg\n")
+			changed, err := workspace.ChangedFiles(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			proof, err := workspace.PrepareBatch(context.Background(), changed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = workspace.discardValidationSnapshot(nil) })
+			test.mutate(t, workspace)
+			if _, err := workspace.CommitBatch(context.Background(), "feature.txt", proof); err == nil {
+				t.Fatal("CommitBatch accepted worktree or index drift after validation")
+			}
+			if got := gitcmdtest.Git(t, repo, "rev-parse", "refs/heads/togi/run-proof-"+strings.ReplaceAll(test.name, " ", "-")); got != head {
+				t.Fatalf("run ref = %q, want %q", got, head)
+			}
+		})
+	}
+}
+
+func TestBatchProofRejectsMutationDuringCommit(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		set  func(*Workspace, func() error)
+	}{
+		{name: "before ref update", set: func(workspace *Workspace, mutate func() error) { workspace.beforeBatchRefUpdate = mutate }},
+		{name: "after ref update", set: func(workspace *Workspace, mutate func() error) { workspace.afterBatchRefUpdate = mutate }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo, head := workspaceRepository(t)
+			workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-during-"+strings.ReplaceAll(test.name, " ", "-"))
+			writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
+			proof := mustPrepareBatchProof(t, workspace)
+			test.set(workspace, func() error {
+				return os.WriteFile(filepath.Join(workspace.Path(), "late.txt"), []byte("late\n"), 0o644)
+			})
+
+			if _, err := workspace.CommitBatch(context.Background(), "feature.txt", proof); err == nil {
+				t.Fatal("CommitBatch accepted a commit-time worktree mutation")
+			}
+			ref := "refs/heads/togi/run-proof-during-" + strings.ReplaceAll(test.name, " ", "-")
+			if got := gitcmdtest.Git(t, repo, "rev-parse", ref); got != head {
+				t.Fatalf("run ref = %q, want original %q", got, head)
+			}
+		})
+	}
+}
+
+func TestBatchProofRollsBackRefWhenCancellationFollowsUpdate(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-canceled-update")
+	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
+	proof := mustPrepareBatchProof(t, workspace)
+	ctx, cancel := context.WithCancel(context.Background())
+	workspace.afterBatchRefUpdate = func() error {
+		cancel()
+		return ctx.Err()
+	}
+
+	if _, err := workspace.CommitBatch(ctx, "feature.txt", proof); err == nil {
+		t.Fatal("CommitBatch accepted cancellation after ref update")
+	}
+	if got := gitcmdtest.Git(t, repo, "rev-parse", "refs/heads/togi/run-proof-canceled-update"); got != head {
+		t.Fatalf("run ref = %q, want rolled back %q", got, head)
+	}
+}
+
+func TestBatchProofReconcilesAmbiguousRefUpdateFailure(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "proof-ambiguous-update")
+	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
+	proof := mustPrepareBatchProof(t, workspace)
+	workspace.updateBatchRef = func(ctx context.Context, ref, next, previous string) error {
+		if err := workspace.updateBatchRefDirect(ctx, ref, next, previous); err != nil {
+			return err
+		}
+		return errors.New("lost update-ref result")
+	}
+
+	if _, err := workspace.CommitBatch(context.Background(), "feature.txt", proof); err == nil {
+		t.Fatal("CommitBatch accepted an ambiguous ref update result")
+	}
+	if got := gitcmdtest.Git(t, repo, "rev-parse", "refs/heads/togi/run-proof-ambiguous-update"); got != head {
+		t.Fatalf("run ref = %q, want reconciled %q", got, head)
+	}
+}
+
 func TestBatchCommitPreservesSymbolicRunRefAndOperatorTarget(t *testing.T) {
 	repo, head := workspaceRepository(t)
 	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "symbolic-commit")
@@ -697,7 +1116,7 @@ func TestBatchCommitPreservesSymbolicRunRefAndOperatorTarget(t *testing.T) {
 	gitcmdtest.Git(t, repo, "branch", "operator-commit-target", head)
 	gitcmdtest.Git(t, repo, "symbolic-ref", "refs/heads/togi/run-symbolic-commit", "refs/heads/operator-commit-target")
 
-	if _, err := workspace.CommitBatch(context.Background(), "feature.txt"); err == nil {
+	if _, err := workspace.CommitBatch(context.Background(), "feature.txt", BatchProof{}); err == nil {
 		t.Fatal("CommitBatch accepted a symbolic run ref")
 	}
 	if got := gitcmdtest.Git(t, repo, "rev-parse", "refs/heads/operator-commit-target"); got != head {
@@ -739,7 +1158,7 @@ func TestTogiRefMutationsDisableReferenceTransactionHook(t *testing.T) {
 		workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "hook-commit")
 		marker := installReferenceTransactionHook(t, repo)
 		writeWorkspaceFile(t, workspace.Path(), "feature.txt", "changed\n")
-		if _, err := workspace.CommitBatch(context.Background(), "feature.txt"); err != nil {
+		if _, err := workspace.CommitBatch(context.Background(), "feature.txt", mustPrepareBatchProof(t, workspace)); err != nil {
 			t.Fatalf("CommitBatch with target reference hook = %v", err)
 		}
 		assertHookNotRun(t, marker)
@@ -2899,6 +3318,17 @@ func workspaceRepository(t *testing.T) (string, string) {
 	}
 	gitcmdtest.Git(t, repo, "add", "--", "feature.txt")
 	gitcmdtest.Git(t, repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "original")
+	return repo, gitcmdtest.Git(t, repo, "rev-parse", "HEAD")
+}
+
+func workspaceRepositoryWithIgnoredGenerated(t *testing.T) (string, string) {
+	t.Helper()
+	repo, _ := workspaceRepository(t)
+	if err := os.WriteFile(filepath.Join(repo, ".gitignore"), []byte("generated/\nexisting/ignored.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitcmdtest.Git(t, repo, "add", "--", ".gitignore")
+	gitcmdtest.Git(t, repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "ignore generated")
 	return repo, gitcmdtest.Git(t, repo, "rev-parse", "HEAD")
 }
 

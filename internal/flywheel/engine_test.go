@@ -553,6 +553,85 @@ func TestEngineProtectsRealWorkspaceGitState(t *testing.T) {
 	}
 }
 
+func TestEngineRejectsMutationAfterValidatorResultBeforeCommit(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "engine-proof-drift")
+	item := planFinding("feature.txt", 1, "lint/a", "original")
+	agent := &engineAdapter{run: func(_ context.Context, request adapter.Request) error {
+		return os.WriteFile(filepath.Join(request.Root, "feature.txt"), []byte("fixed\n"), 0o600)
+	}}
+	outcome := Execute(context.Background(), engineRequest(t, []finding.Finding{item}, 2), Ports{
+		Adapter: agent, Workspace: workspace, Audit: &engineAudit{},
+		Validate: func(context.Context, Batch) ValidationResult {
+			writeWorkspaceFile(t, workspace.Path(), "late.txt", "late\n")
+			return ValidationResult{Kind: ValidationPassed}
+		},
+		Barrier: func(context.Context) ValidationResult {
+			t.Fatal("barrier called after proof drift")
+			return ValidationResult{}
+		},
+	})
+	if outcome.Kind != OutcomeErrored || !strings.Contains(outcome.Failure, "verify batch proof") {
+		t.Fatalf("outcome = %#v, want proof infrastructure failure", outcome)
+	}
+	if got := gitcmdtest.Git(t, repo, "rev-parse", "refs/heads/togi/run-engine-proof-drift"); got != head {
+		t.Fatalf("run ref = %q, want %q", got, head)
+	}
+}
+
+func TestEngineRejectsIgnoredEmptyDirectoryAfterValidationAndResetsIt(t *testing.T) {
+	repo, head := workspaceRepositoryWithIgnoredGenerated(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "engine-ignored-proof-drift")
+	item := planFinding("feature.txt", 1, "lint/a", "original")
+	agent := &engineAdapter{run: func(_ context.Context, request adapter.Request) error {
+		return os.WriteFile(filepath.Join(request.Root, "feature.txt"), []byte("fixed\n"), 0o600)
+	}}
+	outcome := Execute(context.Background(), engineRequest(t, []finding.Finding{item}, 2), Ports{
+		Adapter: agent, Workspace: workspace, Audit: &engineAudit{},
+		Validate: func(context.Context, Batch) ValidationResult {
+			if err := os.MkdirAll(filepath.Join(workspace.Path(), "generated", "nested"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return ValidationResult{Kind: ValidationPassed}
+		},
+		Barrier: func(context.Context) ValidationResult { t.Fatal("barrier called"); return ValidationResult{} },
+	})
+	if outcome.Kind != OutcomeErrored || !strings.Contains(outcome.Failure, "verify batch proof") {
+		t.Fatalf("outcome = %#v, want ignored-entry proof failure", outcome)
+	}
+	if got := gitcmdtest.Git(t, repo, "rev-parse", "refs/heads/togi/run-engine-ignored-proof-drift"); got != head {
+		t.Fatalf("run ref = %q, want %q", got, head)
+	}
+	if _, err := os.Lstat(filepath.Join(workspace.Path(), "generated")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ignored output survived reset: %v", err)
+	}
+}
+
+func TestEngineProofFailureDominatesValidatorCancellation(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "engine-proof-cancel")
+	item := planFinding("feature.txt", 1, "lint/a", "original")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	agent := &engineAdapter{run: func(_ context.Context, request adapter.Request) error {
+		return os.WriteFile(filepath.Join(request.Root, "feature.txt"), []byte("fixed\n"), 0o600)
+	}}
+	outcome := Execute(ctx, engineRequest(t, []finding.Finding{item}, 1), Ports{
+		Adapter: agent, Workspace: workspace, Audit: &engineAudit{},
+		Validate: func(context.Context, Batch) ValidationResult {
+			writeWorkspaceFile(t, workspace.Path(), "late.txt", "late\n")
+			cancel(assertError("validator canceled"))
+			return ValidationResult{Kind: ValidationPassed}
+		},
+		Barrier: func(context.Context) ValidationResult { t.Fatal("barrier called"); return ValidationResult{} },
+	})
+	if outcome.Kind != OutcomeErrored || !strings.Contains(outcome.Failure, "verify batch proof") || strings.Contains(outcome.Failure, "validator canceled") {
+		t.Fatalf("outcome = %#v, want proof failure precedence", outcome)
+	}
+	if got := gitcmdtest.Git(t, repo, "rev-parse", "refs/heads/togi/run-engine-proof-cancel"); got != head {
+		t.Fatalf("run ref = %q, want %q", got, head)
+	}
+}
+
 func TestEngineIntegrityFailureDominatesCancellationAndCleansRealWorkspace(t *testing.T) {
 	repo, head := workspaceRepository(t)
 	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "engine-mutated-canceled")
@@ -920,6 +999,8 @@ type engineWorkspace struct {
 	checkDeadlines    []bool
 	resetDeadlines    []bool
 	rollbackDeadlines []bool
+	prepared          []BatchProof
+	verifyErrors      []error
 }
 
 func (w *engineWorkspace) Root() string { return w.root }
@@ -957,13 +1038,32 @@ func (w *engineWorkspace) ChangedFiles(context.Context) ([]string, error) {
 	w.changed = w.changed[1:]
 	return append([]string(nil), got...), nil
 }
+func (w *engineWorkspace) PrepareBatch(_ context.Context, changed []string) (BatchProof, error) {
+	proof := BatchProof{
+		owner: w, tree: strings.Repeat("f", 40), changed: append([]string(nil), changed...), verify: w.VerifyBatch,
+		validation: &validationSnapshot{private: &privateTempDir{path: "/private/validation"}},
+	}
+	w.prepared = append(w.prepared, proof)
+	return proof, nil
+}
+func (w *engineWorkspace) VerifyBatch(_ context.Context, _ BatchProof) error {
+	if len(w.verifyErrors) == 0 {
+		return nil
+	}
+	err := w.verifyErrors[0]
+	w.verifyErrors = w.verifyErrors[1:]
+	return err
+}
 func (w *engineWorkspace) ResetAttempt(ctx context.Context) error {
 	_, deadline := ctx.Deadline()
 	w.resetDeadlines = append(w.resetDeadlines, deadline)
 	w.resets = append(w.resets, struct{}{})
 	return nil
 }
-func (w *engineWorkspace) CommitBatch(_ context.Context, primary string) (string, error) {
+func (w *engineWorkspace) CommitBatch(_ context.Context, primary string, proof BatchProof) (string, error) {
+	if proof.owner != w {
+		return "", errors.New("foreign batch proof")
+	}
 	if w.commitRun != nil {
 		return w.commitRun(primary)
 	}

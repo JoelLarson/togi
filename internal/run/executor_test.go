@@ -883,6 +883,119 @@ func TestExecuteRejectsInvalidRuntimeInputs(t *testing.T) {
 	}
 }
 
+func TestValidationRequestsKeepsFastAndAssignedOwnersInGauntletOrder(t *testing.T) {
+	requests := []Request{
+		validationRequest(t, "slow-unassigned", gate.Slow, 1),
+		validationRequest(t, "glacial-assigned", gate.Glacial, 4),
+		validationRequest(t, "instant", gate.Instant, 0),
+		validationRequest(t, "slow-assigned", gate.Slow, 3),
+		validationRequest(t, "fast", gate.Fast, 2),
+	}
+	assigned := []finding.Finding{
+		executorFinding(t, "glacial-assigned", "g.go", "tool/g"),
+		executorFinding(t, "slow-assigned", "s.go", "tool/s"),
+	}
+	assigned[0].Occurrences = nil
+	assigned[1].Occurrences = nil
+	got := validationRequests(requests, assigned)
+	var names []string
+	for _, request := range got {
+		names = append(names, request.Gate.Manifest.Name)
+	}
+	if want := []string{"instant", "fast", "slow-assigned", "glacial-assigned"}; !slices.Equal(names, want) {
+		t.Fatalf("validationRequests() names = %v, want %v", names, want)
+	}
+}
+
+func TestValidationRequestsDoesNotAliasInputsAndFailsClosedOnMalformedFindings(t *testing.T) {
+	requests := []Request{
+		validationRequest(t, "fast", gate.Fast, 0),
+		validationRequest(t, "slow", gate.Slow, 1),
+	}
+	requests[0].ChangedLines = finding.ChangedLines{"a.go": {{Start: 1, End: 2}}}
+	malformed := executorFinding(t, "slow", "a.go", "tool/a")
+	malformed.Fingerprint = "wrong"
+	got := validationRequests(requests, []finding.Finding{malformed})
+	if len(got) != 2 {
+		t.Fatalf("validationRequests() = %d requests, want all gates on malformed evidence", len(got))
+	}
+	got[0].ChangedLines["a.go"][0].Start = 99
+	got[0].Gate.Manifest.Blocking[0] = finding.Info
+	got[0].Binding.Command[0] = "mutated"
+	if requests[0].ChangedLines["a.go"][0].Start == 99 {
+		t.Fatal("validationRequests returned aliased request state")
+	}
+	if requests[0].Gate.Manifest.Blocking[0] == finding.Info || requests[0].Binding.Command[0] == "mutated" {
+		t.Fatal("validationRequests returned aliased compiled gate state")
+	}
+}
+
+func TestValidationRequestsFailsClosedWhenAssignedOwnerIsUnavailable(t *testing.T) {
+	requests := []Request{
+		validationRequest(t, "fast", gate.Fast, 0),
+		validationRequest(t, "slow", gate.Slow, 1),
+	}
+	assigned := []finding.Finding{executorFinding(t, "missing", "a.go", "tool/a")}
+	if got := validationRequests(requests, assigned); len(got) != len(requests) {
+		t.Fatalf("validationRequests() returned %d requests, want fail-closed %d", len(got), len(requests))
+	}
+}
+
+func TestValidationRequestsFailsClosedWithoutAliasingMalformedRequests(t *testing.T) {
+	valid := validationRequest(t, "fast", gate.Fast, 0)
+	foreign := validationRequest(t, "slow", gate.Slow, 1)
+	foreign.Binding = valid.Binding
+	mutated := validationRequest(t, "mutated", gate.Slow, 2)
+	mutated.Gate.Manifest.Blocking[0] = finding.Info
+	got := validationRequests([]Request{foreign, mutated, valid}, nil)
+	if len(got) != 3 {
+		t.Fatalf("validationRequests() = %d requests, want every malformed request retained as errored evidence", len(got))
+	}
+	if !got[0].Gate.Valid() || !got[0].Gate.Owns(got[0].Binding) {
+		t.Fatalf("valid request was not independently cloned: %#v", got[0])
+	}
+	for index, request := range got[1:] {
+		if request.Gate.Valid() || request.Binding.Valid() {
+			t.Fatalf("malformed output request %d was silently repaired: %#v", index, request)
+		}
+	}
+}
+
+func validationRequest(t *testing.T, name string, cost gate.CostClass, position int) Request {
+	t.Helper()
+	compiled := validationRequestGate(t, name, cost)
+	return Request{Gate: compiled, Binding: compiled.Bindings["go"], Position: position}
+}
+
+func validationRequestGate(t *testing.T, name string, cost gate.CostClass) gate.Gate {
+	t.Helper()
+	compiled, err := gate.Compile(gate.Manifest{
+		Name: name, Description: name, CostClass: cost, FixPolicy: gate.LLMFix,
+		Scope: gate.Diff, Location: gate.PointLocation, Blocking: []finding.Severity{finding.Error},
+		Timeout: time.Second,
+	}, map[string]gate.Binding{"go": {
+		Language: "go", Tool: "tool", Command: []string{"tool"}, SuccessExitCodes: []int{0},
+		FindingExitCodes: []int{1}, Normalizer: "golangci-json",
+		SeverityMap: map[string]finding.Severity{"default": finding.Error},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compiled
+}
+
+func executorFinding(t *testing.T, gateName, file, rule string) finding.Finding {
+	t.Helper()
+	grouped, err := finding.Group([]finding.Finding{{
+		Gate: gateName, Language: "go", RuleID: rule, Severity: finding.Error,
+		File: file, Line: 1, Snippet: rule, Message: rule,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return grouped[0]
+}
+
 func TestExecuteRejectsBindingOwnedByAnotherGate(t *testing.T) {
 	root := t.TempDir()
 	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, "", "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"default": finding.Warning}}

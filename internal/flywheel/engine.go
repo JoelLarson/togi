@@ -36,6 +36,7 @@ type ValidationResult struct {
 	Failure      string
 	Findings     []finding.Finding
 	ChangedFiles []string
+	Proof        BatchProof
 }
 
 // WorkspacePort is the flywheel's narrow ownership boundary for attempt state.
@@ -44,8 +45,10 @@ type WorkspacePort interface {
 	SnapshotGitState(context.Context) (GitState, error)
 	CheckGitState(context.Context, GitState) error
 	ChangedFiles(context.Context) ([]string, error)
+	PrepareBatch(context.Context, []string) (BatchProof, error)
+	VerifyBatch(context.Context, BatchProof) error
 	ResetAttempt(context.Context) error
-	CommitBatch(context.Context, string) (string, error)
+	CommitBatch(context.Context, string, BatchProof) (string, error)
 	RollbackBatch(context.Context, string) error
 }
 
@@ -364,13 +367,44 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 			retryFailure = failure
 			continue
 		}
+		proof, err := ports.Workspace.PrepareBatch(ctx, changed)
+		if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
+			return outcome, true
+		}
+		if err != nil {
+			failure := boundedFailure("prepare batch proof: " + err.Error())
+			if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
+				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
+			}
+			if attempt == 2 {
+				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, failure), true
+			}
+			retryFailure = failure
+			continue
+		}
 
-		validation := ports.Validate(ctx, cloneBatch(*batch))
+		validationBatch := cloneBatch(*batch)
+		validationBatch.proof = cloneBatchProof(proof)
+		validation := ports.Validate(ctx, validationBatch)
+		recoveryCtx, cancelRecovery = recoveryContext(ctx)
+		proofErr := ports.Workspace.VerifyBatch(recoveryCtx, proof)
+		cancelRecovery()
+		if proofErr != nil {
+			validation = ValidationResult{Kind: ValidationInfrastructureFailure, Failure: boundedFailure("verify batch proof: " + proofErr.Error()), ChangedFiles: append([]string(nil), changed...)}
+		}
+		if proofErr != nil && ctx.Err() != nil {
+			return failedInfrastructure(ctx, request, ports, state, index, attempt, validation.Failure)
+		}
 		if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
 			return outcome, true
 		}
 		if outcome, stopped := stopAttemptForRail(ctx, request, ports, state, index, attempt); stopped {
 			return outcome, true
+		}
+		if proofErr == nil && validation.Kind == ValidationPassed {
+			validation.Proof = cloneBatchProof(proof)
+		} else {
+			validation.Proof = BatchProof{}
 		}
 		if _, err := BlockingMultiset(validation.Findings); err != nil {
 			return failedInfrastructure(ctx, request, ports, state, index, attempt, "classify validation findings: "+err.Error())
@@ -408,7 +442,7 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 			return outcome, true
 		}
 
-		commit, err := ports.Workspace.CommitBatch(ctx, batch.PrimaryFile)
+		commit, err := ports.Workspace.CommitBatch(ctx, batch.PrimaryFile, validation.Proof)
 		if err != nil {
 			if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
 				return outcome, true
@@ -512,13 +546,22 @@ func validateAttemptResult(result ValidationResult) error {
 		if len(result.Findings) != 0 {
 			return errors.New("passed result includes blocking findings")
 		}
+		if !result.Proof.present() {
+			return errors.New("passed result lacks a prepared batch proof")
+		}
 	case ValidationSemanticFailure:
 		if result.Failure == "" {
 			return errors.New("semantic failure requires a reason")
 		}
+		if result.Proof.present() {
+			return errors.New("semantic failure includes a batch proof")
+		}
 	case ValidationInfrastructureFailure:
 		if result.Failure == "" {
 			return errors.New("infrastructure failure requires a reason")
+		}
+		if result.Proof.present() {
+			return errors.New("infrastructure failure includes a batch proof")
 		}
 	default:
 		return fmt.Errorf("unknown validation kind %q", result.Kind)

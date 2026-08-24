@@ -38,6 +38,7 @@ type Batch struct {
 	Status      BatchStatus       `json:"status"`
 	Attempts    []Attempt         `json:"attempts"`
 	identity    batchIdentity
+	proof       BatchProof
 }
 
 type batchIdentity struct {
@@ -190,6 +191,7 @@ func cloneBatch(batch Batch) Batch {
 	for attempt := range batch.Attempts {
 		batch.Attempts[attempt].ChangedFiles = append([]string(nil), batch.Attempts[attempt].ChangedFiles...)
 	}
+	batch.proof = cloneBatchProof(batch.proof)
 	return batch
 }
 
