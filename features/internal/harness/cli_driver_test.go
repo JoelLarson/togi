@@ -27,7 +27,7 @@ func TestCLIDriverRunsCompiledBinaryAndObservesPersistedArtifacts(t *testing.T) 
 	}
 	defer driver.Close()
 
-	observation, err := driver.Run(context.Background(), RunRequest{Root: repository.Root, Base: "base", GateNames: []string{"external-lint"}, NoColor: true})
+	observation, err := driver.Run(context.Background(), RunRequest{ReportOnly: true, Root: repository.Root, Base: "base", GateNames: []string{"external-lint"}, NoColor: true})
 	if err != nil {
 		t.Fatalf("Run() = %v", err)
 	}

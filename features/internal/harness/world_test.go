@@ -17,7 +17,7 @@ func TestWorldConstructsRequestedPortAndForwardsRun(t *testing.T) {
 	if ctx == nil || world.Environment() == nil {
 		t.Fatal("Before() did not initialize the scenario environment")
 	}
-	if err := world.Run(ctx, RunRequest{Root: "."}); err != nil {
+	if err := world.Run(ctx, RunRequest{ReportOnly: true, Root: "."}); err != nil {
 		t.Fatalf("Run() = %v", err)
 	}
 	if got, err := world.LastRun().Outcome(); err != nil || got.Code != 1 {

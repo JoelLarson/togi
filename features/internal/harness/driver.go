@@ -17,6 +17,7 @@ import (
 	"github.com/cucumber/godog"
 	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/repoid"
+	"github.com/joellarson/togi/internal/run"
 )
 
 // DriverFactory constructs the acceptance drivers requested by a scenario.
@@ -46,11 +47,37 @@ type WikiDriver interface {
 }
 
 type RunRequest struct {
-	Root      string
-	Base      string
-	GateNames []string
-	Verbose   bool
-	NoColor   bool
+	Root          string
+	Base          string
+	GateNames     []string
+	ReportOnly    bool
+	Agent         string
+	MaxIterations int
+	MaxWallClock  time.Duration
+	Verbose       bool
+	NoColor       bool
+}
+
+// ReportOnly marks an existing acceptance request as non-mutating.
+func ReportOnly(request RunRequest) RunRequest {
+	request.ReportOnly = true
+	return request
+}
+
+func normalizeRunRequest(request RunRequest) (RunRequest, error) {
+	if request.ReportOnly {
+		if request.MaxIterations != 0 || request.MaxWallClock != 0 {
+			return RunRequest{}, errors.New("fix-mode rails cannot be used in report-only mode")
+		}
+		return request, nil
+	}
+	if request.MaxIterations == 0 {
+		request.MaxIterations = run.DefaultMaxIterations
+	}
+	if request.MaxWallClock == 0 {
+		request.MaxWallClock = run.DefaultMaxWallClock
+	}
+	return request, nil
 }
 
 type StatusRequest struct {
@@ -156,6 +183,45 @@ func (e *Environment) Setenv(key, value string) error {
 		return errors.New("scenario environment is no longer configurable")
 	}
 	e.variables[key] = value
+	return nil
+}
+
+// RestrictPath retains only named ambient tools beside scenario-owned tools.
+func (e *Environment) RestrictPath(names ...string) error {
+	if runtime.GOOS == "windows" {
+		return ErrUnsupportedCapability
+	}
+	targets := make(map[string]string, len(names))
+	for _, name := range names {
+		if err := validateFixtureName("tool", name); err != nil {
+			return err
+		}
+		path, err := exec.LookPath(name)
+		if err != nil {
+			return fmt.Errorf("retain tool %q: %w", name, err)
+		}
+		targets[name] = path
+	}
+	for name, target := range targets {
+		link := filepath.Join(e.BinRoot, name)
+		if _, err := os.Lstat(link); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect retained tool %q: %w", name, err)
+		}
+		if err := os.Symlink(target, link); err != nil {
+			return fmt.Errorf("retain tool %q: %w", name, err)
+		}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.active || e.closed {
+		return errors.New("scenario environment is not active")
+	}
+	e.path = ""
+	if err := os.Setenv("PATH", e.BinRoot); err != nil {
+		return fmt.Errorf("restrict scenario PATH: %w", err)
+	}
 	return nil
 }
 
@@ -268,12 +334,16 @@ func (e *Environment) RepoResolutions() int64 {
 }
 
 func (e *Environment) valuesLocked() map[string]string {
+	pathValue := e.BinRoot
+	if e.path != "" {
+		pathValue += string(os.PathListSeparator) + e.path
+	}
 	values := map[string]string{
 		"HOME":            e.Home,
 		"XDG_CONFIG_HOME": filepath.Dir(e.ConfigRoot),
 		"XDG_STATE_HOME":  filepath.Dir(e.StateRoot),
 		"XDG_CACHE_HOME":  filepath.Dir(e.CacheRoot),
-		"PATH":            e.BinRoot + string(os.PathListSeparator) + e.path,
+		"PATH":            pathValue,
 		"LANG":            "C",
 		"LC_ALL":          "C",
 		"GOMODCACHE":      e.goModCache,

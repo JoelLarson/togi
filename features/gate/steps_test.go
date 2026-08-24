@@ -46,7 +46,7 @@ func (f *gateCustomizationFeature) before(ctx context.Context, scenario *godog.S
 }
 
 func (f *gateCustomizationFeature) runGauntlet(ctx context.Context) error {
-	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: "base", NoColor: true})
+	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: "base", NoColor: true}))
 }
 
 func (f *gateCustomizationFeature) noGateDefinition() error {

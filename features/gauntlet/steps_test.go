@@ -3,6 +3,7 @@ package gauntlet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -129,7 +130,7 @@ func (f *diffFeature) explicitFinding() error {
 	return f.gate("diff", "diff", "point", lint("old.go", 2))
 }
 func (f *diffFeature) runOlder(ctx context.Context) error {
-	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: f.olderBase, NoColor: true})
+	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: f.olderBase, NoColor: true}))
 }
 func (f *diffFeature) report() (harness.Report, error) { return f.world.LastRun().Report() }
 func (f *diffFeature) explicitRecorded() error {
@@ -167,7 +168,7 @@ func (f *diffFeature) originHead(branch string) error {
 	return f.commitChange(r, "feature.go", "package fixture\nfunc Feature() { value := 2; _ = value }\n")
 }
 func (f *diffFeature) runAutomatic(ctx context.Context) error {
-	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, NoColor: true})
+	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, NoColor: true}))
 }
 func (f *diffFeature) reportBase(want string) error {
 	r, e := f.report()
@@ -216,7 +217,7 @@ func (f *diffFeature) bothBranches() error {
 	return f.gate("diff", "diff", "point", lint("feature.go", 3, 4))
 }
 func (f *diffFeature) runTrunk(ctx context.Context) error {
-	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: "trunk", NoColor: true})
+	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: "trunk", NoColor: true}))
 }
 func (f *diffFeature) mergeBase() error {
 	r, e := f.report()
@@ -249,7 +250,7 @@ func (f *diffFeature) pointGate() error {
 	return f.gate("point", "diff", "point", lint("feature.go", 3, 8))
 }
 func (f *diffFeature) runDefault(ctx context.Context) error {
-	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true})
+	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true}))
 }
 func (f *diffFeature) lineEight() error {
 	r, e := f.report()
@@ -594,10 +595,10 @@ func (f *gauntletFeature) repeat(a, b, c int) error {
 	return f.gate("repeat", harness.ToolBehavior{Stdout: lint("repeat.go", a, b, c)}, "golangci-json")
 }
 func (f *gauntletFeature) runOnly(ctx context.Context, n string) error {
-	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: "base", GateNames: []string{n}, NoColor: true})
+	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: "base", GateNames: []string{n}, NoColor: true}))
 }
 func (f *gauntletFeature) run(ctx context.Context) error {
-	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: "base", GateNames: f.selected, NoColor: true})
+	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: "base", GateNames: f.selected, NoColor: true}))
 }
 func (f *gauntletFeature) verdict(want string) error {
 	r, e := f.report()
@@ -620,7 +621,7 @@ func (f *gauntletFeature) outcome(want int) error {
 	return nil
 }
 func (f *gauntletFeature) twice(ctx context.Context) error {
-	if e := f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: "base", NoColor: true}); e != nil {
+	if e := f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: "base", NoColor: true})); e != nil {
 		return e
 	}
 	r, e := f.world.LastRun().Report()
@@ -628,7 +629,7 @@ func (f *gauntletFeature) twice(ctx context.Context) error {
 		return e
 	}
 	f.first = r
-	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: "base", NoColor: true})
+	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: "base", NoColor: true}))
 }
 func (f *gauntletFeature) delayed(a, b string) error {
 	return f.gate(a, harness.ToolBehavior{Stdout: lint("feature.go", 4), Delay: 20 * time.Millisecond}, "golangci-json")
@@ -795,6 +796,471 @@ func (f *gauntletFeature) notErrored() error {
 	}
 	if r.Gates[0].Status == "errored" {
 		return fmt.Errorf("errored")
+	}
+	return nil
+}
+
+type fixFeature struct {
+	world        *harness.World
+	originalHead string
+	mode         string
+	request      harness.RunRequest
+	landingDone  chan error
+}
+
+func newFixFeature(factory harness.DriverFactory) *fixFeature {
+	return &fixFeature{world: harness.NewWorld(factory, harness.NeedsGauntlet)}
+}
+
+func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
+	sc.Before(f.before)
+	sc.After(f.world.After)
+	sc.Step(`^a green feature with a blocking finding$`, f.greenBlocked)
+	sc.Step(`^a green feature without blockers$`, f.greenClean)
+	sc.Step(`^the agent removes the finding$`, f.agentFixes)
+	sc.Step(`^the selected agent is missing$`, f.missingAgent)
+	sc.Step(`^a feature whose behavioral suite is (missing|red)$`, f.baseline)
+	sc.Step(`^a green feature whose initial gate errors$`, f.initialGateError)
+	sc.Step(`^the agent makes a valid cross-file fix$`, f.crossFile)
+	sc.Step(`^the agent makes no changes$`, f.noOp)
+	sc.Step(`^the agent attempts (an unauthorized Git commit|a new suppression|test deletion|an assertion change)$`, f.integrityViolation)
+	sc.Step(`^the agent performs a witnessed compilation-only rename$`, f.witnessedRename)
+	sc.Step(`^only one iteration is allowed$`, f.oneIteration)
+	sc.Step(`^the agent exceeds the wall-clock budget$`, f.wallClock)
+	sc.Step(`^the agent introduces a regression outside local validation$`, f.finalRegression)
+	sc.Step(`^the agent fixes it while the original worktree becomes (dirty|detached|branch-moved)$`, f.landingConflict)
+	sc.Step(`^I run the fix loop$`, f.run)
+	sc.Step(`^the fix run is (unsealed|errored|unverified|blocked|rails-exhausted) with exit (\d+)$`, f.outcome)
+	sc.Step(`^the agent was invoked (\d+) times?$`, f.invocations)
+	sc.Step(`^one squash commit with the fixed tree reaches the feature branch$`, f.squashLanded)
+	sc.Step(`^the fix audit contains its report plan and brief$`, f.auditArtifacts)
+	sc.Step(`^the feature branch is unchanged$`, f.featureUnchanged)
+	sc.Step(`^the landed tree contains both related edits$`, f.relatedEdits)
+	sc.Step(`^the validated run branch is absent$`, f.runBranchAbsent)
+	sc.Step(`^the validated run branch is preserved$`, f.runBranchPreserved)
+	sc.Step(`^the witnessed rename reaches the feature branch$`, f.renameLanded)
+	sc.Step(`^the concurrent feature state is preserved$`, f.concurrentState)
+}
+
+func (f *fixFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {
+	f.originalHead, f.mode, f.landingDone = "", "", nil
+	f.request = harness.RunRequest{Agent: "codex", GateNames: []string{"quality"}, MaxIterations: 4, MaxWallClock: 5 * time.Second, NoColor: true}
+	return f.world.Before(ctx, scenario)
+}
+
+const fixSource = "package fixture\n\n// BAD\nfunc Feature() int { return 1 }\n"
+const fixedSource = "package fixture\n\nfunc Feature() int { return 1 }\n"
+const fixTest = "package fixture\n\nimport \"testing\"\n\nfunc TestFeature(t *testing.T) { Feature() }\n"
+
+func (f *fixFeature) repository(source, testBody string) error {
+	repository, err := harness.NewRepository(filepath.Join(f.world.Environment().TempRoot, "repo"))
+	if err != nil {
+		return err
+	}
+	if err := repository.Write("go.mod", "module fixture\n\ngo 1.25\n"); err != nil {
+		return err
+	}
+	if err := repository.Write("base.go", "package fixture\n\nfunc Base() {}\n"); err != nil {
+		return err
+	}
+	if _, err := repository.Commit("base"); err != nil {
+		return err
+	}
+	if err := repository.Branch("base"); err != nil {
+		return err
+	}
+	if err := repository.Write("feature.go", source); err != nil {
+		return err
+	}
+	if testBody != "" {
+		if err := repository.Write("feature_test.go", testBody); err != nil {
+			return err
+		}
+	}
+	f.originalHead, err = repository.Commit("feature")
+	if err != nil {
+		return err
+	}
+	f.request.Root, f.request.Base = repository.Root, "base"
+	return f.world.UseRepository(repository)
+}
+
+func (f *fixFeature) installQualityGate(errored bool) error {
+	if errored {
+		if _, err := f.world.Environment().InstallTool("quality-tool", harness.ToolBehavior{ExitCode: 7}); err != nil {
+			return err
+		}
+	} else {
+		tool := filepath.Join(f.world.Environment().BinRoot, "quality-tool")
+		script := "#!/bin/sh\nset -eu\nif grep -q BAD feature.go; then printf '%s\\n' '{\"Issues\":[{\"FromLinter\":\"quality\",\"Text\":\"remove BAD marker\",\"Severity\":\"warning\",\"Pos\":{\"Filename\":\"feature.go\",\"Line\":3,\"Column\":1}}]}'; else printf '%s\\n' '{\"Issues\":[]}'; fi\n"
+		if err := os.WriteFile(tool, []byte(script), 0o700); err != nil {
+			return err
+		}
+	}
+	return f.world.Environment().WriteGate(harness.GateDefinition{
+		Name: "quality", Description: "quality", Tool: "quality-tool", Normalizer: "golangci-json",
+		RuleID: "quality/bad", Message: "remove BAD marker", Command: []string{"quality-tool"}, Scope: "repo", Location: "point",
+		SeverityMap: map[string]string{"default": "warning", "warning": "warning"},
+	})
+}
+
+func (f *fixFeature) greenBlocked() error {
+	if err := f.repository(fixSource, fixTest); err != nil {
+		return err
+	}
+	return f.installQualityGate(false)
+}
+
+func (f *fixFeature) greenClean() error {
+	if err := f.repository(fixedSource, fixTest); err != nil {
+		return err
+	}
+	if err := f.installQualityGate(false); err != nil {
+		return err
+	}
+	return f.installAgent(harness.AgentBehavior{})
+}
+
+func (f *fixFeature) agentFixes() error {
+	return f.installAgent(harness.AgentBehavior{Edits: map[string]string{"feature.go": fixedSource}})
+}
+
+func (f *fixFeature) installAgent(behavior harness.AgentBehavior) error {
+	_, err := f.world.Environment().InstallAgent("codex", behavior)
+	return err
+}
+
+func (f *fixFeature) missingAgent() error {
+	f.mode = "missing-agent"
+	return f.world.Environment().RestrictPath("go", "git", "grep")
+}
+
+func (f *fixFeature) baseline(condition string) error {
+	testBody := ""
+	if condition == "red" {
+		testBody = "package fixture\nimport \"testing\"\nfunc TestFeature(t *testing.T) { t.Fatal(\"red baseline\") }\n"
+	}
+	if err := f.repository(fixSource, testBody); err != nil {
+		return err
+	}
+	if err := f.installQualityGate(false); err != nil {
+		return err
+	}
+	return f.installAgent(harness.AgentBehavior{Edits: map[string]string{"feature.go": fixedSource}})
+}
+
+func (f *fixFeature) initialGateError() error {
+	if err := f.repository(fixSource, fixTest); err != nil {
+		return err
+	}
+	if err := f.installQualityGate(true); err != nil {
+		return err
+	}
+	return f.installAgent(harness.AgentBehavior{Edits: map[string]string{"feature.go": fixedSource}})
+}
+
+func (f *fixFeature) crossFile() error {
+	if err := f.world.Repository().Write("related.go", "package fixture\n\nconst Related = \"old\"\n"); err != nil {
+		return err
+	}
+	var err error
+	f.originalHead, err = f.world.Repository().Commit("related feature")
+	if err != nil {
+		return err
+	}
+	return f.installAgent(harness.AgentBehavior{Edits: map[string]string{
+		"feature.go": fixedSource,
+		"related.go": "package fixture\n\nconst Related = \"fixed\"\n",
+	}})
+}
+
+func (f *fixFeature) noOp() error { return f.installAgent(harness.AgentBehavior{}) }
+
+func (f *fixFeature) integrityViolation(violation string) error {
+	behavior := harness.AgentBehavior{Edits: map[string]string{"feature.go": fixedSource}}
+	switch violation {
+	case "an unauthorized Git commit":
+		behavior.GitArgs = []string{"commit", "-am", "agent mutation"}
+	case "a new suppression":
+		behavior.Edits["feature.go"] = "package fixture\n\nfunc Feature() int {\n\treturn 1 //nolint:revive\n}\n"
+	case "test deletion":
+		behavior.Delete = []string{"feature_test.go"}
+	case "an assertion change":
+		assertion := "package fixture\nimport \"testing\"\nfunc TestFeature(t *testing.T) { if Feature() != 1 { t.Fatal(\"bad\") } }\n"
+		if err := f.world.Repository().Write("feature_test.go", assertion); err != nil {
+			return err
+		}
+		var err error
+		f.originalHead, err = f.world.Repository().Commit("add assertion")
+		if err != nil {
+			return err
+		}
+		behavior.Edits["feature_test.go"] = strings.Replace(assertion, "!= 1", "!= 2", 1)
+	default:
+		return fmt.Errorf("unknown integrity violation %q", violation)
+	}
+	return f.installAgent(behavior)
+}
+
+func (f *fixFeature) witnessedRename() error {
+	source := "package fixture\n\n// BAD\nfunc calculateTotal(value int) int { return value + 1 }\n"
+	testBody := "package fixture\nimport \"testing\"\nfunc TestTotal(t *testing.T) { if got := calculateTotal(1); got != 2 { t.Fatalf(\"got %d\", got) } }\n"
+	if err := f.world.Repository().Write("feature.go", source); err != nil {
+		return err
+	}
+	if err := f.world.Repository().Write("feature_test.go", testBody); err != nil {
+		return err
+	}
+	var err error
+	f.originalHead, err = f.world.Repository().Commit("rename fixture")
+	if err != nil {
+		return err
+	}
+	return f.installAgent(harness.AgentBehavior{Edits: map[string]string{
+		"feature.go":      "package fixture\n\nfunc totalFor(value int) int { return value + 1 }\n",
+		"feature_test.go": strings.Replace(testBody, "calculateTotal", "totalFor", 1),
+	}})
+}
+
+func (f *fixFeature) oneIteration() error {
+	f.request.MaxIterations = 1
+	return nil
+}
+
+func (f *fixFeature) wallClock() error {
+	f.request.MaxWallClock = 500 * time.Millisecond
+	return f.installAgent(harness.AgentBehavior{Sleep: time.Second, Edits: map[string]string{"feature.go": fixedSource}})
+}
+
+func (f *fixFeature) finalRegression() error {
+	if err := f.world.Repository().Write("consumer/consumer_test.go", "package consumer\nimport (\"testing\"; root \"fixture\")\nfunc TestFeatureContract(t *testing.T) { if root.Feature() != 1 { t.Fatal(\"regression\") } }\n"); err != nil {
+		return err
+	}
+	var err error
+	f.originalHead, err = f.world.Repository().Commit("consumer contract")
+	if err != nil {
+		return err
+	}
+	return f.installAgent(harness.AgentBehavior{Edits: map[string]string{"feature.go": "package fixture\n\nfunc Feature() int { return 2 }\n"}})
+}
+
+func (f *fixFeature) landingConflict(condition string) error {
+	f.mode = condition
+	behavior := harness.AgentBehavior{Edits: map[string]string{"feature.go": fixedSource}}
+	switch condition {
+	case "dirty":
+	case "detached":
+	case "branch-moved":
+	default:
+		return fmt.Errorf("unknown landing condition %q", condition)
+	}
+	return f.installAgent(behavior)
+}
+
+func (f *fixFeature) run(ctx context.Context) error {
+	if f.mode == "dirty" || f.mode == "detached" || f.mode == "branch-moved" {
+		f.landingDone = make(chan error, 1)
+		go f.mutateLandingTarget(ctx)
+	}
+	err := f.world.Run(ctx, f.request)
+	if f.landingDone != nil {
+		select {
+		case mutationErr := <-f.landingDone:
+			err = errors.Join(err, mutationErr)
+		case <-time.After(2 * time.Second):
+			err = errors.Join(err, errors.New("landing mutation did not observe a validated commit"))
+		}
+	}
+	return err
+}
+
+func (f *fixFeature) mutateLandingTarget(ctx context.Context) {
+	repository := f.world.Repository()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		refs, err := repository.Git("for-each-ref", "--format=%(objectname)", "refs/heads/togi")
+		if err != nil {
+			f.landingDone <- err
+			return
+		}
+		if refs != "" && refs != f.originalHead {
+			switch f.mode {
+			case "dirty":
+				_, err = repository.Git("update-index", "--chmod=+x", "feature.go")
+			case "detached":
+				_, err = repository.Git("checkout", "--detach")
+			case "branch-moved":
+				_, err = repository.Git("commit", "--allow-empty", "-m", "concurrent move")
+			}
+			f.landingDone <- err
+			return
+		}
+		select {
+		case <-ctx.Done():
+			f.landingDone <- ctx.Err()
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (f *fixFeature) report() (harness.Report, error) { return f.world.LastRun().Report() }
+
+func (f *fixFeature) outcome(verdict string, code int) error {
+	if verdict == "rails-exhausted" {
+		verdict = "rails"
+	}
+	report, err := f.report()
+	if err != nil {
+		return err
+	}
+	got, err := f.world.LastRun().Outcome()
+	if err != nil {
+		return err
+	}
+	if report.Verdict != verdict || got.Code != code {
+		return fmt.Errorf("fix outcome = %q/%d, want %q/%d; fix=%#v gates=%#v", report.Verdict, got.Code, verdict, code, report.Fix, report.Gates)
+	}
+	return nil
+}
+
+func (f *fixFeature) invocations(want int) error {
+	got, err := f.world.Environment().AgentInvocations("codex")
+	if err != nil {
+		return err
+	}
+	if len(got) != want {
+		return fmt.Errorf("agent invocations = %d, want %d", len(got), want)
+	}
+	return nil
+}
+
+func (f *fixFeature) squashLanded() error {
+	repository := f.world.Repository()
+	head, err := repository.Git("rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	parent, err := repository.Git("rev-parse", "HEAD^")
+	if err != nil {
+		return err
+	}
+	subject, err := repository.Git("show", "-s", "--format=%s", "HEAD")
+	if err != nil {
+		return err
+	}
+	contents, err := repository.Git("show", "HEAD:feature.go")
+	if err != nil {
+		return err
+	}
+	if head == f.originalHead || parent != f.originalHead || subject != "togi: apply verified fixes" || strings.Contains(contents, "BAD") {
+		return fmt.Errorf("landing head=%q parent=%q subject=%q feature=%q", head, parent, subject, contents)
+	}
+	return nil
+}
+
+func (f *fixFeature) auditArtifacts() error {
+	observation := f.world.LastRun()
+	if observation.ReportPath() == "" {
+		return errors.New("persisted report is absent")
+	}
+	if _, ok := observation.ArtifactPath("plan.json"); !ok {
+		return errors.New("persisted plan is absent")
+	}
+	count, err := observation.ArtifactCount("briefs")
+	if err != nil || count != 1 {
+		return fmt.Errorf("brief artifacts = %d, %v; want 1", count, err)
+	}
+	return nil
+}
+
+func (f *fixFeature) featureUnchanged() error {
+	head, err := f.world.Repository().Git("rev-parse", "refs/heads/main")
+	if err != nil {
+		return err
+	}
+	if head != f.originalHead {
+		return fmt.Errorf("feature branch = %s, want %s", head, f.originalHead)
+	}
+	return nil
+}
+
+func (f *fixFeature) relatedEdits() error {
+	for name, marker := range map[string]string{"feature.go": "func Feature", "related.go": `Related = "fixed"`} {
+		contents, err := f.world.Repository().Git("show", "HEAD:"+name)
+		if err != nil || !strings.Contains(contents, marker) || strings.Contains(contents, "BAD") {
+			return fmt.Errorf("landed %s = %q, %v", name, contents, err)
+		}
+	}
+	return nil
+}
+
+func (f *fixFeature) runBranchAbsent() error {
+	refs, err := f.world.Repository().Git("for-each-ref", "--format=%(refname)", "refs/heads/togi")
+	if err != nil {
+		return err
+	}
+	if refs != "" {
+		return fmt.Errorf("unexpected validated refs %q", refs)
+	}
+	return nil
+}
+
+func (f *fixFeature) runBranchPreserved() error {
+	report, err := f.report()
+	if err != nil {
+		return err
+	}
+	if report.Fix == nil || report.Fix.Landing.PreservedBranch == "" {
+		return fmt.Errorf("preserved branch missing from report %#v", report.Fix)
+	}
+	_, err = f.world.Repository().Git("show-ref", "--verify", "refs/heads/"+report.Fix.Landing.PreservedBranch)
+	return err
+}
+
+func (f *fixFeature) renameLanded() error {
+	production, err := f.world.Repository().Git("show", "HEAD:feature.go")
+	if err != nil {
+		return err
+	}
+	tests, err := f.world.Repository().Git("show", "HEAD:feature_test.go")
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(production, "totalFor") || !strings.Contains(tests, "totalFor") || strings.Contains(production+tests, "calculateTotal") {
+		return fmt.Errorf("witnessed rename did not land")
+	}
+	return nil
+}
+
+func (f *fixFeature) concurrentState() error {
+	repository := f.world.Repository()
+	switch f.mode {
+	case "dirty":
+		head, err := repository.Git("rev-parse", "refs/heads/main")
+		if err != nil || head != f.originalHead {
+			return fmt.Errorf("dirty landing branch = %q, %v", head, err)
+		}
+		status, err := repository.Git("status", "--porcelain")
+		if err != nil || status == "" {
+			return fmt.Errorf("dirty state was not preserved: %q, %v", status, err)
+		}
+	case "detached":
+		if _, err := repository.Git("symbolic-ref", "-q", "HEAD"); err == nil {
+			return errors.New("detached HEAD was not preserved")
+		}
+		head, err := repository.Git("rev-parse", "HEAD")
+		if err != nil || head != f.originalHead {
+			return fmt.Errorf("detached HEAD = %q, %v", head, err)
+		}
+	case "branch-moved":
+		subject, err := repository.Git("show", "-s", "--format=%s", "refs/heads/main")
+		if err != nil || subject != "concurrent move" {
+			return fmt.Errorf("moved feature subject = %q, %v", subject, err)
+		}
+	default:
+		return fmt.Errorf("unknown concurrent mode %q", f.mode)
 	}
 	return nil
 }

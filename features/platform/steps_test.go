@@ -120,9 +120,9 @@ func (f *platformFeature) runtimePlatform(platform string) error {
 func (f *platformFeature) runOnRealHost(ctx context.Context) error { return f.run(ctx) }
 
 func (f *platformFeature) run(ctx context.Context) error {
-	return f.world.Run(ctx, harness.RunRequest{
+	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{
 		Root: f.world.Repository().Root, Base: "base", GateNames: []string{"clear"}, NoColor: true,
-	})
+	}))
 }
 
 func (f *platformFeature) completedUnverified() error {

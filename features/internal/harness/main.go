@@ -23,6 +23,9 @@ type testingM interface{ Run() int }
 // and tears down process-scoped build artifacts. Domain packages call it from
 // their TestMain wrappers.
 func Main(m testingM) int {
+	if code, handled := runAgentHelperFromEnvironment(); handled {
+		return code
+	}
 	flag.Parse()
 	return mainLifecycle(*acceptanceDriver, m.Run, defaultLifecycleDeps())
 }

@@ -13,8 +13,8 @@ import (
 )
 
 func TestDriverConformance(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("executable gate fixtures require POSIX shell")
+	if runtime.GOOS != "linux" {
+		t.Skip("driver conformance requires Linux runtime")
 	}
 	root, err := findModuleRoot(".")
 	if err != nil {
@@ -45,6 +45,60 @@ func TestDriverConformance(t *testing.T) {
 	}
 }
 
+func TestFixDriverRailConformance(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("fix driver conformance requires Linux runtime")
+	}
+	root, err := findModuleRoot(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(t.TempDir(), "togi")
+	if err := buildCLI(root, binary); err != nil {
+		t.Fatal(err)
+	}
+	for _, factory := range []DriverFactory{newServiceFactory(), newCLIFactory(binary)} {
+		factory := factory
+		t.Run(factory.Name(), func(t *testing.T) {
+			environment, repository := serviceDriverFixture(t)
+			if _, err := environment.InstallTool("clean-tool", ToolBehavior{Stdout: []byte(`{"Issues":[]}`)}); err != nil {
+				t.Fatal(err)
+			}
+			if err := environment.WriteGate(GateDefinition{Name: "clean", Description: "clean", Tool: "clean-tool", Command: []string{"clean-tool"}}); err != nil {
+				t.Fatal(err)
+			}
+			driver, err := factory.NewGauntlet(environment)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer driver.Close()
+
+			observation, err := driver.Run(context.Background(), RunRequest{
+				Root: repository.Root, Base: "base", GateNames: []string{"clean"}, Agent: "codex", NoColor: true,
+			})
+			if err != nil {
+				t.Fatalf("zero rail Run: %v", err)
+			}
+			report, err := observation.Report()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Fix == nil || report.Fix.Rails.MaxIterations != 20 || report.Fix.Rails.MaxWallClockMS != int64((30*time.Minute)/time.Millisecond) {
+				t.Fatalf("default rails = %#v", report.Fix)
+			}
+
+			for _, invalid := range []RunRequest{
+				{Root: repository.Root, Base: "base", ReportOnly: true, MaxIterations: 1},
+				{Root: repository.Root, Base: "base", ReportOnly: true, MaxWallClock: time.Second},
+			} {
+				if _, err := driver.Run(context.Background(), invalid); err == nil {
+					t.Fatalf("Run(%#v) accepted report-only rails", invalid)
+				}
+			}
+		})
+	}
+}
+
 type driverExercise struct {
 	report        Report
 	runOutcome    int
@@ -69,7 +123,7 @@ func exerciseDriver(t *testing.T, factory DriverFactory) driverExercise {
 		t.Fatal(err)
 	}
 	defer gauntlet.Close()
-	run, err := gauntlet.Run(context.Background(), RunRequest{Root: repository.Root, Base: "base", GateNames: []string{"external-lint"}, NoColor: true})
+	run, err := gauntlet.Run(context.Background(), RunRequest{ReportOnly: true, Root: repository.Root, Base: "base", GateNames: []string{"external-lint"}, NoColor: true})
 	if err != nil {
 		t.Fatal(err)
 	}

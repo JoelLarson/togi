@@ -198,12 +198,12 @@ func (f *runHistoryFeature) completedLinkedRun(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	f.linkedRun, err = driver.Run(ctx, harness.RunRequest{Root: f.linked.Root, Base: f.base, NoColor: true})
+	f.linkedRun, err = driver.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.linked.Root, Base: f.base, NoColor: true}))
 	return err
 }
 
 func (f *runHistoryFeature) runGauntlet(ctx context.Context) error {
-	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: "base", NoColor: true})
+	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: "base", NoColor: true}))
 }
 
 func (f *runHistoryFeature) inspectStatus(ctx context.Context) error {
@@ -235,7 +235,7 @@ func (f *runHistoryFeature) pausedGate() error {
 	}
 	f.firstDone = make(chan error, 1)
 	go func() {
-		observation, runErr := driver.Run(context.Background(), harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true})
+		observation, runErr := driver.Run(context.Background(), harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true}))
 		f.firstRun = observation
 		f.firstDone <- runErr
 	}()
@@ -247,7 +247,7 @@ func (f *runHistoryFeature) startSecondRun(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	f.secondRun, err = driver.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true})
+	f.secondRun, err = driver.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true}))
 	return err
 }
 
@@ -324,14 +324,14 @@ func (f *runHistoryFeature) twentyCompletedRuns(ctx context.Context) error {
 		return err
 	}
 	for range 20 {
-		if err := f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true}); err != nil {
+		if err := f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true})); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 func (f *runHistoryFeature) completeOneMoreRun(ctx context.Context) error {
-	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true})
+	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true}))
 }
 
 func (f *runHistoryFeature) twentyNewestRemain(ctx context.Context) error {
@@ -367,10 +367,10 @@ func (f *runHistoryFeature) twoCompletedRuns(ctx context.Context) error {
 	if err := f.oneGateFinding(); err != nil {
 		return err
 	}
-	if err := f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true}); err != nil {
+	if err := f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true})); err != nil {
 		return err
 	}
-	return f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true})
+	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true}))
 }
 func (f *runHistoryFeature) rendersNewerRun() error {
 	return sameRender(f.world.LastCommand(), f.world.LastRun())
@@ -380,7 +380,7 @@ func (f *runHistoryFeature) oneCompletedRun(ctx context.Context) error {
 	if err := f.oneGateFinding(); err != nil {
 		return err
 	}
-	if err := f.world.Run(ctx, harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true}); err != nil {
+	if err := f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true})); err != nil {
 		return err
 	}
 	f.completedOutput = f.world.LastRun().Stdout()

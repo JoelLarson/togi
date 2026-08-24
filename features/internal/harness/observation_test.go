@@ -110,6 +110,39 @@ func TestReportPathAndRawArtifactsAreProvenanceOnly(t *testing.T) {
 	}
 }
 
+func TestRunObservationLocatesFixArtifactsBesideReport(t *testing.T) {
+	root := t.TempDir()
+	reportPath := filepath.Join(root, "report.json")
+	for _, name := range []string{"plan.json", "briefs/attempt-a.txt", "briefs/attempt-b.txt"} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("artifact"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observation := newProcessRunObservation(nil, nil, 6, validErroredReport, reportPath)
+	if path, ok := observation.ArtifactPath("plan.json"); !ok || path != filepath.Join(root, "plan.json") {
+		t.Fatalf("ArtifactPath(plan.json) = %q, %v", path, ok)
+	}
+	if got, err := observation.ArtifactCount("briefs"); err != nil || got != 2 {
+		t.Fatalf("ArtifactCount(briefs) = %d, %v", got, err)
+	}
+	outside := filepath.Join(filepath.Dir(root), "outside-artifact")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".", "..", "linked", "briefs/attempt-a.txt"} {
+		if path, ok := observation.ArtifactPath(name); ok {
+			t.Errorf("ArtifactPath(%q) = %q, true; want rejected", name, path)
+		}
+	}
+}
+
 func TestObservationCopiesInputBytesAndRawPaths(t *testing.T) {
 	stdout := []byte("stdout")
 	stderr := []byte("stderr")

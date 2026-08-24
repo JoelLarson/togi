@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/joellarson/togi/internal/run"
@@ -95,6 +97,32 @@ func (o RunObservation) Report() (Report, error) {
 }
 
 func (o RunObservation) ReportPath() string { return o.reportPath }
+
+// ArtifactPath locates a named run artifact without reading its contents.
+func (o RunObservation) ArtifactPath(name string) (string, bool) {
+	if o.reportPath == "" || name == "" || name == "." || name == ".." || filepath.IsAbs(name) || filepath.Base(name) != name {
+		return "", false
+	}
+	path := filepath.Join(filepath.Dir(o.reportPath), name)
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		return "", false
+	}
+	return path, true
+}
+
+// ArtifactCount counts direct entries in a run artifact directory.
+func (o RunObservation) ArtifactCount(name string) (int, error) {
+	path, ok := o.ArtifactPath(name)
+	if !ok {
+		return 0, fmt.Errorf("run artifact %q is unavailable", name)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return 0, fmt.Errorf("read run artifact directory %q: %w", name, err)
+	}
+	return len(entries), nil
+}
 
 // RawPath locates one persisted gate stream. Raw filenames are opaque digests,
 // so the artifact is found by deriving the name the ledger writes rather than

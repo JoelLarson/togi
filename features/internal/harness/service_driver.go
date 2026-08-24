@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/joellarson/togi/internal/adapter"
 	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/enricher"
 	"github.com/joellarson/togi/internal/gate"
@@ -46,6 +47,10 @@ func (serviceFactory) NewWiki(env *Environment) (WikiDriver, error) {
 type serviceGauntlet struct{ environment *Environment }
 
 func (d serviceGauntlet) Run(ctx context.Context, request RunRequest) (RunObservation, error) {
+	request, err := normalizeRunRequest(request)
+	if err != nil {
+		return RunObservation{}, err
+	}
 	before, err := snapshotRuns(ctx, d.environment, request.Root)
 	if err != nil {
 		return RunObservation{}, err
@@ -53,7 +58,8 @@ func (d serviceGauntlet) Run(ctx context.Context, request RunRequest) (RunObserv
 	var stdout, stderr bytes.Buffer
 	_, serviceErr := d.service(&stdout, &stderr).Run(ctx, run.Options{
 		Root: request.Root, Base: request.Base, GateNames: request.GateNames,
-		ReportOnly: true, Verbose: request.Verbose, NoColor: request.NoColor,
+		ReportOnly: request.ReportOnly, Agent: request.Agent, MaxIterations: request.MaxIterations,
+		MaxWallClock: request.MaxWallClock, Verbose: request.Verbose, NoColor: request.NoColor,
 	})
 	after, err := snapshotRuns(ctx, d.environment, request.Root)
 	if err != nil {
@@ -87,6 +93,7 @@ func (d serviceGauntlet) service(stdout, stderr *bytes.Buffer) run.Service {
 		Loader:   gate.Loader{OverrideDir: env.Paths().GateOverrides()},
 		Executor: run.Executor{Enrichers: enricher.NewRegistry(), Now: env.clock.Now},
 		Stdout:   stdout, VerboseOut: stderr, Now: env.clock.Now, Random: env.random,
+		Suite: run.NewGoSuite("go"), Adapters: map[string]adapter.Adapter{"codex": adapter.NewCodex("codex")},
 		GOOS: env.GOOS, ResolveRepo: env.resolveRepo,
 	}
 }

@@ -50,11 +50,18 @@ type cliGauntlet struct {
 }
 
 func (d cliGauntlet) Run(ctx context.Context, request RunRequest) (RunObservation, error) {
+	request, err := normalizeRunRequest(request)
+	if err != nil {
+		return RunObservation{}, err
+	}
 	before, err := snapshotRuns(ctx, d.environment, request.Root)
 	if err != nil {
 		return RunObservation{}, err
 	}
-	arguments := []string{"run", "--report-only", "--no-color"}
+	arguments := []string{"run", "--no-color"}
+	if request.ReportOnly {
+		arguments = append(arguments, "--report-only")
+	}
 	if request.Base != "" {
 		arguments = append(arguments, "--base", request.Base)
 	}
@@ -63,6 +70,15 @@ func (d cliGauntlet) Run(ctx context.Context, request RunRequest) (RunObservatio
 	}
 	if request.Verbose {
 		arguments = append(arguments, "--verbose")
+	}
+	if request.Agent != "" {
+		arguments = append(arguments, "--agent", request.Agent)
+	}
+	if request.MaxIterations != 0 {
+		arguments = append(arguments, "--max-iterations", fmt.Sprint(request.MaxIterations))
+	}
+	if request.MaxWallClock != 0 {
+		arguments = append(arguments, "--max-wall-clock", request.MaxWallClock.String())
 	}
 	command, err := d.invoke(ctx, request.Root, arguments...)
 	if err != nil {

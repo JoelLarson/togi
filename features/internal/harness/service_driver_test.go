@@ -28,7 +28,7 @@ func TestServiceDriverRunObservesPersistedArtifacts(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = driver.Close() })
 
-	observation, err := driver.Run(context.Background(), RunRequest{Root: repository.Root, Base: "base", GateNames: []string{"external-lint"}, NoColor: true})
+	observation, err := driver.Run(context.Background(), RunRequest{ReportOnly: true, Root: repository.Root, Base: "base", GateNames: []string{"external-lint"}, NoColor: true})
 	if err != nil {
 		t.Fatalf("Run() = %v", err)
 	}
@@ -83,14 +83,14 @@ func TestServiceDriverDoesNotReuseOlderReportOnRejectedRun(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = driver.Close() })
 
-	first, err := driver.Run(context.Background(), RunRequest{Root: repository.Root, Base: "base", GateNames: []string{"clean"}})
+	first, err := driver.Run(context.Background(), RunRequest{ReportOnly: true, Root: repository.Root, Base: "base", GateNames: []string{"clean"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := first.Report(); err != nil {
 		t.Fatalf("first Report() = %v", err)
 	}
-	rejected, err := driver.Run(context.Background(), RunRequest{Root: repository.Root, Base: "base", GateNames: []string{"missing"}})
+	rejected, err := driver.Run(context.Background(), RunRequest{ReportOnly: true, Root: repository.Root, Base: "base", GateNames: []string{"missing"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,11 +137,11 @@ func TestServiceDriverGeneratesIncreasingRunIDs(t *testing.T) {
 	}
 	defer driver.Close()
 
-	first, err := driver.Run(context.Background(), RunRequest{Root: repository.Root, Base: "base", GateNames: []string{"clean"}})
+	first, err := driver.Run(context.Background(), RunRequest{ReportOnly: true, Root: repository.Root, Base: "base", GateNames: []string{"clean"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := driver.Run(context.Background(), RunRequest{Root: repository.Root, Base: "base", GateNames: []string{"clean"}})
+	second, err := driver.Run(context.Background(), RunRequest{ReportOnly: true, Root: repository.Root, Base: "base", GateNames: []string{"clean"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestServiceDriverPassesEnvironmentPlatformToService(t *testing.T) {
 	}
 	defer driver.Close()
 
-	observation, err := driver.Run(context.Background(), RunRequest{Root: repository.Root, Base: "base"})
+	observation, err := driver.Run(context.Background(), RunRequest{ReportOnly: true, Root: repository.Root, Base: "base"})
 	if err != nil {
 		t.Fatal(err)
 	}
