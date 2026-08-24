@@ -84,6 +84,11 @@ type Workspace struct {
 	beforeResetFinal   func() error
 }
 
+// Root returns the adapter-visible worktree root.
+func (w *Workspace) Root() string {
+	return w.Path()
+}
+
 type workspaceCreateHooks struct {
 	add      func(context.Context, string, string, string, string) error
 	afterAdd func() error
@@ -114,6 +119,54 @@ type GitState struct {
 	rawHooks     map[string]exactFile
 	rawRefs      map[string]exactFile
 	rawControl   map[string]exactFile
+}
+
+var (
+	// ErrGitStateRestored identifies an unauthorized mutation that was fully
+	// restored to the exact captured baseline.
+	ErrGitStateRestored = errors.New("unauthorized Git state mutation fully restored")
+	// ErrGitStateUnsafe identifies a diagnostic failure or a mutation whose
+	// exact baseline could not be fully restored.
+	ErrGitStateUnsafe = errors.New("Git state check unsafe or restoration incomplete")
+)
+
+// GitStateCheckError classifies the result of a failed Git control-state
+// check while preserving its detailed diagnostic error.
+type GitStateCheckError struct {
+	Restored bool
+	Err      error
+}
+
+func (err *GitStateCheckError) Error() string {
+	if err == nil || err.Err == nil {
+		return ErrGitStateUnsafe.Error()
+	}
+	return err.Err.Error()
+}
+
+func (err *GitStateCheckError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Err
+}
+
+func (err *GitStateCheckError) Is(target error) bool {
+	if err == nil {
+		return false
+	}
+	if err.Restored {
+		return target == ErrGitStateRestored
+	}
+	return target == ErrGitStateUnsafe
+}
+
+func restoredGitStateError(err error) error {
+	return &GitStateCheckError{Restored: true, Err: err}
+}
+
+func unsafeGitStateError(err error) error {
+	return &GitStateCheckError{Err: err}
 }
 
 type gitStateHooks struct {
@@ -610,6 +663,31 @@ func (w *Workspace) CommitBatch(ctx context.Context, primaryFile string) (string
 	return commit, nil
 }
 
+// RollbackBatch restores the parent of the exact most recently committed
+// batch. The owned run ref is moved only by compare-and-swap.
+func (w *Workspace) RollbackBatch(ctx context.Context, commit string) error {
+	if !validObjectID(commit) || commit != w.green {
+		return errors.New("refuse batch rollback: commit is not the latest green commit")
+	}
+	if err := w.requireDirectRunRef(ctx, commit, false); err != nil {
+		return fmt.Errorf("refuse batch rollback: %w", err)
+	}
+	parent, err := gitPath(ctx, w.repositoryRoot, "--git-dir="+w.commonDir, "rev-parse", commit+"^")
+	if err != nil || !validObjectID(parent) {
+		return errors.New("refuse batch rollback: resolve exact parent")
+	}
+	ref := "refs/heads/" + w.branch
+	if _, err := gitcmd.Output(ctx, w.repositoryRoot, gitcmd.Hermetic, gitOutputLimit,
+		"--git-dir="+w.commonDir, "-c", "core.hooksPath="+os.DevNull, "update-ref", "--no-deref", ref, parent, commit); err != nil {
+		return errors.New("refuse batch rollback: run ref moved from committed batch")
+	}
+	w.green = parent
+	if err := w.ResetAttempt(ctx); err != nil {
+		return fmt.Errorf("batch ref rolled back but tree restoration failed: %w", err)
+	}
+	return nil
+}
+
 func (w *Workspace) requireDirectRunRef(ctx context.Context, expected string, allowAttemptIndex bool) error {
 	var bindingErr error
 	if allowAttemptIndex {
@@ -799,20 +877,20 @@ func (w *Workspace) CheckGitState(ctx context.Context, before GitState) error {
 
 func (w *Workspace) checkGitState(ctx context.Context, before GitState, hooks gitStateHooks) error {
 	if before.owner != w {
-		return errors.New("Git state snapshot does not belong to this workspace")
+		return unsafeGitStateError(errors.New("Git state snapshot does not belong to this workspace"))
 	}
 	currentDotGit, err := snapshotExactPath(filepath.Join(w.path, ".git"), gitOutputLimit)
 	if err != nil || !exactFileStableEqual(before.dotGit, currentDotGit) {
-		return errors.New("unauthorized Git control binding mutation; restoration incomplete: .git indirection preserved")
+		return unsafeGitStateError(errors.New("unauthorized Git control binding mutation; restoration incomplete: .git indirection preserved"))
 	}
 	after, err := w.snapshotGitState(ctx, true)
 	if err != nil {
-		return errors.New("unauthorized Git state mutation; restoration incomplete: Git control binding diagnostic snapshot failed")
+		return unsafeGitStateError(errors.New("unauthorized Git state mutation; restoration incomplete: Git control binding diagnostic snapshot failed"))
 	}
 	if before.rootInfo == nil || after.rootInfo == nil || !os.SameFile(before.rootInfo, after.rootInfo) ||
 		before.gitDir != after.gitDir || before.commonDir != after.commonDir || before.indexPath != after.indexPath ||
 		!os.SameFile(before.gitDirInfo, after.gitDirInfo) || !os.SameFile(before.commonInfo, after.commonInfo) {
-		return errors.New("unauthorized Git control binding mutation; restoration incomplete: foreign Git control paths preserved")
+		return unsafeGitStateError(errors.New("unauthorized Git control binding mutation; restoration incomplete: foreign Git control paths preserved"))
 	}
 	violations := w.gitStateViolations(before, after)
 	if len(violations) == 0 {
@@ -820,21 +898,21 @@ func (w *Workspace) checkGitState(ctx context.Context, before GitState, hooks gi
 	}
 	if hooks.beforeRestore != nil {
 		if err := hooks.beforeRestore(); err != nil {
-			return fmt.Errorf("unauthorized Git state mutation; restoration incomplete: pre-restoration hook: %w", err)
+			return unsafeGitStateError(fmt.Errorf("unauthorized Git state mutation; restoration incomplete: pre-restoration hook: %w", err))
 		}
 	}
 	if err := w.verifyRestorationBinding(before, after); err != nil {
-		return fmt.Errorf("unauthorized Git state mutation; restoration incomplete: Git control binding changed before restoration: %w", err)
+		return unsafeGitStateError(fmt.Errorf("unauthorized Git state mutation; restoration incomplete: Git control binding changed before restoration: %w", err))
 	}
 	preRestore, err := w.snapshotGitState(ctx, true)
 	if err != nil || !gitStateControlBound(before, preRestore) {
-		return errors.New("unauthorized Git state mutation; restoration incomplete: bound pre-restoration snapshot failed")
+		return unsafeGitStateError(errors.New("unauthorized Git state mutation; restoration incomplete: bound pre-restoration snapshot failed"))
 	}
 	if !observedGitStateEqual(after, preRestore) {
-		return errors.New("unauthorized Git state mutation; restoration incomplete: concurrent shared Git state change preserved")
+		return unsafeGitStateError(errors.New("unauthorized Git state mutation; restoration incomplete: concurrent shared Git state change preserved"))
 	}
 	if err := w.verifyRestorationBinding(before, preRestore); err != nil {
-		return fmt.Errorf("unauthorized Git state mutation; restoration incomplete: Git control binding changed at restoration: %w", err)
+		return unsafeGitStateError(fmt.Errorf("unauthorized Git state mutation; restoration incomplete: Git control binding changed at restoration: %w", err))
 	}
 	restoration := w.restoreGitState(ctx, before, after)
 	restoreErrors := restoration.failures
@@ -862,7 +940,11 @@ func (w *Workspace) checkGitState(ctx context.Context, before GitState, hooks gi
 	if len(restoreErrors) != 0 {
 		message += "; restoration incomplete: " + strings.Join(restoreErrors, "; ")
 	}
-	return errors.New(message)
+	diagnostic := errors.New(message)
+	if len(restoreErrors) == 0 {
+		return restoredGitStateError(diagnostic)
+	}
+	return unsafeGitStateError(diagnostic)
 }
 
 func (w *Workspace) verifyRestorationBinding(before, observed GitState) error {

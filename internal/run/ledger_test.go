@@ -260,6 +260,33 @@ func TestWritePlanAtomicallyReplacesPrivateArtifact(t *testing.T) {
 	}
 }
 
+func TestWritePlanReportsPublishedWhenDirectorySyncFailsAfterRename(t *testing.T) {
+	failSync := false
+	syncErr := errors.New("injected plan directory sync failure")
+	ledger := testLedger(t.TempDir())
+	ledger.syncDirectory = func(root *os.Root) error {
+		if failSync {
+			return syncErr
+		}
+		return syncRootDirectory(root)
+	}
+	run, err := ledger.Start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = run.Close() })
+	failSync = true
+	raw := []byte(`{"status":"done"}`)
+	err = run.WritePlan(raw)
+	var published interface{ PlanPublished() bool }
+	if !errors.Is(err, syncErr) || !errors.As(err, &published) || !published.PlanPublished() {
+		t.Fatalf("WritePlan error = %#v, want published sync failure", err)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(run.Dir, "plan.json")); readErr != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("published plan = %q, %v", got, readErr)
+	}
+}
+
 func TestWriteBriefAndAdapterJSONLCreateImmutablePrivateArtifacts(t *testing.T) {
 	run, err := (testLedger(t.TempDir())).Start()
 	if err != nil {

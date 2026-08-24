@@ -64,21 +64,46 @@ type Ledger struct {
 
 // RunLedger is one active, exclusively locked run directory.
 type RunLedger struct {
-	Dir         string
-	runID       string
-	repoID      string
-	lock        *stateLock
-	repoRoot    *os.Root
-	runsRoot    *os.Root
-	runRoot     *os.Root
-	rawRoot     *os.Root
-	briefRoot   *os.Root
-	adapterRoot *os.Root
-	mu          sync.Mutex
-	marker      *RunLedger
-	closing     bool
-	closed      bool
+	Dir           string
+	runID         string
+	repoID        string
+	lock          *stateLock
+	repoRoot      *os.Root
+	runsRoot      *os.Root
+	runRoot       *os.Root
+	rawRoot       *os.Root
+	briefRoot     *os.Root
+	adapterRoot   *os.Root
+	mu            sync.Mutex
+	marker        *RunLedger
+	closing       bool
+	closed        bool
+	syncDirectory func(*os.Root) error
 }
+
+// PlanWriteError reports whether the exact supplied plan was published before
+// persistence durability failed.
+type PlanWriteError struct {
+	Published bool
+	Err       error
+}
+
+func (err *PlanWriteError) Error() string {
+	if err == nil || err.Err == nil {
+		return "write plan failed"
+	}
+	return err.Err.Error()
+}
+
+func (err *PlanWriteError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Err
+}
+
+// PlanPublished reports whether plan.json contains the exact new plan.
+func (err *PlanWriteError) PlanPublished() bool { return err != nil && err.Published }
 
 type directoryBoundary struct {
 	path     string
@@ -198,16 +223,17 @@ func (ledger Ledger) Start() (result *RunLedger, resultErr error) {
 	}
 	keepRoots = true
 	run := &RunLedger{
-		Dir:         runDir,
-		runID:       runID,
-		repoID:      ledger.RepoID,
-		lock:        lock,
-		repoRoot:    repoRoot,
-		runsRoot:    runsRoot,
-		runRoot:     runRoot,
-		rawRoot:     rawRoot,
-		briefRoot:   briefRoot,
-		adapterRoot: adapterRoot,
+		Dir:           runDir,
+		runID:         runID,
+		repoID:        ledger.RepoID,
+		lock:          lock,
+		repoRoot:      repoRoot,
+		runsRoot:      runsRoot,
+		runRoot:       runRoot,
+		rawRoot:       rawRoot,
+		briefRoot:     briefRoot,
+		adapterRoot:   adapterRoot,
+		syncDirectory: syncDirectory,
 	}
 	run.marker = run
 	return run, nil
@@ -995,8 +1021,12 @@ func (run *RunLedger) WritePlan(raw []byte) error {
 		return fmt.Errorf("publish plan: %w", err)
 	}
 	removeTemporary = false
-	if err := syncRootDirectory(run.runRoot); err != nil {
-		return fmt.Errorf("sync run directory: %w", err)
+	syncDirectory := syncRootDirectory
+	if run.syncDirectory != nil {
+		syncDirectory = run.syncDirectory
+	}
+	if err := syncDirectory(run.runRoot); err != nil {
+		return &PlanWriteError{Published: true, Err: fmt.Errorf("sync run directory: %w", err)}
 	}
 	return nil
 }

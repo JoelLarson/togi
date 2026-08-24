@@ -228,6 +228,50 @@ func TestBatchResetAttemptRestoresLatestGreenCommit(t *testing.T) {
 	}
 }
 
+func TestBatchRollbackRestoresExactJustCommittedGreenState(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "rollback-batch")
+	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
+	commit, err := workspace.CommitBatch(context.Background(), "feature.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.RollbackBatch(context.Background(), commit); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitcmdtest.Git(t, workspace.Path(), "rev-parse", "HEAD"); got != head {
+		t.Fatalf("HEAD=%q want %q", got, head)
+	}
+	if got := gitcmdtest.Git(t, workspace.Path(), "status", "--porcelain=v2", "--untracked-files=all"); got != "" {
+		t.Fatalf("status=%q", got)
+	}
+	if got, err := os.ReadFile(filepath.Join(workspace.Path(), "feature.txt")); err != nil || string(got) != "original\n" {
+		t.Fatalf("feature=%q err=%v", got, err)
+	}
+	if err := workspace.RollbackBatch(context.Background(), commit); err == nil {
+		t.Fatal("RollbackBatch accepted a commit that is no longer current")
+	}
+}
+
+func TestBatchRollbackPreservesConcurrentlyMovedRunRef(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "rollback-moved")
+	writeWorkspaceFile(t, workspace.Path(), "feature.txt", "validated\n")
+	commit, err := workspace.CommitBatch(context.Background(), "feature.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := gitcmdtest.Git(t, workspace.Path(), "rev-parse", "HEAD^{tree}")
+	moved := gitcmdtest.Git(t, repo, "-c", "user.name=Operator", "-c", "user.email=operator@example.invalid", "commit-tree", tree, "-p", commit, "-m", "concurrent move")
+	gitcmdtest.Git(t, repo, "update-ref", "refs/heads/togi/run-rollback-moved", moved, commit)
+	if err := workspace.RollbackBatch(context.Background(), commit); err == nil {
+		t.Fatal("RollbackBatch rewound concurrently moved ref")
+	}
+	if got := gitcmdtest.Git(t, repo, "rev-parse", "refs/heads/togi/run-rollback-moved"); got != moved {
+		t.Fatalf("run ref=%q want %q", got, moved)
+	}
+}
+
 func TestBatchResetAttemptDoesNotRewindMovedRunRef(t *testing.T) {
 	repo, head := workspaceRepository(t)
 	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "moved-reset")
@@ -783,6 +827,10 @@ func TestGitStateRejectsAndUnstagesAgentStaging(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "index") {
 		t.Fatalf("CheckGitState error = %v, want index violation", err)
 	}
+	var stateErr *GitStateCheckError
+	if !errors.Is(err, ErrGitStateRestored) || errors.Is(err, ErrGitStateUnsafe) || !errors.As(err, &stateErr) || !stateErr.Restored {
+		t.Fatalf("CheckGitState error contract = %#v, want restored mutation", err)
+	}
 	if got := gitcmdtest.Git(t, workspace.Path(), "diff", "--cached", "--name-only"); got != "" {
 		t.Fatalf("staged paths after restoration = %q", got)
 	}
@@ -1281,6 +1329,10 @@ func TestGitStateRejectsAndPreservesUnprovenNewRefsTagsAndWorktrees(t *testing.T
 	err = workspace.CheckGitState(context.Background(), before)
 	if err == nil || !strings.Contains(err.Error(), "refs") || !strings.Contains(err.Error(), "worktrees") || !strings.Contains(err.Error(), "restoration incomplete") {
 		t.Fatalf("CheckGitState error = %v, want incomplete refs and worktrees violations", err)
+	}
+	var stateErr *GitStateCheckError
+	if !errors.Is(err, ErrGitStateUnsafe) || errors.Is(err, ErrGitStateRestored) || !errors.As(err, &stateErr) || stateErr.Restored {
+		t.Fatalf("CheckGitState error contract = %#v, want unsafe/incomplete", err)
 	}
 	if got := gitcmdtest.Git(t, workspace.Path(), "for-each-ref", "--format=%(refname)", "refs/tags/agent-tag", "refs/heads/agent-branch"); !strings.Contains(got, "refs/heads/agent-branch") || !strings.Contains(got, "refs/tags/agent-tag") {
 		t.Fatalf("unproven new refs were deleted: %q", got)

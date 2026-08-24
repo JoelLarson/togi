@@ -156,6 +156,43 @@ func cloneFinding(item finding.Finding) finding.Finding {
 	return item
 }
 
+func cloneFindings(items []finding.Finding) []finding.Finding {
+	if items == nil {
+		return nil
+	}
+	cloned := make([]finding.Finding, len(items))
+	for index, item := range items {
+		cloned[index] = cloneFinding(item)
+	}
+	return cloned
+}
+
+func clonePlan(plan Plan) Plan {
+	cloned := Plan{SchemaVersion: plan.SchemaVersion}
+	if plan.Batches == nil {
+		return cloned
+	}
+	cloned.Batches = make([]Batch, len(plan.Batches))
+	for index, batch := range plan.Batches {
+		batch.Findings = cloneFindings(batch.Findings)
+		batch.Attempts = append([]Attempt(nil), batch.Attempts...)
+		for attempt := range batch.Attempts {
+			batch.Attempts[attempt].ChangedFiles = append([]string(nil), batch.Attempts[attempt].ChangedFiles...)
+		}
+		cloned.Batches[index] = batch
+	}
+	return cloned
+}
+
+func cloneBatch(batch Batch) Batch {
+	batch.Findings = cloneFindings(batch.Findings)
+	batch.Attempts = append([]Attempt(nil), batch.Attempts...)
+	for attempt := range batch.Attempts {
+		batch.Attempts[attempt].ChangedFiles = append([]string(nil), batch.Attempts[attempt].ChangedFiles...)
+	}
+	return batch
+}
+
 func lessPlanFinding(left, right finding.Finding) bool {
 	if left.File != right.File {
 		return left.File < right.File
