@@ -12,8 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joellarson/togi/internal/adapter"
 	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/flywheel"
 	"github.com/joellarson/togi/internal/gate"
 	"github.com/joellarson/togi/internal/repoid"
 )
@@ -46,6 +48,15 @@ type Service struct {
 	VerboseOut io.Writer
 	Now        func() time.Time
 	Random     io.Reader
+	Suite      SuiteRunner
+	Adapters   map[string]adapter.Adapter
+
+	WorkspaceFactory     func(context.Context, flywheel.WorkspaceSpec) (FixWorkspace, error)
+	SnapshotOriginal     func(context.Context, string, string) (flywheel.TreeSnapshot, error)
+	ExecuteFlywheel      func(context.Context, flywheel.Request, flywheel.Ports) flywheel.Outcome
+	ResolveFeatureBranch func(context.Context, string) (string, error)
+	ResolveFixIdentity   func(context.Context, string) (string, flywheel.Identity, error)
+	RenderReport         func(io.Writer, Report, RenderOptions) error
 
 	// GOOS and ResolveRepo are narrow seams for boundary and orchestration tests.
 	GOOS        string
@@ -63,10 +74,31 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 	if ctx == nil {
 		return Report{}, errors.New("run context is required")
 	}
+	if opts.ReportOnly && strings.TrimSpace(opts.Agent) != "" {
+		return Report{}, errors.New("agent cannot be used in report-only mode")
+	}
+	if !opts.ReportOnly {
+		if strings.TrimSpace(opts.Agent) == "" {
+			return Report{}, errors.New("agent is required in fix mode")
+		}
+		if opts.MaxIterations <= 0 {
+			return Report{}, errors.New("max iterations must be positive")
+		}
+		if opts.MaxWallClock <= 0 {
+			return Report{}, errors.New("max wall clock must be positive")
+		}
+	}
 	prepared, err := service.prepareRun(ctx, opts)
 	if err != nil {
 		return Report{}, err
 	}
+	if !opts.ReportOnly {
+		return service.runFix(ctx, opts, prepared)
+	}
+	return service.runReportOnly(ctx, opts, prepared)
+}
+
+func (service Service) runReportOnly(ctx context.Context, opts Options, prepared preparedRun) (report Report, resultErr error) {
 
 	now := service.Now
 	if now == nil {
@@ -505,6 +537,12 @@ func verdictError(verdict Verdict) error {
 		return errors.New("one or more gates errored")
 	case VerdictUnverified:
 		return errors.New("run is unverified")
+	case VerdictBlocked:
+		return errors.New("fix loop is blocked")
+	case VerdictRails:
+		return errors.New("fix loop exhausted its rails")
+	case VerdictUnsealed:
+		return errors.New("run is unsealed")
 	default:
 		return errors.New("unknown run verdict")
 	}

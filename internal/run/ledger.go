@@ -22,6 +22,7 @@ import (
 	"unicode"
 
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/flywheel"
 	gatepkg "github.com/joellarson/togi/internal/gate"
 	"github.com/joellarson/togi/internal/repoid"
 )
@@ -44,12 +45,14 @@ var errIncompleteRun = errors.New("incomplete run")
 const defaultRunRetention = 20
 
 const rawOutputLimit = 1 << 20
+const reportOutputLimit = 16 << 20
 
 var rawTruncationMarker = []byte("\n[togi: output truncated]\n")
 
 const runTimestampLayout = "20060102T150405.000000000Z"
 
 var runIDPattern = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}\.[0-9]{9}Z-[0-9a-f]{4}$`)
+var fixBatchIDPattern = regexp.MustCompile(`^batch-[0-9a-f]{64}$`)
 
 // Ledger manages run artifacts below one repository's external state path.
 type Ledger struct {
@@ -664,8 +667,20 @@ func validateReportHeader(report Report, runID string) error {
 	if report.StartedAt.IsZero() || report.FinishedAt.IsZero() {
 		return errors.New("report timestamps are required")
 	}
-	if report.Verdict != VerdictUnverified && report.Verdict != VerdictFindings && report.Verdict != VerdictErrored {
+	if report.Verdict != VerdictUnverified && report.Verdict != VerdictFindings && report.Verdict != VerdictBlocked && report.Verdict != VerdictRails && report.Verdict != VerdictErrored && report.Verdict != VerdictUnsealed {
 		return fmt.Errorf("invalid verdict %q", report.Verdict)
+	}
+	if report.Fix == nil {
+		if report.Verdict == VerdictBlocked || report.Verdict == VerdictRails || report.Verdict == VerdictUnsealed {
+			return fmt.Errorf("verdict %q requires a fix report", report.Verdict)
+		}
+	} else {
+		if report.Verdict == VerdictFindings {
+			return errors.New("report-only findings verdict cannot contain a fix report")
+		}
+		if err := validateFixReport(*report.Fix, report.Diff, report.Verdict, report.Gates, report.RunID); err != nil {
+			return fmt.Errorf("invalid fix report: %w", err)
+		}
 	}
 	if report.FinishedAt.Before(report.StartedAt) {
 		return errors.New("report finished before it started")
@@ -748,10 +763,226 @@ func validateReportSummary(report Report, flattened []finding.Finding) error {
 	if counts := countFindings(report.Findings); counts != report.Counts {
 		return fmt.Errorf("report counts are inconsistent: got %+v, want %+v", report.Counts, counts)
 	}
-	if verdict := verdictFor(report.Gates); verdict != report.Verdict {
+	if verdict := verdictFor(report.Gates); report.Fix == nil && verdict != report.Verdict {
 		return fmt.Errorf("report verdict %q is inconsistent with %q", report.Verdict, verdict)
 	}
 	return nil
+}
+
+func validateFixReport(fix FixReport, diff DiffReport, verdict Verdict, gates []GateReport, runID string) error {
+	if !validObjectIDString(fix.OriginalHead) || fix.OriginalHead != diff.Head {
+		return errors.New("original HEAD must match the report diff HEAD")
+	}
+	if (strings.TrimSpace(fix.FeatureBranch) == "" && verdict != VerdictErrored) || strings.ContainsAny(fix.FeatureBranch, "\x00\r\n") {
+		return errors.New("feature branch is required")
+	}
+	if strings.TrimSpace(fix.Agent.Name) == "" || strings.ContainsAny(fix.Agent.Name, "\x00\r\n") {
+		return errors.New("agent name is required")
+	}
+	if fix.Agent.Usage != nil && (fix.Agent.Usage.InputTokens < 0 || fix.Agent.Usage.CachedInputTokens < 0 || fix.Agent.Usage.OutputTokens < 0 || fix.Agent.Usage.CachedInputTokens > fix.Agent.Usage.InputTokens) {
+		return errors.New("agent usage cannot be negative")
+	}
+	if err := validateSuiteReport(fix.Baseline); err != nil {
+		return fmt.Errorf("baseline: %w", err)
+	}
+	if fix.Final != nil {
+		if err := validateSuiteReport(*fix.Final); err != nil {
+			return fmt.Errorf("final: %w", err)
+		}
+	}
+	if fix.Rails.MaxIterations <= 0 || fix.Rails.Iterations < 0 || fix.Rails.Iterations > fix.Rails.MaxIterations || fix.Rails.MaxWallClockMS <= 0 || fix.Rails.ElapsedMS < 0 {
+		return errors.New("invalid rail accounting")
+	}
+	if verdict == VerdictRails && fix.Rails.Iterations < fix.Rails.MaxIterations && fix.Rails.ElapsedMS < fix.Rails.MaxWallClockMS {
+		return errors.New("rails verdict lacks exhausted rail evidence")
+	}
+	if fix.Batches == nil || fix.Integrity == nil {
+		return errors.New("batches and integrity arrays are required")
+	}
+	if err := validateFixBatches(fix.Batches, len(diff.Head)); err != nil {
+		return err
+	}
+	for index, item := range fix.Integrity {
+		if err := finding.Validate(item); err != nil {
+			return fmt.Errorf("integrity finding %d: %w", index, err)
+		}
+		if item.Gate != "integrity" {
+			return fmt.Errorf("integrity finding %d has a non-integrity gate", index)
+		}
+	}
+	groupedIntegrity, err := finding.Group(fix.Integrity)
+	if err != nil || !equalFindings(groupedIntegrity, fix.Integrity) {
+		return errors.New("integrity findings are duplicated or non-canonical")
+	}
+	switch fix.Landing.Status {
+	case string(flywheel.LandingNotNeeded), string(flywheel.LandingComplete), string(flywheel.LandingBlocked):
+	default:
+		return errors.New("invalid landing status")
+	}
+	if fix.Landing.Commit != "" && (!validObjectIDString(fix.Landing.Commit) || len(fix.Landing.Commit) != len(diff.Head)) {
+		return errors.New("invalid landing commit")
+	}
+	if strings.ContainsAny(fix.Landing.PreservedBranch, "\x00\r\n") || strings.ContainsAny(fix.Landing.Error, "\x00\r\n") {
+		return errors.New("landing text contains a control character")
+	}
+	if fix.Landing.Status == string(flywheel.LandingComplete) && (fix.Landing.Commit == "" || fix.Landing.PreservedBranch != "") {
+		return errors.New("completed landing requires a commit and cannot preserve a branch")
+	}
+	if fix.Landing.Status == string(flywheel.LandingNotNeeded) && (fix.Landing.Commit != "" || fix.Landing.PreservedBranch != "" || fix.Landing.Error != "") {
+		return errors.New("unnecessary landing contains contradictory evidence")
+	}
+	if fix.Landing.Status == string(flywheel.LandingNotNeeded) && verdict != VerdictUnsealed {
+		return errors.New("unnecessary landing requires an unsealed verdict")
+	}
+	if fix.Landing.Status == string(flywheel.LandingComplete) && verdict != VerdictUnsealed && verdict != VerdictErrored {
+		return errors.New("completed landing has an invalid verdict")
+	}
+	if fix.Landing.PreservedBranch != "" && (fix.Landing.Status != string(flywheel.LandingBlocked) || fix.Landing.PreservedBranch != "togi/run-"+runID) {
+		return errors.New("preserved branch contradicts landing evidence")
+	}
+	if gatesErrored(gates) && verdict != VerdictErrored {
+		return errors.New("errored gates require an errored verdict")
+	}
+	switch fix.Baseline.Status {
+	case SuiteMissing, SuiteFailed:
+		if verdict != VerdictUnverified && !gatesErrored(gates) {
+			return errors.New("unverified baseline requires an unverified verdict")
+		}
+	case SuiteErrored:
+		if verdict != VerdictErrored {
+			return errors.New("errored baseline requires an errored verdict")
+		}
+	}
+	if fix.Final != nil {
+		switch fix.Final.Status {
+		case SuiteFailed:
+			if verdict != VerdictBlocked && verdict != VerdictErrored {
+				return errors.New("failed final suite requires a blocked or cleanup-errored verdict")
+			}
+		case SuiteMissing:
+			if verdict != VerdictErrored {
+				return errors.New("unavailable final suite requires an errored verdict")
+			}
+		case SuiteErrored:
+			if verdict != VerdictErrored && verdict != VerdictRails {
+				return errors.New("errored final suite requires an errored or rails verdict")
+			}
+		}
+	}
+	if verdict == VerdictUnsealed {
+		if fix.Baseline.Status != SuitePassed || len(blockingFindings(gates)) != 0 || len(fix.Integrity) != 0 || (fix.Final != nil && fix.Final.Status != SuitePassed) || (fix.Landing.Status != string(flywheel.LandingComplete) && fix.Landing.Status != string(flywheel.LandingNotNeeded)) {
+			return errors.New("unsealed verdict contradicts fix evidence")
+		}
+	}
+	if len(fix.Integrity) != 0 && verdict != VerdictBlocked && verdict != VerdictErrored {
+		return errors.New("integrity findings require a blocked or errored verdict")
+	}
+	if verdict == VerdictErrored && fix.Landing.Status != string(flywheel.LandingBlocked) && fix.Landing.Status != string(flywheel.LandingComplete) {
+		return errors.New("errored verdict has an invalid landing status")
+	}
+	if (verdict == VerdictBlocked || verdict == VerdictRails || verdict == VerdictUnverified) && fix.Landing.Status != string(flywheel.LandingBlocked) {
+		return errors.New("non-success verdict has an invalid landing status")
+	}
+	return nil
+}
+
+func validateFixBatches(batches []flywheel.Batch, objectIDLength int) error {
+	seen := make(map[string]struct{}, len(batches))
+	for index, batch := range batches {
+		if !fixBatchIDPattern.MatchString(batch.ID) {
+			return fmt.Errorf("batch %d has an invalid ID", index)
+		}
+		if _, exists := seen[batch.ID]; exists {
+			return fmt.Errorf("batch %d duplicates an ID", index)
+		}
+		seen[batch.ID] = struct{}{}
+		parsed, err := finding.ParsePath(batch.PrimaryFile)
+		if err != nil || parsed.String() != batch.PrimaryFile {
+			return fmt.Errorf("batch %d has an invalid primary file", index)
+		}
+		if len(batch.Findings) == 0 || batch.Attempts == nil {
+			return fmt.Errorf("batch %d arrays are required", index)
+		}
+		for findingIndex, item := range batch.Findings {
+			if err := finding.Validate(item); err != nil || item.File != batch.PrimaryFile {
+				return fmt.Errorf("batch %d finding %d is invalid", index, findingIndex)
+			}
+		}
+		grouped, err := finding.Group(batch.Findings)
+		if err != nil || !equalFindings(grouped, batch.Findings) {
+			return fmt.Errorf("batch %d findings are not canonical", index)
+		}
+		switch batch.Status {
+		case flywheel.BatchPending, flywheel.BatchRunning, flywheel.BatchDone, flywheel.BatchStuck:
+		default:
+			return fmt.Errorf("batch %d has an invalid status", index)
+		}
+		if len(batch.Attempts) > 2 {
+			return fmt.Errorf("batch %d has too many attempts", index)
+		}
+		for attemptIndex, attempt := range batch.Attempts {
+			if attempt.Number != attemptIndex+1 || (attempt.Status != "running" && attempt.Status != "failed" && attempt.Status != "passed") {
+				return fmt.Errorf("batch %d attempt %d is invalid", index, attemptIndex)
+			}
+			if attempt.Commit != "" && (!validObjectIDString(attempt.Commit) || len(attempt.Commit) != objectIDLength) {
+				return fmt.Errorf("batch %d attempt %d has an invalid commit", index, attemptIndex)
+			}
+			switch attempt.Status {
+			case "running":
+				if attempt.Failure != "" || len(attempt.ChangedFiles) != 0 || attempt.Commit != "" {
+					return fmt.Errorf("batch %d attempt %d has contradictory running evidence", index, attemptIndex)
+				}
+			case "failed":
+				if strings.TrimSpace(attempt.Failure) == "" || len(attempt.ChangedFiles) != 0 || attempt.Commit != "" {
+					return fmt.Errorf("batch %d attempt %d has contradictory failure evidence", index, attemptIndex)
+				}
+			case "passed":
+				if attempt.Failure != "" || len(attempt.ChangedFiles) == 0 || !validObjectIDString(attempt.Commit) {
+					return fmt.Errorf("batch %d attempt %d has contradictory success evidence", index, attemptIndex)
+				}
+			}
+			if !slices.IsSorted(attempt.ChangedFiles) || len(slices.Compact(slices.Clone(attempt.ChangedFiles))) != len(attempt.ChangedFiles) {
+				return fmt.Errorf("batch %d attempt %d changed files are not canonical", index, attemptIndex)
+			}
+			for _, file := range attempt.ChangedFiles {
+				parsed, err := finding.ParsePath(file)
+				if err != nil || parsed.String() != file {
+					return fmt.Errorf("batch %d attempt %d has an invalid changed file", index, attemptIndex)
+				}
+			}
+		}
+		if batch.Status == flywheel.BatchPending && len(batch.Attempts) != 0 {
+			return fmt.Errorf("batch %d pending status has attempts", index)
+		}
+		if batch.Status == flywheel.BatchRunning && len(batch.Attempts) == 0 {
+			return fmt.Errorf("batch %d running status lacks an attempt", index)
+		}
+		if batch.Status == flywheel.BatchRunning && batch.Attempts[len(batch.Attempts)-1].Status == "passed" {
+			return fmt.Errorf("batch %d running status follows a passed attempt", index)
+		}
+		if len(batch.Attempts) == 2 && batch.Attempts[0].Status != "failed" {
+			return fmt.Errorf("batch %d second attempt is unreachable", index)
+		}
+		if batch.Status == flywheel.BatchDone && (len(batch.Attempts) == 0 || batch.Attempts[len(batch.Attempts)-1].Status != "passed") {
+			return fmt.Errorf("batch %d completed status lacks a passed attempt", index)
+		}
+		if batch.Status == flywheel.BatchStuck && (len(batch.Attempts) != 2 || batch.Attempts[1].Status != "failed") {
+			return fmt.Errorf("batch %d stuck status lacks two failed attempts", index)
+		}
+	}
+	return nil
+}
+
+func validateSuiteReport(result SuiteResult) error {
+	if result.DurationMS < 0 {
+		return errors.New("negative duration")
+	}
+	switch result.Status {
+	case SuitePassed, SuiteFailed, SuiteMissing, SuiteErrored:
+		return nil
+	default:
+		return errors.New("invalid status")
+	}
 }
 
 func validateGateReport(gate GateReport, index int) error {
@@ -907,8 +1138,18 @@ func publishNoReplace(root *os.Root, source, destination string) error {
 	return nil
 }
 
+// WriteReportAudit atomically persists the validated pre-cleanup report. It is
+// an immutable audit checkpoint, not a completed run visible through Latest.
+func (run *RunLedger) WriteReportAudit(report Report) error {
+	return run.writeReport(report, "report.pre-cleanup.json")
+}
+
 // WriteReport atomically persists the completed report.
 func (run *RunLedger) WriteReport(report Report) error {
+	return run.writeReport(report, "report.json")
+}
+
+func (run *RunLedger) writeReport(report Report, reportName string) error {
 	if run == nil || run.marker != run {
 		return ErrUninitialized
 	}
@@ -922,7 +1163,6 @@ func (run *RunLedger) WriteReport(report Report) error {
 	if err != nil {
 		return err
 	}
-	const reportName = "report.json"
 	if _, err := run.runRoot.Lstat(reportName); err == nil {
 		return ErrReportExists
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -978,7 +1218,7 @@ func writeReportTemporary(temporary *os.File, report Report) error {
 		_ = temporary.Close()
 		return fmt.Errorf("set report permissions: %w", err)
 	}
-	encoder := json.NewEncoder(temporary)
+	encoder := json.NewEncoder(&boundedReportWriter{writer: temporary, remaining: reportOutputLimit})
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(report); err != nil {
 		_ = temporary.Close()
@@ -992,6 +1232,25 @@ func writeReportTemporary(temporary *os.File, report Report) error {
 		return fmt.Errorf("close report: %w", err)
 	}
 	return nil
+}
+
+type boundedReportWriter struct {
+	writer    io.Writer
+	remaining int
+}
+
+func (writer *boundedReportWriter) Write(raw []byte) (int, error) {
+	if len(raw) <= writer.remaining {
+		written, err := writer.writer.Write(raw)
+		writer.remaining -= written
+		return written, err
+	}
+	written, err := writer.writer.Write(raw[:writer.remaining])
+	writer.remaining -= written
+	if err != nil {
+		return written, err
+	}
+	return written, errors.New("encoded report exceeds size limit")
 }
 
 // WritePlan atomically persists the current action plan, replacing any prior version.

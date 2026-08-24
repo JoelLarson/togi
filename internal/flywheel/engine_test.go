@@ -102,6 +102,49 @@ func TestEngineRetriesSemanticFailureWithFreshBriefThenMarksStuckAndContinues(t 
 	}
 }
 
+func TestEngineRetainsSemanticValidationFindingsInTerminalOutcome(t *testing.T) {
+	assigned := planFinding("a.go", 1, "lint/a", "a")
+	integrity := planFinding("a.go", 2, "integrity/outside-batch", "outside")
+	integrity.Gate = "integrity"
+	integrity.Fingerprint = finding.Fingerprint(integrity)
+	integrity.Occurrences = []finding.Occurrence{{Line: 3}}
+	validationFindings := []finding.Finding{integrity}
+	outcome := Execute(context.Background(), engineRequest(t, []finding.Finding{assigned}, 2), Ports{
+		Adapter: &engineAdapter{}, Workspace: &engineWorkspace{root: "/worktree", changed: [][]string{{"a.go"}, {"a.go"}}}, Audit: &engineAudit{},
+		Validate: func(context.Context, Batch) ValidationResult {
+			return ValidationResult{Kind: ValidationSemanticFailure, Failure: "integrity validation found regressions", Findings: validationFindings}
+		},
+		Barrier: func(context.Context) ValidationResult { return ValidationResult{Kind: ValidationPassed} },
+	})
+	validationFindings[0].Message = "mutated"
+	validationFindings[0].Occurrences[0].Line = 99
+	if outcome.Kind != OutcomeBlocked || len(outcome.Findings) != 1 || outcome.Findings[0].Gate != "integrity" || outcome.Findings[0].Message == "mutated" || outcome.Findings[0].Occurrences[0].Line != 3 {
+		t.Fatalf("outcome = %#v", outcome)
+	}
+}
+
+func TestEngineDropsPriorSemanticFindingsWhenRetryErrors(t *testing.T) {
+	assigned := planFinding("a.go", 1, "lint/a", "a")
+	integrity := planFinding("a.go", 2, "integrity/outside-batch", "outside")
+	integrity.Gate = "integrity"
+	integrity.Fingerprint = finding.Fingerprint(integrity)
+	validations := 0
+	outcome := Execute(context.Background(), engineRequest(t, []finding.Finding{assigned}, 2), Ports{
+		Adapter: &engineAdapter{}, Workspace: &engineWorkspace{root: "/worktree", changed: [][]string{{"a.go"}, {"a.go"}}}, Audit: &engineAudit{},
+		Validate: func(context.Context, Batch) ValidationResult {
+			validations++
+			if validations == 1 {
+				return ValidationResult{Kind: ValidationSemanticFailure, Failure: "integrity regression", Findings: []finding.Finding{integrity}}
+			}
+			return ValidationResult{Kind: ValidationInfrastructureFailure, Failure: "gate crashed"}
+		},
+		Barrier: func(context.Context) ValidationResult { t.Fatal("barrier called"); return ValidationResult{} },
+	})
+	if outcome.Kind != OutcomeErrored || len(outcome.Findings) != 0 {
+		t.Fatalf("outcome = %#v", outcome)
+	}
+}
+
 func TestEngineRetriesInfrastructureFailureThenErrors(t *testing.T) {
 	item := planFinding("a.go", 1, "lint/a", "a")
 	workspace := &engineWorkspace{root: "/worktree"}

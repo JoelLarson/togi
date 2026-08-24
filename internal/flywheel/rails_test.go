@@ -1,12 +1,33 @@
 package flywheel
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestRailsObserveExecutionContextRecordsDeadlineWithStaticClock(t *testing.T) {
+	started := time.Date(2026, time.August, 23, 12, 0, 0, 0, time.UTC)
+	rails, err := NewRails(RailConfig{MaxIterations: 2, MaxWallClock: time.Millisecond}, func() time.Time { return started })
+	if err != nil {
+		t.Fatalf("NewRails() error = %v", err)
+	}
+
+	ctx, cancel, err := rails.ExecutionContext(context.Background())
+	if err != nil {
+		t.Fatalf("ExecutionContext() error = %v", err)
+	}
+	defer cancel()
+	<-ctx.Done()
+	rails.ObserveExecutionContext(ctx)
+
+	if got := rails.Snapshot().Elapsed; got != time.Millisecond {
+		t.Fatalf("elapsed = %s, want %s", got, time.Millisecond)
+	}
+}
 
 func TestRailsAdmitsAttemptsThroughExactIterationLimit(t *testing.T) {
 	now := time.Date(2026, time.August, 23, 12, 0, 0, 0, time.UTC)

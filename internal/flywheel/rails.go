@@ -1,6 +1,7 @@
 package flywheel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -113,6 +114,36 @@ func (rails *Rails) AdmitLanding() error {
 		return &RailExhaustedError{Rail: RailWallClock}
 	}
 	return nil
+}
+
+// ExecutionContext bounds work by the wall-clock rail's remaining duration.
+func (rails *Rails) ExecutionContext(parent context.Context) (context.Context, context.CancelFunc, error) {
+	if parent == nil {
+		return nil, nil, errors.New("parent context is required")
+	}
+	if err := rails.validate(); err != nil {
+		return nil, nil, err
+	}
+	snapshot := rails.Snapshot()
+	remaining := snapshot.MaxWallClock - snapshot.Elapsed
+	if remaining <= 0 {
+		return nil, nil, &RailExhaustedError{Rail: RailWallClock}
+	}
+	ctx, cancel := context.WithTimeoutCause(parent, remaining, &RailExhaustedError{Rail: RailWallClock})
+	return ctx, cancel, nil
+}
+
+// ObserveExecutionContext makes a reached wall-clock deadline part of the
+// durable rail accounting even when the injected clock does not advance.
+func (rails *Rails) ObserveExecutionContext(ctx context.Context) {
+	if rails == nil || ctx == nil || !errors.Is(context.Cause(ctx), ErrRailExhausted) {
+		return
+	}
+	rails.mu.Lock()
+	defer rails.mu.Unlock()
+	if rails.deadline.After(rails.observedAt) {
+		rails.observedAt = rails.deadline
+	}
 }
 
 // Snapshot reports current consumption without admitting or consuming work.

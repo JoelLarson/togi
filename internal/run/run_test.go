@@ -57,14 +57,14 @@ func TestComposeReportRecordsDiffScopeWithoutLineRanges(t *testing.T) {
 		ChangedLines: diff.ChangedLines,
 	}
 	if report.SchemaVersion != ReportSchemaVersion || report.Diff != want {
-		t.Fatalf("report metadata = %#v, want schema 3 and %#v", report, want)
+		t.Fatalf("report metadata = %#v, want schema 4 and %#v", report, want)
 	}
 
 	encoded, err := json.Marshal(report)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantJSON := `{"schema_version":3,"run_id":"run-id","repo_id":"` + strings.Repeat("d", 40) + `","diff":{"base_ref":"origin/main","base_commit":"` + strings.Repeat("a", 40) + `","merge_base":"` + strings.Repeat("b", 40) + `","head":"` + strings.Repeat("c", 40) + `","changed_files":2,"changed_lines":3},"started_at":"2026-08-21T12:00:00Z","finished_at":"2026-08-21T12:00:01Z","verdict":"unverified","gates":[{"gate":"lint","language":"go","blocking":["error","warning"],"fix_policy":"report-only","position":0,"status":"passed","duration_ms":0}],"findings":[],"counts":{"errors":0,"warnings":0,"info":0,"occurrences":0}}`
+	wantJSON := `{"schema_version":4,"run_id":"run-id","repo_id":"` + strings.Repeat("d", 40) + `","diff":{"base_ref":"origin/main","base_commit":"` + strings.Repeat("a", 40) + `","merge_base":"` + strings.Repeat("b", 40) + `","head":"` + strings.Repeat("c", 40) + `","changed_files":2,"changed_lines":3},"started_at":"2026-08-21T12:00:00Z","finished_at":"2026-08-21T12:00:01Z","verdict":"unverified","gates":[{"gate":"lint","language":"go","blocking":["error","warning"],"fix_policy":"report-only","position":0,"status":"passed","duration_ms":0}],"findings":[],"counts":{"errors":0,"warnings":0,"info":0,"occurrences":0}}`
 	if got := string(encoded); got != wantJSON {
 		t.Fatalf("report JSON = %s, want %s", got, wantJSON)
 	}
@@ -232,13 +232,13 @@ func TestServiceResolvesExplicitAndDefaultBase(t *testing.T) {
 	gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(fixtureCommand(t, fixtureJSON("lint.go", 2, "golangci-lint/errcheck", "unchecked"), false)...))
 	base := gitFixture(t, root, "rev-parse", "refs/remotes/origin/main")
 
-	defaultReport, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}})
+	defaultReport, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}, ReportOnly: true})
 	assertVerdictError(t, err)
 	if defaultReport.Diff.BaseRef != "origin/main" || defaultReport.Diff.BaseCommit != base {
 		t.Fatalf("default diff = %#v, want origin/main at %s", defaultReport.Diff, base)
 	}
 
-	explicitReport, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, Base: base, GateNames: []string{"lint"}})
+	explicitReport, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, Base: base, GateNames: []string{"lint"}, ReportOnly: true})
 	assertVerdictError(t, err)
 	if explicitReport.Diff.BaseRef != base || explicitReport.Diff.BaseCommit != base {
 		t.Fatalf("explicit diff = %#v, want exact base %s", explicitReport.Diff, base)
@@ -254,7 +254,7 @@ func TestServiceResolvesLocalTrunkWithoutRemote(t *testing.T) {
 	head := gitFixture(t, root, "rev-parse", "HEAD")
 	gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(fixtureCommand(t, fixtureJSON("feature.go", 1, "golangci-lint/errcheck", "unchecked"), false)...))
 
-	report, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}})
+	report, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}, ReportOnly: true})
 	assertVerdictError(t, err)
 	if report.Diff.BaseRef != "main" || report.Diff.BaseCommit != base {
 		t.Fatalf("diff base = %#v, want local main at %s", report.Diff, base)
@@ -304,7 +304,7 @@ func TestServiceRejectsInvalidDiffInputsBeforeLedgerOrGates(t *testing.T) {
 			if test.prepare != nil {
 				test.prepare(t, root)
 			}
-			_, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, Base: test.base, GateNames: []string{"lint"}})
+			_, err := fixtureService(paths, new(bytes.Buffer)).Run(context.Background(), Options{Root: root, Base: test.base, GateNames: []string{"lint"}, ReportOnly: true})
 			if err == nil {
 				t.Fatal("Run succeeded")
 			}
@@ -380,7 +380,7 @@ func TestServiceRejectsZeroRepositoryIdentityBeforeStateUse(t *testing.T) {
 	storage := t.TempDir()
 	paths := resolveTestPaths(t, filepath.Join(storage, "config"), filepath.Join(storage, "state"), filepath.Join(storage, "cache"))
 	service := Service{Paths: paths, Loader: gate.Loader{OverrideDir: paths.GateOverrides()}, Executor: Executor{Enrichers: enricher.NewRegistry()}, Stdout: io.Discard, ResolveRepo: func(context.Context, string) (repoid.ID, error) { return repoid.ID{}, nil }}
-	if _, err := service.Run(context.Background(), Options{}); err == nil || !strings.Contains(err.Error(), "identity") {
+	if _, err := service.Run(context.Background(), Options{ReportOnly: true}); err == nil || !strings.Contains(err.Error(), "identity") {
 		t.Fatalf("Run error = %v, want identity error", err)
 	}
 	if _, err := os.Stat(filepath.Join(storage, "state", "togi")); !errors.Is(err, os.ErrNotExist) {
@@ -405,7 +405,7 @@ func TestServiceAcceptsCanonicalizedSymlinkRepositoryRoot(t *testing.T) {
 	}
 	service := fixtureService(paths, new(bytes.Buffer))
 	service.ResolveRepo = func(context.Context, string) (repoid.ID, error) { return id, nil }
-	report, err := service.Run(context.Background(), Options{Root: link, GateNames: []string{"lint"}})
+	report, err := service.Run(context.Background(), Options{Root: link, GateNames: []string{"lint"}, ReportOnly: true})
 	assertVerdictError(t, err)
 	if report.RepoID != id.Key() || id.Root() != root {
 		t.Fatalf("report repo = %q identity = %#v", report.RepoID, id)
@@ -437,7 +437,7 @@ func TestServiceRejectsRepositoryStateInsideTargetWithoutSideEffects(t *testing.
 			storage := t.TempDir()
 			paths := resolveTestPaths(t, filepath.Join(storage, "config"), tc.state(t, root), filepath.Join(storage, "cache"))
 			service := Service{Paths: paths, Executor: Executor{Enrichers: enricher.NewRegistry()}, Stdout: io.Discard}
-			if _, err := service.Run(context.Background(), Options{Root: root}); err == nil || !strings.Contains(err.Error(), "target repository") {
+			if _, err := service.Run(context.Background(), Options{Root: root, ReportOnly: true}); err == nil || !strings.Contains(err.Error(), "target repository") {
 				t.Fatalf("Run error = %v", err)
 			}
 			if _, err := service.Status(context.Background(), root, true); err == nil || !strings.Contains(err.Error(), "target repository") {
@@ -544,7 +544,7 @@ func TestServiceGateFilteringAndStatusDoesNotExecute(t *testing.T) {
 	gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(helperBinary(t), "active", marker, "1ms", marker+".done"))
 	gatetest.Write(t, paths.GateOverrides(), "complexity", gatetest.Command(fixtureCommand(t, fixtureJSON("complex.go", 2, "fixture/complexity", "too complex"), false)...))
 	service := fixtureService(paths, new(bytes.Buffer))
-	report, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"complexity", "complexity"}, NoColor: true})
+	report, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"complexity", "complexity"}, ReportOnly: true, NoColor: true})
 	var exitErr *ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
 		t.Fatalf("Run error = %v", err)
@@ -587,7 +587,7 @@ func TestServiceGateFilteringAndStatusDoesNotExecute(t *testing.T) {
 		t.Fatalf("status output: %s", statusOut)
 	}
 
-	if _, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"missing"}}); err == nil || strings.Contains(err.Error(), "exited with") {
+	if _, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"missing"}, ReportOnly: true}); err == nil || strings.Contains(err.Error(), "exited with") {
 		t.Fatalf("unknown gate error = %v", err)
 	}
 }
@@ -599,7 +599,7 @@ func TestPrepareRunRejectsSelectedBindingWithoutEnricher(t *testing.T) {
 	service := fixtureService(paths, new(bytes.Buffer))
 	service.Executor.Enrichers = enricher.Registry{"rust": enricher.Noop{}}
 
-	_, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}, NoColor: true})
+	_, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}, ReportOnly: true, NoColor: true})
 	if err == nil || !strings.Contains(err.Error(), `no enricher for language "go"`) {
 		t.Fatalf("Run error = %v, want missing enricher error", err)
 	}
@@ -650,7 +650,7 @@ func TestServiceRunsGateWithFormerlyUnsafeRawIdentityAlongsideHealthyGate(t *tes
 	gatetest.Write(t, paths.GateOverrides(), unsafeName, gatetest.Command(fixtureCommand(t, fixtureJSON("lint.go", 2, "fixture/unsafe", "unsafe identity ran"), false)...))
 	gatetest.Write(t, paths.GateOverrides(), "complexity", gatetest.Command(fixtureCommand(t, fixtureJSON("complex.go", 2, "fixture/complexity", "healthy ran"), false)...))
 	service := fixtureService(paths, new(bytes.Buffer))
-	report, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{unsafeName, "complexity"}, NoColor: true})
+	report, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{unsafeName, "complexity"}, ReportOnly: true, NoColor: true})
 	var exitErr *ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
 		t.Fatalf("Run error = %v, want findings exit", err)
@@ -675,7 +675,7 @@ func TestServicePersistsPassingRunBeforeReturningUnverified(t *testing.T) {
 	}
 	output := new(bytes.Buffer)
 	service := fixtureService(paths, output)
-	report, err := service.Run(context.Background(), Options{Root: root, NoColor: true})
+	report, err := service.Run(context.Background(), Options{Root: root, ReportOnly: true, NoColor: true})
 	var exitErr *ExitError
 	if !errors.As(err, &exitErr) || exitErr.Code != 5 {
 		t.Fatalf("Run error = %v, want exit 5", err)

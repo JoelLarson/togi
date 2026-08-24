@@ -1207,6 +1207,73 @@ func TestLandingTransactionTimeoutBeforeMergePreservesOriginalCheckout(t *testin
 	}
 }
 
+func TestSharedLandingTransactionTimeoutBoundsLand(t *testing.T) {
+	repo, original := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, original, filepath.Join(t.TempDir(), "workspace"), "shared-landing-timeout")
+	commitTestBatch(t, workspace, "feature.txt", "validated\n")
+	squash, err := workspace.Squash(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction, cancel := NewLandingTransactionContext(context.Background())
+	cancel()
+	status, landErr := workspace.Land(transaction, squash)
+	if landErr == nil || status != LandingBlocked {
+		t.Fatalf("Land(expired transaction) = %q, %v", status, landErr)
+	}
+	if got := gitcmdtest.Git(t, repo, "rev-parse", "HEAD"); got != original {
+		t.Fatalf("expired transaction moved HEAD to %q", got)
+	}
+}
+
+func TestSuccessfulSharedLandingDoesNotOpenRecoveryWindow(t *testing.T) {
+	repo, original := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, original, filepath.Join(t.TempDir(), "workspace"), "shared-landing-no-recovery")
+	commitTestBatch(t, workspace, "feature.txt", "validated\n")
+	squash, err := workspace.Squash(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveries := 0
+	workspace.newLandingRecoveryContext = func(context.Context) (context.Context, context.CancelFunc) {
+		recoveries++
+		return context.WithCancel(context.Background())
+	}
+	transaction, cancel := NewLandingTransactionContext(context.Background())
+	defer cancel()
+	status, landErr := workspace.Land(transaction, squash)
+	if landErr != nil || status != LandingComplete || recoveries != 0 {
+		t.Fatalf("Land() = %q, %v; recovery windows = %d", status, landErr, recoveries)
+	}
+}
+
+func TestExpiredSharedLandingUsesSeparateBoundedRecoveryAfterMerge(t *testing.T) {
+	repo, original := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, original, filepath.Join(t.TempDir(), "workspace"), "shared-landing-recovery")
+	commitTestBatch(t, workspace, "feature.txt", "validated\n")
+	squash, err := workspace.Squash(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction, cancelTransaction := NewLandingTransactionContext(context.Background())
+	workspace.afterLandingMerge = func() error { cancelTransaction(); return nil }
+	recoveries := 0
+	workspace.newLandingRecoveryContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+		recoveries++
+		if parent.Err() == nil {
+			t.Fatal("recovery opened before the transaction expired")
+		}
+		return context.WithTimeout(context.Background(), time.Second)
+	}
+	status, landErr := workspace.Land(transaction, squash)
+	if landErr != nil || status != LandingComplete || recoveries != 1 {
+		t.Fatalf("Land() = %q, %v; recovery windows = %d", status, landErr, recoveries)
+	}
+	if got := gitcmdtest.Git(t, repo, "rev-parse", "HEAD"); got != squash {
+		t.Fatalf("recovered landing HEAD = %q, want %q (original %q)", got, squash, original)
+	}
+}
+
 func commitTestBatch(t *testing.T, workspace *Workspace, file, contents string) string {
 	t.Helper()
 	writeWorkspaceFile(t, workspace.Path(), file, contents)

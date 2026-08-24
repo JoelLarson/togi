@@ -93,9 +93,22 @@ const failureTruncationMarker = "\n...[truncated]"
 const recoveryTimeout = 30 * time.Second
 
 type engineState struct {
-	audit     Audit
-	plan      Plan
-	persisted Plan
+	audit            Audit
+	plan             Plan
+	persisted        Plan
+	semanticFindings map[int][]finding.Finding
+}
+
+func (state *engineState) outcomeFindings(additional []finding.Finding) []finding.Finding {
+	combined := cloneFindings(additional)
+	for index := range state.plan.Batches {
+		combined = append(combined, cloneFindings(state.semanticFindings[index])...)
+	}
+	grouped, err := finding.Group(combined)
+	if err != nil {
+		return cloneFindings(combined)
+	}
+	return grouped
 }
 
 func (state *engineState) persist() error {
@@ -157,6 +170,7 @@ func Execute(ctx context.Context, request Request, ports Ports) Outcome {
 		for index := waveStart; index < waveEnd; index++ {
 			terminal, stopped := executeBatch(ctx, request, ports, state, index)
 			if stopped {
+				terminal.Findings = state.outcomeFindings(terminal.Findings)
 				return terminal
 			}
 			if state.plan.Batches[index].Status == BatchStuck {
@@ -165,71 +179,74 @@ func Execute(ctx context.Context, request Request, ports Ports) Outcome {
 		}
 
 		if outcome, stopped := stopForContext(ctx, request.Rails, state.persisted); stopped {
+			outcome.Findings = state.outcomeFindings(outcome.Findings)
 			return outcome
 		}
 		if outcome, stopped := stopForRail(request.Rails, state.persisted); stopped {
+			outcome.Findings = state.outcomeFindings(outcome.Findings)
 			return outcome
 		}
 		barrier := ports.Barrier(ctx)
+		outcomeFindings := state.outcomeFindings(barrier.Findings)
 		if ctx.Err() != nil {
 			if err := state.persist(); err != nil {
-				return engineOutcome(OutcomeErrored, state.persisted, barrier.Findings, request.Rails, "write barrier plan: "+err.Error())
+				return engineOutcome(OutcomeErrored, state.persisted, outcomeFindings, request.Rails, "write barrier plan: "+err.Error())
 			}
 			outcome, _ := stopForContext(ctx, request.Rails, state.persisted)
-			outcome.Findings = cloneFindings(barrier.Findings)
+			outcome.Findings = cloneFindings(outcomeFindings)
 			return outcome
 		}
 		if railErr := request.Rails.AdmitLanding(); railErr != nil {
 			if err := state.persist(); err != nil {
-				return engineOutcome(OutcomeErrored, state.persisted, barrier.Findings, request.Rails, "write barrier plan: "+err.Error())
+				return engineOutcome(OutcomeErrored, state.persisted, outcomeFindings, request.Rails, "write barrier plan: "+err.Error())
 			}
 			kind := OutcomeErrored
 			if errors.Is(railErr, ErrRailExhausted) {
 				kind = OutcomeRails
 			}
-			return engineOutcome(kind, state.persisted, barrier.Findings, request.Rails, railErr.Error())
+			return engineOutcome(kind, state.persisted, outcomeFindings, request.Rails, railErr.Error())
 		}
 		after, err := BlockingMultiset(barrier.Findings)
 		if err != nil {
 			if writeErr := state.persist(); writeErr != nil {
-				return engineOutcome(OutcomeErrored, state.persisted, barrier.Findings, request.Rails, "write barrier plan: "+writeErr.Error())
+				return engineOutcome(OutcomeErrored, state.persisted, outcomeFindings, request.Rails, "write barrier plan: "+writeErr.Error())
 			}
-			return engineOutcome(OutcomeErrored, state.persisted, barrier.Findings, request.Rails, "classify barrier blockers: "+err.Error())
+			return engineOutcome(OutcomeErrored, state.persisted, outcomeFindings, request.Rails, "classify barrier blockers: "+err.Error())
 		}
 		if err := validateBarrierResult(barrier); err != nil {
 			if writeErr := state.persist(); writeErr != nil {
-				return engineOutcome(OutcomeErrored, state.persisted, barrier.Findings, request.Rails, "write barrier plan: "+writeErr.Error())
+				return engineOutcome(OutcomeErrored, state.persisted, outcomeFindings, request.Rails, "write barrier plan: "+writeErr.Error())
 			}
-			return engineOutcome(OutcomeErrored, state.persisted, barrier.Findings, request.Rails, "invalid barrier validation: "+err.Error())
+			return engineOutcome(OutcomeErrored, state.persisted, outcomeFindings, request.Rails, "invalid barrier validation: "+err.Error())
 		}
 		if err := state.persist(); err != nil {
-			return engineOutcome(OutcomeErrored, state.persisted, barrier.Findings, request.Rails, "write barrier plan: "+err.Error())
+			return engineOutcome(OutcomeErrored, state.persisted, outcomeFindings, request.Rails, "write barrier plan: "+err.Error())
 		}
 		if barrier.Kind == ValidationInfrastructureFailure {
-			return engineOutcome(OutcomeErrored, state.persisted, barrier.Findings, request.Rails, barrier.Failure)
+			return engineOutcome(OutcomeErrored, state.persisted, outcomeFindings, request.Rails, barrier.Failure)
 		}
 		if barrier.Kind == ValidationSemanticFailure {
-			return engineOutcome(OutcomeBlocked, state.persisted, barrier.Findings, request.Rails, barrier.Failure)
+			return engineOutcome(OutcomeBlocked, state.persisted, outcomeFindings, request.Rails, barrier.Failure)
 		}
 		if waveStuck {
-			return engineOutcome(OutcomeBlocked, state.persisted, barrier.Findings, request.Rails, "one or more batches are stuck")
+			return engineOutcome(OutcomeBlocked, state.persisted, outcomeFindings, request.Rails, "one or more batches are stuck")
 		}
 		if len(after) == 0 {
 			return engineOutcome(OutcomeReady, state.persisted, nil, request.Rails, "")
 		}
 		if !StrictlyShrinks(after, blockers) {
-			return engineOutcome(OutcomeBlocked, state.persisted, barrier.Findings, request.Rails, "blocking findings did not strictly shrink")
+			return engineOutcome(OutcomeBlocked, state.persisted, outcomeFindings, request.Rails, "blocking findings did not strictly shrink")
 		}
 
 		next, err := NewPlan(barrier.Findings)
 		if err != nil {
-			return engineOutcome(OutcomeErrored, state.persisted, barrier.Findings, request.Rails, "create next plan wave: "+err.Error())
+			return engineOutcome(OutcomeErrored, state.persisted, outcomeFindings, request.Rails, "create next plan wave: "+err.Error())
 		}
 		waveStart = len(state.plan.Batches)
 		state.plan.Batches = append(state.plan.Batches, next.Batches...)
 		blockers = after
 		if err := state.persist(); err != nil {
-			return engineOutcome(OutcomeErrored, state.persisted, barrier.Findings, request.Rails, "write next plan wave: "+err.Error())
+			return engineOutcome(OutcomeErrored, state.persisted, outcomeFindings, request.Rails, "write next plan wave: "+err.Error())
 		}
 	}
 }
@@ -247,6 +264,7 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 			}
 			return engineOutcome(kind, state.persisted, nil, request.Rails, err.Error()), true
 		}
+		delete(state.semanticFindings, index)
 		if outcome, stopped := stopForContext(ctx, request.Rails, state.persisted); stopped {
 			return outcome, true
 		}
@@ -414,6 +432,10 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 		}
 		switch validation.Kind {
 		case ValidationSemanticFailure:
+			if state.semanticFindings == nil {
+				state.semanticFindings = make(map[int][]finding.Finding)
+			}
+			state.semanticFindings[index] = cloneFindings(validation.Findings)
 			failure := boundedFailure(validation.Failure)
 			if terminal, stopped := semanticFailure(ctx, request, ports, state, index, attempt, failure); stopped {
 				return terminal, true
@@ -434,6 +456,7 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 			retryFailure = failure
 			continue
 		case ValidationPassed:
+			delete(state.semanticFindings, index)
 		}
 		if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
 			return outcome, true
@@ -609,6 +632,7 @@ func stopForContext(ctx context.Context, rails *Rails, persisted Plan) (Outcome,
 		kind := OutcomeErrored
 		failure := err.Error()
 		if cause := context.Cause(ctx); errors.Is(cause, ErrRailExhausted) {
+			rails.ObserveExecutionContext(ctx)
 			kind = OutcomeRails
 			failure = cause.Error()
 		} else if railExhaustedNow(rails) {
@@ -666,13 +690,7 @@ func railExhaustedNow(rails *Rails) bool {
 }
 
 func railExecutionContext(parent context.Context, rails *Rails) (context.Context, context.CancelFunc, error) {
-	snapshot := rails.Snapshot()
-	remaining := snapshot.MaxWallClock - snapshot.Elapsed
-	if remaining <= 0 {
-		return nil, nil, &RailExhaustedError{Rail: RailWallClock}
-	}
-	ctx, cancel := context.WithTimeoutCause(parent, remaining, &RailExhaustedError{Rail: RailWallClock})
-	return ctx, cancel, nil
+	return rails.ExecutionContext(parent)
 }
 
 func recoveryContext(parent context.Context) (context.Context, context.CancelFunc) {

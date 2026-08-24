@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/joellarson/togi/internal/adapter"
 	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/enricher"
 	"github.com/joellarson/togi/internal/gate"
@@ -73,6 +74,8 @@ func defaultServices(s streams, environment config.Environment) (runpkg.Service,
 		Executor:   runpkg.Executor{Enrichers: enricher.NewRegistry()},
 		Stdout:     s.out,
 		VerboseOut: s.err,
+		Suite:      runpkg.NewGoSuite("go"),
+		Adapters:   map[string]adapter.Adapter{"codex": adapter.NewCodex("codex")},
 	}
 	return service, pages, nil
 }

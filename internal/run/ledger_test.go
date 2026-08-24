@@ -1758,6 +1758,15 @@ func TestWriteReportFillsRunIDAndRejectsDuplicate(t *testing.T) {
 	}
 }
 
+func TestBoundedReportWriterStopsAtLimit(t *testing.T) {
+	var output bytes.Buffer
+	writer := &boundedReportWriter{writer: &output, remaining: 3}
+	written, err := writer.Write([]byte("abcd"))
+	if err == nil || written != 3 || output.String() != "abc" {
+		t.Fatalf("Write() = %d, %v, %q", written, err, output.String())
+	}
+}
+
 func TestWriteReportRejectsDifferentRepositoryIdentity(t *testing.T) {
 	run, err := (testLedger(t.TempDir())).Start()
 	if err != nil {
@@ -1852,7 +1861,7 @@ func TestWriteReportRejectsInvalidReportsWithoutArtifacts(t *testing.T) {
 		}},
 		{name: "future schema", report: func(runID string) Report {
 			report := completeReportFixture(runID)
-			report.SchemaVersion = 4
+			report.SchemaVersion = 5
 			return report
 		}},
 		{name: "run ID", report: func(runID string) Report {

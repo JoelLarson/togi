@@ -120,6 +120,7 @@ type Workspace struct {
 	landingEvidenceBeforeRemove   func() error
 	beforeLandingBindingClose     func() error
 	newLandingContext             func() (context.Context, context.CancelFunc)
+	newLandingRecoveryContext     func(context.Context) (context.Context, context.CancelFunc)
 	beforeWorktreeRemove          func() error
 	afterWorktreeRemove           func() error
 	beforeWorktreeQuarantine      func() error
@@ -191,6 +192,120 @@ type BatchProof struct {
 type validationSnapshot struct {
 	private *privateTempDir
 	files   map[string]exactFile
+}
+
+// ValidatedSnapshot is an authenticated, read-only materialization of the
+// workspace's latest green commit tree.
+type ValidatedSnapshot struct {
+	owner    *Workspace
+	snapshot *validationSnapshot
+	state    GitState
+	commit   string
+	tree     string
+	closed   bool
+}
+
+// ValidatedTree is the run-layer-safe handle for one latest-green snapshot.
+type ValidatedTree interface {
+	Root() string
+	Verify(context.Context) error
+	Close() error
+}
+
+// Root returns the private tree root against which validators execute.
+func (snapshot *ValidatedSnapshot) Root() string {
+	if snapshot == nil || snapshot.closed || snapshot.snapshot == nil || snapshot.snapshot.private == nil {
+		return ""
+	}
+	return snapshot.snapshot.private.path
+}
+
+// Verify authenticates both the immutable materialization and the clean
+// latest-green source state from which it was produced.
+func (snapshot *ValidatedSnapshot) Verify(ctx context.Context) error {
+	if snapshot == nil || snapshot.closed || snapshot.owner == nil || snapshot.snapshot == nil || snapshot.owner.validationSnapshot != snapshot.snapshot {
+		return errors.New("validated snapshot is unavailable")
+	}
+	if ctx == nil {
+		return errors.New("validated snapshot context is required")
+	}
+	if err := snapshot.owner.CheckGitState(ctx, snapshot.state); err != nil {
+		return fmt.Errorf("validated snapshot source Git state changed: %w", err)
+	}
+	if snapshot.owner.green != snapshot.commit {
+		return errors.New("validated snapshot source commit changed")
+	}
+	if err := snapshot.owner.requireDirectRunRef(ctx, snapshot.commit, false); err != nil {
+		return fmt.Errorf("validated snapshot source ref changed: %w", err)
+	}
+	changed, err := snapshot.owner.ChangedFiles(ctx)
+	if err != nil || len(changed) != 0 {
+		return errors.New("validated snapshot source worktree changed")
+	}
+	tree, err := gitPath(ctx, snapshot.owner.path, "--git-dir="+snapshot.owner.commonDir, "rev-parse", snapshot.commit+"^{tree}")
+	if err != nil || tree != snapshot.tree {
+		return errors.New("validated snapshot source tree changed")
+	}
+	current, err := snapshotRawTrees([]rawTreeRoot{{name: "validation", path: snapshot.Root()}}, validationSnapshotLimits)
+	if err != nil || !exactFileStableMapsEqual(snapshot.snapshot.files, current) {
+		return errors.New("validated snapshot materialization changed")
+	}
+	return nil
+}
+
+// Close removes the private materialization and releases the workspace's one
+// active validation-snapshot slot.
+func (snapshot *ValidatedSnapshot) Close() error {
+	if snapshot == nil || snapshot.closed {
+		return nil
+	}
+	if snapshot.owner == nil || snapshot.snapshot == nil || snapshot.owner.validationSnapshot != snapshot.snapshot {
+		return errors.New("validated snapshot ownership changed")
+	}
+	if err := snapshot.owner.discardValidationSnapshot(nil); err != nil {
+		return err
+	}
+	snapshot.closed = true
+	return nil
+}
+
+// SnapshotValidated materializes the exact clean latest-green commit without
+// exposing the mutable owned worktree to validation callbacks.
+func (w *Workspace) SnapshotValidated(ctx context.Context) (ValidatedTree, error) {
+	if w == nil {
+		return nil, errors.New("workspace is required")
+	}
+	if ctx == nil {
+		return nil, errors.New("validated snapshot context is required")
+	}
+	if w.validationSnapshot != nil {
+		return nil, errors.New("previous validation snapshot is still active")
+	}
+	if err := w.requireDirectRunRef(ctx, w.green, false); err != nil {
+		return nil, fmt.Errorf("refuse validated snapshot: %w", err)
+	}
+	changed, err := w.ChangedFiles(ctx)
+	if err != nil || len(changed) != 0 {
+		return nil, errors.New("validated snapshot requires a clean latest-green worktree")
+	}
+	state, err := w.SnapshotGitState(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot validated Git state: %w", err)
+	}
+	tree, err := gitPath(ctx, w.path, "--git-dir="+w.commonDir, "rev-parse", w.green+"^{tree}")
+	if err != nil || !validObjectID(tree) {
+		return nil, errors.New("resolve latest green tree")
+	}
+	materialized, err := w.materializeValidationSnapshot(ctx, tree)
+	if err != nil {
+		return nil, err
+	}
+	w.validationSnapshot = materialized
+	snapshot := &ValidatedSnapshot{owner: w, snapshot: materialized, state: state, commit: w.green, tree: tree}
+	if err := snapshot.Verify(ctx); err != nil {
+		return nil, errors.Join(err, snapshot.Close())
+	}
+	return snapshot, nil
 }
 
 func (proof BatchProof) validFor(workspace *Workspace) bool {

@@ -127,6 +127,62 @@ type Report struct {
 	Gates         []GateReport `json:"gates"`
 	Findings      []Finding    `json:"findings"`
 	Counts        Counts       `json:"counts"`
+	Fix           *FixReport   `json:"fix,omitempty"`
+}
+
+type FixReport struct {
+	OriginalHead  string        `json:"original_head"`
+	FeatureBranch string        `json:"feature_branch"`
+	Agent         AgentReport   `json:"agent"`
+	Baseline      SuiteResult   `json:"baseline"`
+	Final         *SuiteResult  `json:"final,omitempty"`
+	Rails         RailsReport   `json:"rails"`
+	Batches       []BatchReport `json:"batches"`
+	Integrity     []Finding     `json:"integrity"`
+	Landing       LandingReport `json:"landing"`
+}
+
+type AgentReport struct {
+	Name  string      `json:"name"`
+	Usage *AgentUsage `json:"usage,omitempty"`
+}
+type AgentUsage struct {
+	InputTokens       int64 `json:"input_tokens"`
+	CachedInputTokens int64 `json:"cached_input_tokens"`
+	OutputTokens      int64 `json:"output_tokens"`
+}
+type RailsReport struct {
+	MaxIterations  int   `json:"max_iterations"`
+	Iterations     int   `json:"iterations"`
+	MaxWallClockMS int64 `json:"max_wall_clock_ms"`
+	ElapsedMS      int64 `json:"elapsed_ms"`
+}
+type SuiteResult struct {
+	Command    []string `json:"command"`
+	Packages   []string `json:"packages,omitempty"`
+	Status     string   `json:"status"`
+	DurationMS int64    `json:"duration_ms"`
+	Diagnostic string   `json:"diagnostic,omitempty"`
+}
+type BatchReport struct {
+	ID          string          `json:"id"`
+	PrimaryFile string          `json:"primary_file"`
+	Findings    []Finding       `json:"findings"`
+	Status      string          `json:"status"`
+	Attempts    []AttemptReport `json:"attempts"`
+}
+type AttemptReport struct {
+	Number       int      `json:"number"`
+	Status       string   `json:"status"`
+	Failure      string   `json:"failure,omitempty"`
+	ChangedFiles []string `json:"changed_files,omitempty"`
+	Commit       string   `json:"commit,omitempty"`
+}
+type LandingReport struct {
+	Status          string `json:"status"`
+	Commit          string `json:"commit,omitempty"`
+	PreservedBranch string `json:"preserved_branch,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 type DiffReport struct {

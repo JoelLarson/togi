@@ -3,12 +3,14 @@ package run
 import (
 	"time"
 
+	"github.com/joellarson/togi/internal/adapter"
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/flywheel"
 	"github.com/joellarson/togi/internal/gate"
 )
 
 // ReportSchemaVersion is the only persisted report schema accepted pre-1.0.
-const ReportSchemaVersion = 3
+const ReportSchemaVersion = 4
 
 // GateStatus describes the outcome of one gate execution.
 type GateStatus string
@@ -118,6 +120,37 @@ type DiffReport struct {
 	ChangedLines int    `json:"changed_lines"`
 }
 
+type AgentReport struct {
+	Name  string         `json:"name"`
+	Usage *adapter.Usage `json:"usage,omitempty"`
+}
+
+type RailsReport struct {
+	MaxIterations  int   `json:"max_iterations"`
+	Iterations     int   `json:"iterations"`
+	MaxWallClockMS int64 `json:"max_wall_clock_ms"`
+	ElapsedMS      int64 `json:"elapsed_ms"`
+}
+
+type LandingReport struct {
+	Status          string `json:"status"`
+	Commit          string `json:"commit,omitempty"`
+	PreservedBranch string `json:"preserved_branch,omitempty"`
+	Error           string `json:"error,omitempty"`
+}
+
+type FixReport struct {
+	OriginalHead  string            `json:"original_head"`
+	FeatureBranch string            `json:"feature_branch"`
+	Agent         AgentReport       `json:"agent"`
+	Baseline      SuiteResult       `json:"baseline"`
+	Final         *SuiteResult      `json:"final,omitempty"`
+	Rails         RailsReport       `json:"rails"`
+	Batches       []flywheel.Batch  `json:"batches"`
+	Integrity     []finding.Finding `json:"integrity"`
+	Landing       LandingReport     `json:"landing"`
+}
+
 // Report is the machine-readable artifact for a completed run.
 type Report struct {
 	Ref           RunRef            `json:"-"`
@@ -131,4 +164,5 @@ type Report struct {
 	Gates         []GateReport      `json:"gates"`
 	Findings      []finding.Finding `json:"findings"`
 	Counts        Counts            `json:"counts"`
+	Fix           *FixReport        `json:"fix,omitempty"`
 }

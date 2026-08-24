@@ -47,6 +47,64 @@ func TestWorkspaceCreatesCleanExternalRunBranchAtOriginalHead(t *testing.T) {
 	}
 }
 
+func TestValidatedSnapshotBindsImmutableLatestGreenTree(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "validated-snapshot")
+	snapshot, err := workspace.SnapshotValidated(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = snapshot.Close() })
+	if got, err := os.ReadFile(filepath.Join(snapshot.Root(), "feature.txt")); err != nil || string(got) != "original\n" {
+		t.Fatalf("snapshot feature = %q, %v", got, err)
+	}
+	if err := snapshot.Verify(context.Background()); err != nil {
+		t.Fatalf("Verify() error = %v", err)
+	}
+	if err := os.Chmod(snapshot.Root(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceFile(t, snapshot.Root(), "injected.txt", "mutated\n")
+	if err := snapshot.Verify(context.Background()); err == nil {
+		t.Fatal("Verify accepted a mutated immutable snapshot")
+	}
+	if _, err := os.Stat(filepath.Join(workspace.Path(), "injected.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("snapshot mutation reached source workspace: %v", err)
+	}
+	if err := snapshot.Close(); err != nil {
+		t.Fatal(err)
+	}
+	next, err := workspace.SnapshotValidated(context.Background())
+	if err != nil {
+		t.Fatalf("next SnapshotValidated() error = %v", err)
+	}
+	writeWorkspaceFile(t, workspace.Path(), "source-drift.txt", "drift\n")
+	if err := next.Verify(context.Background()); err == nil {
+		t.Fatal("Verify accepted source-worktree drift")
+	}
+	if err := next.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSquashValidatedConsumesOnlyOwnedUnchangedSnapshot(t *testing.T) {
+	repo, head := workspaceRepository(t)
+	workspace := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "workspace"), "squash-validated")
+	foreign := createTestWorkspace(t, repo, head, filepath.Join(t.TempDir(), "foreign"), "squash-foreign")
+	snapshot, err := workspace.SnapshotValidated(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = snapshot.Close() })
+	if _, err := foreign.SquashValidated(context.Background(), snapshot); err == nil {
+		t.Fatal("SquashValidated accepted another workspace's proof")
+	}
+	writeWorkspaceFile(t, workspace.Path(), "source-drift.txt", "drift\n")
+	if _, err := workspace.SquashValidated(context.Background(), snapshot); err == nil {
+		t.Fatal("SquashValidated accepted source drift after validation")
+	}
+}
+
 func TestWorkspaceRejectsInternalAndSymlinkedInternalPaths(t *testing.T) {
 	repo, head := workspaceRepository(t)
 	outside := t.TempDir()

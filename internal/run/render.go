@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/joellarson/togi/internal/finding"
+	"github.com/joellarson/togi/internal/flywheel"
 )
 
 // RenderOptions controls human report presentation.
@@ -21,11 +22,21 @@ func Render(output io.Writer, report Report, opts RenderOptions) error {
 	if output == nil {
 		return fmt.Errorf("report output is required")
 	}
-	if err := renderFindings(output, report, opts); err != nil {
+	display := report
+	if report.Fix != nil && len(report.Fix.Integrity) != 0 {
+		display.Findings = append(cloneReportFindings(report.Findings), cloneReportFindings(report.Fix.Integrity)...)
+		display.Counts = countFindings(display.Findings)
+	}
+	if err := renderFindings(output, display, opts); err != nil {
 		return err
 	}
 	if err := renderGates(output, report.Gates); err != nil {
 		return err
+	}
+	if report.Fix != nil {
+		if err := renderFix(output, *report.Fix); err != nil {
+			return err
+		}
 	}
 	verdict := string(report.Verdict)
 	if opts.Color && !opts.NoColor {
@@ -33,6 +44,47 @@ func Render(output io.Writer, report Report, opts RenderOptions) error {
 	}
 	_, err := fmt.Fprintf(output, "verdict: %s\n", verdict)
 	return err
+}
+
+func renderFix(output io.Writer, fix FixReport) error {
+	if _, err := fmt.Fprintf(output, "baseline suite: %s (%dms)\n", fix.Baseline.Status, fix.Baseline.DurationMS); err != nil {
+		return err
+	}
+	if fix.Final != nil {
+		if _, err := fmt.Fprintf(output, "final suite: %s (%dms)\n", fix.Final.Status, fix.Final.DurationMS); err != nil {
+			return err
+		}
+	}
+	completed, attempts := 0, 0
+	for _, batch := range fix.Batches {
+		if batch.Status == flywheel.BatchDone {
+			completed++
+		}
+		attempts += len(batch.Attempts)
+	}
+	if _, err := fmt.Fprintf(output, "batches: %d/%d complete (%d attempts)\n", completed, len(fix.Batches), attempts); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(output, "rails: %d/%d iterations, %d/%dms wall clock\n", fix.Rails.Iterations, fix.Rails.MaxIterations, fix.Rails.ElapsedMS, fix.Rails.MaxWallClockMS); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(output, "landing: %s", safeText(fix.Landing.Status)); err != nil {
+		return err
+	}
+	if fix.Landing.Commit != "" {
+		if _, err := fmt.Fprintf(output, " (%s)", safeText(fix.Landing.Commit)); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintln(output); err != nil {
+		return err
+	}
+	if fix.Landing.PreservedBranch != "" {
+		if _, err := fmt.Fprintf(output, "preserved branch: %s\n", safeText(fix.Landing.PreservedBranch)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func renderFindings(output io.Writer, report Report, opts RenderOptions) error {

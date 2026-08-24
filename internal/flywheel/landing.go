@@ -22,6 +22,18 @@ const (
 	squashSubject     = "togi: apply verified fixes"
 )
 
+type landingTransactionContextKey struct{}
+
+// NewLandingTransactionContext starts the cancellation-independent bounded
+// context shared by squash creation and guarded landing after rail admission.
+func NewLandingTransactionContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), landingGitTimeout)
+	return context.WithValue(ctx, landingTransactionContextKey{}, struct{}{}), cancel
+}
+
 // LandingStatus records whether a guarded landing was unnecessary, completed,
 // or refused without claiming that the feature checkout was changed safely.
 type LandingStatus string
@@ -40,6 +52,19 @@ const (
 	CleanupLanded            CleanupDisposition = "landed"
 	CleanupPreserveValidated CleanupDisposition = "preserve-validated"
 )
+
+// SquashValidated creates the landing commit only from an active,
+// authenticated latest-green snapshot owned by this workspace.
+func (w *Workspace) SquashValidated(ctx context.Context, validated ValidatedTree) (string, error) {
+	snapshot, ok := validated.(*ValidatedSnapshot)
+	if !ok || snapshot == nil || snapshot.owner != w || snapshot.closed || snapshot.snapshot == nil || w.validationSnapshot != snapshot.snapshot {
+		return "", errors.New("refuse squash: validated snapshot ownership changed")
+	}
+	if err := snapshot.Verify(ctx); err != nil {
+		return "", fmt.Errorf("refuse squash: validated snapshot changed: %w", err)
+	}
+	return w.Squash(ctx)
+}
 
 // Squash creates and verifies one commit containing the latest validated tree,
 // then advances the owned run ref by compare-and-swap. No commit is created
@@ -214,13 +239,16 @@ func (w *Workspace) Land(ctx context.Context, squash string) (status LandingStat
 	if squash != w.green || !validObjectID(squash) {
 		return LandingBlocked, errors.New("landing commit is not the latest validated squash")
 	}
-	newLandingContext := w.newLandingContext
-	if newLandingContext == nil {
-		newLandingContext = func() (context.Context, context.CancelFunc) {
-			return context.WithTimeout(context.Background(), landingGitTimeout)
+	landingCtx, cancel := ctx, func() {}
+	if ctx.Value(landingTransactionContextKey{}) == nil {
+		newLandingContext := w.newLandingContext
+		if newLandingContext == nil {
+			newLandingContext = func() (context.Context, context.CancelFunc) {
+				return NewLandingTransactionContext(ctx)
+			}
 		}
+		landingCtx, cancel = newLandingContext()
 	}
-	landingCtx, cancel := newLandingContext()
 	if landingCtx == nil || cancel == nil {
 		return LandingBlocked, errors.New("landing transaction context is unavailable")
 	}
@@ -361,14 +389,32 @@ func (w *Workspace) Land(ctx context.Context, squash string) (status LandingStat
 	if w.afterLandingMerge != nil {
 		mergeErr = errors.Join(mergeErr, w.afterLandingMerge())
 	}
-	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), landingGitTimeout)
-	defer recoveryCancel()
 	evidenceAfter, evidenceSnapshotErr := w.snapshotLandingEvidence()
 	actualHead, evidenceErr := authenticateLandingEvidence(transactionEvidence.nonce, transactionRaw, evidenceBefore, evidenceAfter, squash, "refs/heads/"+w.featureBranch)
 	evidenceErr = errors.Join(transactionErr, evidenceSnapshotErr, evidenceErr)
-	postFeature, postFeatureErr := w.snapshotFeatureControl(recoveryCtx)
+	postFeature, postFeatureErr := w.snapshotFeatureControl(landingCtx)
 	featureStable := postFeatureErr == nil && featureControlEqual(featureBound, postFeature)
-	completeErr := w.verifyLandingResult(recoveryCtx, squash)
+	completeErr := w.verifyLandingResult(landingCtx, squash)
+	if completeErr == nil && featureStable && evidenceErr == nil && actualHead == w.originalHead {
+		w.landingComplete = true
+		return LandingComplete, errors.Join(mergeErr, closeBindings())
+	}
+	// Once merge has launched, ambiguous or timed-out results receive a separate
+	// bounded recovery window so cancellation cannot strand Git mid-recovery.
+	newRecoveryContext := w.newLandingRecoveryContext
+	if newRecoveryContext == nil {
+		newRecoveryContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.WithoutCancel(parent), landingGitTimeout)
+		}
+	}
+	recoveryCtx, recoveryCancel := newRecoveryContext(landingCtx)
+	if recoveryCtx == nil || recoveryCancel == nil {
+		return LandingBlocked, errors.New("landing recovery context is unavailable")
+	}
+	defer recoveryCancel()
+	postFeature, postFeatureErr = w.snapshotFeatureControl(recoveryCtx)
+	featureStable = postFeatureErr == nil && featureControlEqual(featureBound, postFeature)
+	completeErr = w.verifyLandingResult(recoveryCtx, squash)
 	if completeErr == nil && featureStable && evidenceErr == nil && actualHead == w.originalHead {
 		w.landingComplete = true
 		return LandingComplete, errors.Join(mergeErr, closeBindings())
