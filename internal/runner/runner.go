@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ type Options struct {
 	StdoutLimit      int           // capture limit in bytes, including the marker
 	StderrLimit      int
 	TruncationMarker []byte
+	ExtraFiles       []*os.File // caller-owned descriptors inherited as fd 3+
 }
 
 // Result carries both captured streams and both failure channels: RunErr is
@@ -61,6 +63,7 @@ func Run(ctx context.Context, dir string, argv []string, opts Options) Result {
 	cmd.Dir = dir
 	cmd.Env = opts.Env
 	cmd.Stdin = opts.Stdin
+	cmd.ExtraFiles = append([]*os.File(nil), opts.ExtraFiles...)
 	waitDelay := opts.WaitDelay
 	if waitDelay <= 0 {
 		waitDelay = DefaultWaitDelay

@@ -7,10 +7,98 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/joellarson/togi/internal/runner"
 )
+
+func TestOutputBoundDirectoriesRejectsPostValidationPathSubstitution(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("descriptor-bound Git execution is Linux-only")
+	}
+	repo := t.TempDir()
+	mustGit(t, repo, "init", "-q")
+	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("original\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, repo, "add", "feature.txt")
+	mustGit(t, repo, "-c", "user.name=Togi", "-c", "user.email=togi@example.invalid", "commit", "-qm", "initial")
+	if err := os.WriteFile(filepath.Join(repo, "feature.txt"), []byte("dirty\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitInfo, err := os.Lstat(filepath.Join(repo, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootInfo, err := os.Lstat(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitDir, err := BindDirectory(filepath.Join(repo, ".git"), gitInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gitDir.Close()
+	workTree, err := BindDirectory(repo, rootInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workTree.Close()
+	moved := repo + ".moved"
+	victim := t.TempDir()
+	if err := os.WriteFile(filepath.Join(victim, "feature.txt"), []byte("preserve\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = outputBoundWithHook(context.Background(), Hermetic, 1<<20, gitDir, workTree, func() error {
+		if err := os.Rename(repo, moved); err != nil {
+			return err
+		}
+		return os.Symlink(victim, repo)
+	}, "checkout", "--", "feature.txt")
+	if !errors.Is(err, ErrBoundDirectoryChanged) {
+		t.Fatalf("OutputBoundDirectories() error = %v, want binding change", err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(victim, "feature.txt")); err != nil || string(contents) != "preserve\n" {
+		t.Fatalf("substituted victim = %q, %v", contents, err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(moved, "feature.txt")); err != nil || string(contents) != "original\n" {
+		t.Fatalf("descriptor-bound original = %q, %v", contents, err)
+	}
+	if _, err := gitDir.file.Stat(); err != nil {
+		t.Fatalf("Git command closed caller binding: %v", err)
+	}
+}
+
+func TestOutputBoundDirectoriesRejectsCancellationAndUnsupportedPlatform(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		if _, err := OutputBoundDirectories(context.Background(), Hermetic, 64, nil, nil, "status"); !errors.Is(err, runner.ErrUnsupportedPlatform) {
+			t.Fatalf("non-Linux error = %v", err)
+		}
+		return
+	}
+	repo := t.TempDir()
+	mustGit(t, repo, "init", "-q")
+	gitInfo, _ := os.Lstat(filepath.Join(repo, ".git"))
+	rootInfo, _ := os.Lstat(repo)
+	gitDir, err := BindDirectory(filepath.Join(repo, ".git"), gitInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gitDir.Close()
+	workTree, err := BindDirectory(repo, rootInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workTree.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := OutputBoundDirectories(ctx, Hermetic, 64, gitDir, workTree, "status"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled bound output error = %v", err)
+	}
+}
 
 func TestEnvStripsMixedCaseGitVariablesForBothPolicies(t *testing.T) {
 	t.Setenv("git_dir", "/tmp/other-repository")

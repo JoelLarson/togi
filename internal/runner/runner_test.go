@@ -3,14 +3,32 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv("TOGI_RUNNER_EXTRA_FILE_HELPER") != "" {
+		contents, err := os.ReadFile("/proc/self/fd/3/marker")
+		if err != nil {
+			_, _ = fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		_, _ = os.Stdout.Write(contents)
+		if os.Getenv("TOGI_RUNNER_EXTRA_FILE_BLOCK") != "" {
+			for {
+				time.Sleep(time.Hour)
+			}
+		}
+		os.Exit(0)
+	}
 	if os.Getenv("TOGI_RUNNER_STDIN_HELPER") != "" {
 		if _, err := io.Copy(os.Stdout, os.Stdin); err != nil {
 			_, _ = fmt.Fprintln(os.Stderr, err)
@@ -19,6 +37,64 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func TestRunPassesExplicitExtraFilesWithoutTakingOwnership(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/proc descriptor binding is Linux-only")
+	}
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "marker"), []byte("bound\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := Run(context.Background(), ".", []string{executable, "-test.run=TestRunExtraFileHelper"}, Options{
+		Env: append(os.Environ(), "TOGI_RUNNER_EXTRA_FILE_HELPER=1"), ExtraFiles: []*os.File{root}, StdoutLimit: 64, StderrLimit: 64,
+	})
+	if result.RunErr != nil || result.CleanupErr != nil || string(result.Stdout.Bytes()) != "bound\n" {
+		t.Fatalf("Run() = (%q, %v, %v)", result.Stdout.Bytes(), result.RunErr, result.CleanupErr)
+	}
+	if _, err := root.Stat(); err != nil {
+		t.Fatalf("Run() closed caller-owned descriptor: %v", err)
+	}
+}
+
+func TestRunCancellationReapsChildWithoutClosingExtraFile(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("/proc descriptor binding is Linux-only")
+	}
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "marker"), []byte("bound\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.Open(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	result := Run(ctx, ".", []string{executable, "-test.run=TestRunExtraFileHelper"}, Options{
+		Env: append(os.Environ(), "TOGI_RUNNER_EXTRA_FILE_HELPER=1", "TOGI_RUNNER_EXTRA_FILE_BLOCK=1"), ExtraFiles: []*os.File{root}, StdoutLimit: 64, StderrLimit: 64,
+	})
+	if !errors.Is(result.RunErr, context.DeadlineExceeded) && ctx.Err() == nil {
+		t.Fatalf("Run() cancellation = %v", result.RunErr)
+	}
+	if _, err := root.Stat(); err != nil {
+		t.Fatalf("canceled Run() closed caller-owned descriptor: %v", err)
+	}
 }
 
 func TestRunSuppliesStdin(t *testing.T) {

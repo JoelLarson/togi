@@ -77,6 +77,12 @@ type WorkspaceSpec struct {
 // Workspace owns the Git state used by the serial fix loop.
 type Workspace struct {
 	repositoryRoot                string
+	featureRootInfo               os.FileInfo
+	featureDotGit                 exactFile
+	featureGitDir                 string
+	featureGitDirInfo             os.FileInfo
+	featureIndexPath              string
+	featureIndex                  exactFile
 	path                          string
 	gitDir                        string
 	commonDir                     string
@@ -91,6 +97,8 @@ type Workspace struct {
 	cacheRootInfo                 os.FileInfo
 	branch                        string
 	green                         string
+	originalHead                  string
+	featureBranch                 string
 	identity                      Identity
 	beforeIndexInstall            func() error
 	beforeResetFinal              func() error
@@ -101,6 +109,31 @@ type Workspace struct {
 	validationMaterializeFailure  func() error
 	validationDiscardFailure      func() error
 	validationBeforePrivateRemove func() error
+	beforeSquashRefUpdate         func() error
+	afterSquashRefUpdate          func() error
+	beforeLandingMerge            func() error
+	afterLandingMerge             func() error
+	beforeLandingExec             func() error
+	afterLandingBind              func() error
+	beforeLandingStart            func() error
+	beforeLandingRecovery         func() error
+	landingEvidenceBeforeRemove   func() error
+	beforeLandingBindingClose     func() error
+	newLandingContext             func() (context.Context, context.CancelFunc)
+	beforeWorktreeRemove          func() error
+	afterWorktreeRemove           func() error
+	beforeWorktreeQuarantine      func() error
+	beforeRegistrationRemove      func() error
+	removeWorktree                func(context.Context) error
+	beforeCleanupRefDelete        func() error
+	deleteRunRef                  func(context.Context, string, string) error
+	cleanupWorktreeRemoved        bool
+	cleanupRegistrationRemoved    bool
+	cleanupQuarantine             *privateTempDir
+	cleanupRunRefDeleted          bool
+	cleanupPreserved              bool
+	cleanupDisposition            CleanupDisposition
+	landingComplete               bool
 }
 
 // Root returns the adapter-visible worktree root.
@@ -495,10 +528,18 @@ func createWorkspace(ctx context.Context, spec WorkspaceSpec, hooks workspaceCre
 		return nil, errors.Join(err, cleanupErr)
 	}
 
-	workspace := &Workspace{repositoryRoot: repositoryRoot, path: path, gitDir: gitDir, commonDir: commonDir, branch: branch, green: spec.OriginalHead, identity: spec.Identity}
+	workspace := &Workspace{
+		repositoryRoot: repositoryRoot, path: path, gitDir: gitDir, commonDir: commonDir,
+		branch: branch, green: spec.OriginalHead, originalHead: spec.OriginalHead,
+		featureBranch: spec.FeatureBranch, identity: spec.Identity,
+	}
 	if err := workspace.bindControlState(); err != nil {
 		cleanupErr := cleanupFailedWorkspaceCreation(ctx, repositoryRoot, commonDir, commonInfo, path, branch, spec.OriginalHead)
 		return nil, errors.Join(errors.New("bind created workspace control state"), cleanupErr)
+	}
+	if err := workspace.bindFeatureCheckout(ctx); err != nil {
+		cleanupErr := cleanupFailedWorkspaceCreation(ctx, repositoryRoot, commonDir, commonInfo, path, branch, spec.OriginalHead)
+		return nil, errors.Join(errors.New("bind feature checkout control state"), cleanupErr)
 	}
 	if err := workspace.validate(ctx); err != nil {
 		cleanupErr := cleanupFailedWorkspaceCreation(ctx, repositoryRoot, commonDir, commonInfo, path, branch, spec.OriginalHead)
@@ -670,14 +711,14 @@ func (w *Workspace) ResetAttempt(ctx context.Context) error {
 	if err := w.requireDirectRunRef(ctx, w.green, true); err != nil {
 		return fmt.Errorf("refuse attempt reset: %w", err)
 	}
-	if _, err := gitcmd.Output(ctx, w.repositoryRoot, gitcmd.Hermetic, gitOutputLimit,
+	if _, err := gitcmd.Output(ctx, w.path, gitcmd.Hermetic, gitOutputLimit,
 		"--git-dir="+w.commonDir, "-c", "core.hooksPath="+os.DevNull, "update-ref", "--no-deref", ref, w.green, w.green); err != nil {
 		return errors.New("refuse attempt reset: run ref moved from latest green commit")
 	}
 	if err := w.validateAttemptIndexBinding(); err != nil {
 		return fmt.Errorf("refuse attempt tree reset: %w", err)
 	}
-	expectedTree, err := gitPath(ctx, w.repositoryRoot, "--git-dir="+w.commonDir, "rev-parse", w.green+"^{tree}")
+	expectedTree, err := gitPath(ctx, w.path, "--git-dir="+w.commonDir, "rev-parse", w.green+"^{tree}")
 	if err != nil {
 		return errors.New("resolve latest green tree")
 	}
@@ -1330,7 +1371,7 @@ func (w *Workspace) compareAndSwapBatchRef(ctx context.Context, ref, next, previ
 }
 
 func (w *Workspace) updateBatchRefDirect(ctx context.Context, ref, next, previous string) error {
-	_, err := gitcmd.Output(ctx, w.repositoryRoot, gitcmd.Hermetic, gitOutputLimit,
+	_, err := gitcmd.Output(ctx, w.path, gitcmd.Hermetic, gitOutputLimit,
 		"--git-dir="+w.commonDir, "-c", "core.hooksPath="+os.DevNull, "update-ref", "--no-deref", ref, next, previous)
 	return err
 }
@@ -1344,12 +1385,12 @@ func (w *Workspace) RollbackBatch(ctx context.Context, commit string) error {
 	if err := w.requireDirectRunRef(ctx, commit, false); err != nil {
 		return fmt.Errorf("refuse batch rollback: %w", err)
 	}
-	parent, err := gitPath(ctx, w.repositoryRoot, "--git-dir="+w.commonDir, "rev-parse", commit+"^")
+	parent, err := gitPath(ctx, w.path, "--git-dir="+w.commonDir, "rev-parse", commit+"^")
 	if err != nil || !validObjectID(parent) {
 		return errors.New("refuse batch rollback: resolve exact parent")
 	}
 	ref := "refs/heads/" + w.branch
-	if _, err := gitcmd.Output(ctx, w.repositoryRoot, gitcmd.Hermetic, gitOutputLimit,
+	if _, err := gitcmd.Output(ctx, w.path, gitcmd.Hermetic, gitOutputLimit,
 		"--git-dir="+w.commonDir, "-c", "core.hooksPath="+os.DevNull, "update-ref", "--no-deref", ref, parent, commit); err != nil {
 		return errors.New("refuse batch rollback: run ref moved from committed batch")
 	}
@@ -1374,7 +1415,7 @@ func (w *Workspace) requireDirectRunRef(ctx context.Context, expected string, al
 	if err != nil || head != "refs/heads/"+w.branch {
 		return errors.New("workspace HEAD is not the owned run branch")
 	}
-	state, err := inspectRefStateAt(ctx, w.repositoryRoot, w.commonDir, head)
+	state, err := inspectRefStateAt(ctx, w.path, w.commonDir, head)
 	if err != nil {
 		return errors.New("inspect owned run ref")
 	}
@@ -2036,11 +2077,15 @@ func (w *Workspace) snapshotIndex(ctx context.Context, gitDir, commonDir string)
 }
 
 func (w *Workspace) snapshotGitFiles(ctx context.Context, names []string, gitDir, commonDir string) (map[string]exactFile, error) {
-	before, err := w.snapshotGitFilesOnce(ctx, names, gitDir, commonDir)
+	return w.snapshotGitFilesAt(ctx, w.path, names, gitDir, commonDir)
+}
+
+func (w *Workspace) snapshotGitFilesAt(ctx context.Context, root string, names []string, gitDir, commonDir string) (map[string]exactFile, error) {
+	before, err := w.snapshotGitFilesOnceAt(ctx, root, names, gitDir, commonDir)
 	if err != nil {
 		return nil, err
 	}
-	after, err := w.snapshotGitFilesOnce(ctx, names, gitDir, commonDir)
+	after, err := w.snapshotGitFilesOnceAt(ctx, root, names, gitDir, commonDir)
 	if err != nil || !exactFileStableMapsEqual(before, after) {
 		return nil, errors.New("Git control files changed while snapshotting")
 	}
@@ -2048,11 +2093,18 @@ func (w *Workspace) snapshotGitFiles(ctx context.Context, names []string, gitDir
 }
 
 func (w *Workspace) snapshotGitFilesOnce(ctx context.Context, names []string, gitDir, commonDir string) (map[string]exactFile, error) {
+	return w.snapshotGitFilesOnceAt(ctx, w.path, names, gitDir, commonDir)
+}
+
+func (w *Workspace) snapshotGitFilesOnceAt(ctx context.Context, root string, names []string, gitDir, commonDir string) (map[string]exactFile, error) {
 	files := make(map[string]exactFile, len(names))
 	for _, name := range names {
-		path, err := gitPath(ctx, w.path, "rev-parse", "--path-format=absolute", "--git-path", name)
+		path, err := gitPath(ctx, root, "rev-parse", "--path-format=absolute", "--git-path", name)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s: %w", name, err)
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(root, path)
 		}
 		path, err = canonicalCandidate(path)
 		if err != nil {
@@ -2071,11 +2123,16 @@ func (w *Workspace) snapshotGitFilesOnce(ctx context.Context, names []string, gi
 }
 
 func (w *Workspace) snapshotLocalConfig(ctx context.Context, gitDir, commonDir string) ([]byte, map[string]exactFile, error) {
-	base, err := w.snapshotGitFiles(ctx, []string{"config", "config.worktree"}, gitDir, commonDir)
+	return w.snapshotLocalConfigAt(ctx, w.path, gitDir, commonDir)
+}
+
+func (w *Workspace) snapshotLocalConfigAt(ctx context.Context, root, gitDir, commonDir string) ([]byte, map[string]exactFile, error) {
+	base, err := w.snapshotGitFilesAt(ctx, root, []string{"config", "config.worktree"}, gitDir, commonDir)
 	if err != nil {
 		return nil, nil, err
 	}
-	localGraph, err := gitcmd.Output(ctx, w.path, gitcmd.Hermetic, gitOutputLimit,
+	localGraph, err := gitcmd.Output(ctx, root, gitcmd.Hermetic, gitOutputLimit,
+		"--git-dir="+gitDir, "--work-tree="+root,
 		"config", "--local", "--includes", "--show-origin", "--null", "--list")
 	if err != nil {
 		return nil, nil, err
@@ -2090,7 +2147,8 @@ func (w *Workspace) snapshotLocalConfig(ctx context.Context, gitDir, commonDir s
 	}
 	var worktreeGraph []byte
 	if worktreeEnabled && base["config.worktree"].exists {
-		worktreeGraph, err = gitcmd.Output(ctx, w.path, gitcmd.Hermetic, gitOutputLimit,
+		worktreeGraph, err = gitcmd.Output(ctx, root, gitcmd.Hermetic, gitOutputLimit,
+			"--git-dir="+gitDir, "--work-tree="+root,
 			"config", "--worktree", "--includes", "--show-origin", "--null", "--list")
 		if err != nil {
 			return nil, nil, err
@@ -2119,7 +2177,7 @@ func (w *Workspace) snapshotLocalConfig(ctx context.Context, gitDir, commonDir s
 		return nil, nil, errors.New("create private config snapshot state")
 	}
 	defer private.close()
-	includeGraph, err := validateContextConfigIncludeGraph(ctx, w.path, private, roots, activeOrigins, defaultConfigIncludeBudget)
+	includeGraph, err := validateContextConfigIncludeGraph(ctx, root, private, roots, activeOrigins, defaultConfigIncludeBudget)
 	if err != nil {
 		return nil, nil, errors.New("local config include graph exceeds safety bounds")
 	}
@@ -2175,7 +2233,7 @@ func (w *Workspace) snapshotLocalConfig(ctx context.Context, gitDir, commonDir s
 			return nil, nil, errors.New("local config target changed while snapshotting")
 		}
 	}
-	baseAfter, err := w.snapshotGitFiles(ctx, []string{"config", "config.worktree"}, gitDir, commonDir)
+	baseAfter, err := w.snapshotGitFilesAt(ctx, root, []string{"config", "config.worktree"}, gitDir, commonDir)
 	if err != nil || !exactFileStableMapsEqual(base, baseAfter) {
 		return nil, nil, errors.New("local config roots changed while snapshotting")
 	}

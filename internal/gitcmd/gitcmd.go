@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -30,7 +32,66 @@ var (
 
 // ErrOutputLimit means a stream exceeded its capture limit; it is always
 // wrapped in a *CommandError.
-var ErrOutputLimit = errors.New("output exceeded its limit")
+var (
+	ErrOutputLimit = errors.New("output exceeded its limit")
+	// ErrBoundDirectoryChanged means a descriptor-bound Git directory no
+	// longer has the exact named inode supplied by its caller.
+	ErrBoundDirectoryChanged = errors.New("bound Git directory path changed")
+)
+
+// BoundDirectory keeps one verified directory descriptor open across process
+// launch. Callers retain ownership and must close it after the transaction.
+type BoundDirectory struct {
+	path string
+	file *os.File
+	info os.FileInfo
+}
+
+// BindDirectory opens path without accepting a symlink or a different inode
+// from the caller's previously sampled directory.
+func BindDirectory(path string, expected os.FileInfo) (*BoundDirectory, error) {
+	if runtime.GOOS != "linux" {
+		return nil, runner.ErrUnsupportedPlatform
+	}
+	named, err := os.Lstat(path)
+	if err != nil || expected == nil || !named.IsDir() || named.Mode()&os.ModeSymlink != 0 || !os.SameFile(expected, named) {
+		return nil, ErrBoundDirectoryChanged
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	opened, openErr := file.Stat()
+	namedAfter, namedErr := os.Lstat(path)
+	if openErr != nil || namedErr != nil || !opened.IsDir() || !os.SameFile(expected, opened) || !os.SameFile(opened, namedAfter) {
+		_ = file.Close()
+		return nil, ErrBoundDirectoryChanged
+	}
+	return &BoundDirectory{path: path, file: file, info: opened}, nil
+}
+
+// Close releases the binding after the transaction boundary.
+func (binding *BoundDirectory) Close() error {
+	if binding == nil || binding.file == nil {
+		return nil
+	}
+	err := binding.file.Close()
+	binding.file = nil
+	return err
+}
+
+func (binding *BoundDirectory) validate() error {
+	if binding == nil || binding.file == nil || binding.info == nil {
+		return ErrBoundDirectoryChanged
+	}
+	opened, openErr := binding.file.Stat()
+	named, namedErr := os.Lstat(binding.path)
+	if openErr != nil || namedErr != nil || !named.IsDir() || named.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(binding.info, opened) || !os.SameFile(opened, named) {
+		return ErrBoundDirectoryChanged
+	}
+	return nil
+}
 
 const stderrCaptureLimit = 1 << 20
 
@@ -137,6 +198,11 @@ func OutputEnv(ctx context.Context, dir string, iso Isolation, limit int, extra 
 // The index path is supplied separately so arbitrary callers cannot inject
 // isolation-owned Git environment variables through OutputEnv.
 func OutputWithIndex(ctx context.Context, dir string, iso Isolation, limit int, indexPath string, args ...string) ([]byte, error) {
+	return OutputWithIndexInput(ctx, dir, iso, limit, indexPath, nil, args...)
+}
+
+// OutputWithIndexInput is OutputWithIndex with an explicit standard input.
+func OutputWithIndexInput(ctx context.Context, dir string, iso Isolation, limit int, indexPath string, input io.Reader, args ...string) ([]byte, error) {
 	if ctx == nil {
 		return nil, errors.New("git context is required")
 	}
@@ -151,7 +217,7 @@ func OutputWithIndex(ctx context.Context, dir string, iso Isolation, limit int, 
 		return nil, err
 	}
 	environment = append(environment, "GIT_INDEX_FILE="+indexPath)
-	return run(ctx, dir, iso, limit, environment, args...)
+	return runWithFilesInput(ctx, dir, iso, limit, environment, nil, input, args...)
 }
 
 // OutputWithConfig runs Git with one exact command-scope configuration entry.
@@ -179,13 +245,114 @@ func OutputWithConfig(ctx context.Context, dir string, iso Isolation, limit int,
 	return run(ctx, dir, iso, limit, environment, args...)
 }
 
+// OutputBoundDirectories runs Git through inherited directory descriptors so
+// a post-validation pathname replacement cannot redirect the mutation.
+func OutputBoundDirectories(ctx context.Context, iso Isolation, limit int, gitDir, workTree *BoundDirectory, args ...string) ([]byte, error) {
+	return outputBoundWithHook(ctx, iso, limit, gitDir, workTree, nil, args...)
+}
+
+// OutputBoundDirectoriesBeforeStart is OutputBoundDirectories with one
+// caller-supplied check after descriptor validation and immediately before
+// process construction. It exists for deterministic launch-race testing; a
+// production caller normally supplies nil.
+func OutputBoundDirectoriesBeforeStart(ctx context.Context, iso Isolation, limit int, gitDir, workTree *BoundDirectory, beforeStart func() error, args ...string) ([]byte, error) {
+	return outputBoundWithHookAndFile(ctx, iso, limit, gitDir, workTree, nil, beforeStart, args...)
+}
+
+func outputBoundWithHook(ctx context.Context, iso Isolation, limit int, gitDir, workTree *BoundDirectory, afterValidation func() error, args ...string) ([]byte, error) {
+	return outputBoundWithHookAndFile(ctx, iso, limit, gitDir, workTree, nil, afterValidation, args...)
+}
+
+// OutputBoundDirectoriesWithEvidence inherits evidence as fd 5 for a private
+// Git transaction hook while retaining the descriptor-bound Git paths.
+func OutputBoundDirectoriesWithEvidence(ctx context.Context, iso Isolation, limit int, gitDir, workTree *BoundDirectory, evidence *os.File, beforeStart func() error, args ...string) ([]byte, error) {
+	return OutputBoundDirectoriesWithEvidenceConfig(ctx, iso, limit, gitDir, workTree, evidence, beforeStart, nil, args...)
+}
+
+// OutputBoundDirectoriesWithEvidenceConfig also pins exact command-scope
+// configuration entries through Git's structured environment protocol.
+func OutputBoundDirectoriesWithEvidenceConfig(ctx context.Context, iso Isolation, limit int, gitDir, workTree *BoundDirectory, evidence *os.File, beforeStart func() error, config map[string]string, args ...string) ([]byte, error) {
+	if evidence == nil {
+		return nil, errors.New("Git evidence descriptor is required")
+	}
+	return outputBoundWithHookFileAndConfig(ctx, iso, limit, gitDir, workTree, evidence, beforeStart, config, args...)
+}
+
+func outputBoundWithHookAndFile(ctx context.Context, iso Isolation, limit int, gitDir, workTree *BoundDirectory, evidence *os.File, afterValidation func() error, args ...string) ([]byte, error) {
+	return outputBoundWithHookFileAndConfig(ctx, iso, limit, gitDir, workTree, evidence, afterValidation, nil, args...)
+}
+
+func outputBoundWithHookFileAndConfig(ctx context.Context, iso Isolation, limit int, gitDir, workTree *BoundDirectory, evidence *os.File, afterValidation func() error, config map[string]string, args ...string) ([]byte, error) {
+	if runtime.GOOS != "linux" {
+		return nil, runner.ErrUnsupportedPlatform
+	}
+	if ctx == nil {
+		return nil, errors.New("git context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := gitDir.validate(); err != nil {
+		return nil, err
+	}
+	if err := workTree.validate(); err != nil {
+		return nil, err
+	}
+	if afterValidation != nil {
+		if err := afterValidation(); err != nil {
+			return nil, err
+		}
+	}
+	environment, err := explicitEnv(iso, nil)
+	if err != nil {
+		return nil, err
+	}
+	configKeys := make([]string, 0, len(config))
+	for key, value := range config {
+		if key == "" || strings.IndexByte(key, 0) >= 0 || strings.IndexByte(value, 0) >= 0 {
+			return nil, errors.New("Git configuration key and value must contain no NUL")
+		}
+		configKeys = append(configKeys, key)
+	}
+	sort.Strings(configKeys)
+	if len(configKeys) != 0 {
+		environment = append(environment, "GIT_CONFIG_COUNT="+fmt.Sprint(len(configKeys)))
+		for index, key := range configKeys {
+			environment = append(environment,
+				fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", index, key),
+				fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", index, config[key]))
+		}
+	}
+	boundArgs := append([]string{"--git-dir=/proc/self/fd/3", "--work-tree=/proc/self/fd/4"}, args...)
+	files := []*os.File{gitDir.file, workTree.file}
+	if evidence != nil {
+		files = append(files, evidence)
+	}
+	output, runErr := runWithFiles(ctx, string(filepath.Separator), iso, limit, environment, files, boundArgs...)
+	bindingErr := errors.Join(gitDir.validate(), workTree.validate())
+	if bindingErr != nil {
+		return nil, errors.Join(runErr, ErrBoundDirectoryChanged, bindingErr)
+	}
+	return output, runErr
+}
+
 func run(ctx context.Context, dir string, iso Isolation, limit int, environment []string, args ...string) ([]byte, error) {
+	return runWithFiles(ctx, dir, iso, limit, environment, nil, args...)
+}
+
+func runWithFiles(ctx context.Context, dir string, iso Isolation, limit int, environment []string, files []*os.File, args ...string) ([]byte, error) {
+	return runWithFilesInput(ctx, dir, iso, limit, environment, files, nil, args...)
+}
+
+func runWithFilesInput(ctx context.Context, dir string, iso Isolation, limit int, environment []string, files []*os.File, input io.Reader, args ...string) ([]byte, error) {
 	argv := append([]string{"git"}, Args(iso, args...)...)
 	result := runner.Run(ctx, dir, argv, runner.Options{
 		Env:              environment,
+		Stdin:            input,
 		StdoutLimit:      limit,
 		StderrLimit:      stderrCaptureLimit,
 		TruncationMarker: truncationMarker,
+		ExtraFiles:       files,
 	})
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, errors.Join(ctxErr, result.CleanupErr)
