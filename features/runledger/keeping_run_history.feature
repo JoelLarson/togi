@@ -20,6 +20,17 @@ Feature: Keeping run history
       When I inspect status from the primary worktree
       Then status renders the linked worktree run
 
+    Scenario: Shallow clones of one remote share one repository history
+      Given two shallow clones of the same remote using different URL forms
+      And a completed run in the first clone
+      When I inspect status from the second clone
+      Then status renders the first clone's run
+      And both clones persist under the same repository state directory
+
+    Scenario: Unrelated empty repositories keep separate history
+      Given two empty repositories with no remotes
+      Then the repositories persist under different state directories
+
   Rule: The repository history has one active writer
     Scenario: A second run is rejected while the first run is active
       Given a committed Go repository with a gate paused after startup
