@@ -16,6 +16,7 @@ import (
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/flywheel"
 	"github.com/joellarson/togi/internal/gitcmd"
+	"github.com/joellarson/togi/internal/waiver"
 )
 
 // SuiteRunner is the behavioral-suite boundary used by fix orchestration.
@@ -99,6 +100,18 @@ type fixExecution struct {
 	cleanup   func() error
 }
 
+func loadWaivedFingerprints(stateDir string) (map[string]struct{}, error) {
+	records, err := (waiver.Store{Dir: stateDir}).Load()
+	if err != nil {
+		return nil, fmt.Errorf("load waivers: %w", err)
+	}
+	result := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		result[record.Fingerprint] = struct{}{}
+	}
+	return result, nil
+}
+
 func (service Service) runFix(ctx context.Context, opts Options, prepared preparedRun) (report Report, resultErr error) {
 	now := service.Now
 	if now == nil {
@@ -120,6 +133,10 @@ func (service Service) runFix(ctx context.Context, opts Options, prepared prepar
 	rails, err := flywheel.NewRails(flywheel.RailConfig{MaxIterations: opts.MaxIterations, MaxWallClock: opts.MaxWallClock}, now)
 	if err != nil {
 		return Report{}, fmt.Errorf("construct fix rails: %w", err)
+	}
+	waivedFingerprints, err := loadWaivedFingerprints(prepared.repoState)
+	if err != nil {
+		return Report{}, err
 	}
 	suite := service.Suite
 	if suite == nil {
@@ -159,7 +176,7 @@ func (service Service) runFix(ctx context.Context, opts Options, prepared prepar
 		execution.verdict = VerdictUnsealed
 		execution.landing.Status = string(flywheel.LandingNotNeeded)
 	default:
-		execution = service.executeFixLoop(ctx, opts, prepared, active, suite, rails, execution, blockers)
+		execution = service.executeFixLoop(ctx, opts, prepared, active, suite, rails, execution, blockers, waivedFingerprints)
 	}
 	cleanupDone := execution.cleanup == nil
 	defer func() {
@@ -220,7 +237,7 @@ func (service Service) runFix(ctx context.Context, opts Options, prepared prepar
 	return report, &ExitError{Code: ExitCode(report.Verdict), Err: verdictError(report.Verdict)}
 }
 
-func (service Service) executeFixLoop(ctx context.Context, opts Options, prepared preparedRun, active *RunLedger, suite SuiteRunner, rails *flywheel.Rails, execution fixExecution, blockers []finding.Finding) (result fixExecution) {
+func (service Service) executeFixLoop(ctx context.Context, opts Options, prepared preparedRun, active *RunLedger, suite SuiteRunner, rails *flywheel.Rails, execution fixExecution, blockers []finding.Finding, waivedFingerprints map[string]struct{}) (result fixExecution) {
 	selected, ok := service.Adapters[opts.Agent]
 	if !ok || isNilInterface(selected) {
 		execution.failure = fmt.Errorf("agent adapter %q is unavailable", opts.Agent)
@@ -263,7 +280,7 @@ func (service Service) executeFixLoop(ctx context.Context, opts Options, prepare
 	execution.cleanup = func() error { return workspace.Cleanup(ctx, cleanupDisposition) }
 
 	tracked := &usageAdapter{Adapter: selected}
-	validator := flywheel.AttemptValidator{Original: original, Baseline: blockers}
+	validator := flywheel.AttemptValidator{Original: original, Baseline: blockers, WaivedFingerprints: waivedFingerprints}
 	var barrierReports []GateReport
 	validator.RunGates = func(validationCtx context.Context, root string, batch flywheel.Batch) flywheel.GateValidation {
 		reports, runErr := service.collectValidationGates(validationCtx, active, prepared, workspace.Root(), root, true, validationRequests(prepared.requests, batch.Findings))

@@ -671,6 +671,41 @@ func TestAttemptValidatorRejectsIntegrityFindingsBeforeCallbacks(t *testing.T) {
 	}
 }
 
+func TestAttemptValidatorAllowsWaivedIntegrityFindings(t *testing.T) {
+	root := t.TempDir()
+	writeValidationFile(t, root, "go.mod", "module example.test/project\n\ngo 1.25\n")
+	writeValidationFile(t, root, "pkg/a.go", "package pkg\nfunc A() {}\n")
+	original := TreeSnapshot{Files: map[string][]byte{
+		"pkg/a.go":      []byte("package pkg\nfunc A() {}\n"),
+		"pkg/a_test.go": []byte("package pkg\nimport \"testing\"\nfunc TestA(t *testing.T) { A() }\n"),
+	}}
+	assigned := validationFinding(t, "lint", "pkg/a.go", "lint/a", 1)
+	withoutWaiver := AttemptValidator{
+		Original: original, Baseline: []finding.Finding{assigned},
+		RunGates:    func(context.Context, string, Batch) GateValidation { return GateValidation{} },
+		RunPackages: func(context.Context, string, []string, bool) SuiteValidation { return SuiteValidation{Passed: true} },
+	}
+	blocked := withoutWaiver.Validate(context.Background(), root, []string{"pkg/a_test.go"}, validationBatch(t, root, assigned))
+	if len(blocked.Findings) == 0 {
+		t.Fatalf("unwaived validation = %#v, want integrity finding", blocked)
+	}
+	partial := withoutWaiver
+	partial.WaivedFingerprints = map[string]struct{}{blocked.Findings[0].Fingerprint: {}}
+	stillBlocked := partial.Validate(context.Background(), root, []string{"pkg/a_test.go"}, validationBatch(t, root, assigned))
+	if stillBlocked.Kind != ValidationSemanticFailure || len(stillBlocked.Findings) == 0 {
+		t.Fatalf("partially waived validation = %#v, want remaining integrity finding", stillBlocked)
+	}
+	waived := withoutWaiver
+	waived.WaivedFingerprints = make(map[string]struct{}, len(blocked.Findings))
+	for _, item := range blocked.Findings {
+		waived.WaivedFingerprints[item.Fingerprint] = struct{}{}
+	}
+	result := waived.Validate(context.Background(), root, []string{"pkg/a_test.go"}, validationBatch(t, root, assigned))
+	if result.Kind != ValidationPassed {
+		t.Fatalf("waived validation = %#v, want passed", result)
+	}
+}
+
 func TestAttemptValidatorStopsOnCancellationAndPreservesCause(t *testing.T) {
 	root := t.TempDir()
 	writeValidationFile(t, root, "go.mod", "module example.test/project\n\ngo 1.25\n")

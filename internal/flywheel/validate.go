@@ -44,6 +44,8 @@ type SuiteValidation struct {
 type AttemptValidator struct {
 	Original TreeSnapshot
 	Baseline []finding.Finding
+	// WaivedFingerprints removes only explicitly approved integrity findings.
+	WaivedFingerprints map[string]struct{}
 
 	RunGates    func(context.Context, string, Batch) GateValidation
 	RunPackages func(context.Context, string, []string, bool) SuiteValidation
@@ -112,7 +114,15 @@ func (validator AttemptValidator) Validate(ctx context.Context, root string, cha
 		return validationFailure(result, ValidationInfrastructureFailure, "evaluate integrity evidence: "+integrity.Err.Error(), nil)
 	}
 	if len(integrity.Findings) != 0 {
-		return validationFailure(result, ValidationSemanticFailure, "integrity validation found regressions", integrity.Findings)
+		unwaived := integrity.Findings[:0]
+		for _, item := range integrity.Findings {
+			if _, waived := validator.WaivedFingerprints[item.Fingerprint]; !waived {
+				unwaived = append(unwaived, item)
+			}
+		}
+		if len(unwaived) != 0 {
+			return validationFailure(result, ValidationSemanticFailure, "integrity validation found regressions", unwaived)
+		}
 	}
 	if err := verifyPreparedBatchRecovering(ctx, batch.proof); err != nil {
 		return validationFailure(result, ValidationInfrastructureFailure, "prepared batch invalid after integrity validation: "+err.Error(), nil)
