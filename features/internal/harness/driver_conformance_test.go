@@ -43,6 +43,12 @@ func TestDriverConformance(t *testing.T) {
 	if service.show != cli.show || service.lint != cli.lint || service.eject != cli.eject {
 		t.Fatalf("wiki output differs:\nservice: %#v\ncli: %#v", service, cli)
 	}
+	if service.waive != cli.waive || service.waiveOutcome != cli.waiveOutcome {
+		t.Fatalf("waive output differs:\nservice: %q (%d)\ncli: %q (%d)", service.waive, service.waiveOutcome, cli.waive, cli.waiveOutcome)
+	}
+	if service.waivers != cli.waivers {
+		t.Fatalf("persisted waivers differ:\nservice: %q\ncli: %q", service.waivers, cli.waivers)
+	}
 }
 
 func TestFixDriverRailConformance(t *testing.T) {
@@ -107,6 +113,9 @@ type driverExercise struct {
 	show          string
 	lint          string
 	eject         string
+	waive         string
+	waiveOutcome  int
+	waivers       string
 }
 
 func exerciseDriver(t *testing.T, factory DriverFactory) driverExercise {
@@ -180,13 +189,61 @@ func exerciseDriver(t *testing.T, factory DriverFactory) driverExercise {
 	if err != nil {
 		t.Fatal(err)
 	}
+	waiver, err := factory.NewWaiver(environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer waiver.Close()
+	waived, err := waiver.Waive(context.Background(), WaiveRequest{
+		Root:        repository.Root,
+		Fingerprint: conformanceFingerprint,
+		Reason:      "the deleted test covered a removed feature",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiveOutcome, err := waived.Outcome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	waivers := persistedWaivers(t, environment, repository)
 	return driverExercise{
 		report: normalizeReport(report), runOutcome: runOutcome.Code,
 		status: normalizeDuration(status.Stdout()), statusOutcome: statusOutcome.Code,
 		show: show.Stdout(), lint: lint.Stdout(), eject: strings.ReplaceAll(eject.Stdout(), environment.ConfigRoot, "<config>"),
+		waive: normalizeApprovalTime(waived.Stdout()), waiveOutcome: waiveOutcome.Code, waivers: waivers,
 	}
 }
 
+const conformanceFingerprint = "0f2ac1e1b8f7c8b56b6da5e0f9dc0f6e6c1a2b3c4d5e6f708192a3b4c5d6e7f8"
+
+// persistedWaivers reads the approval each driver recorded, with its time
+// normalized: the two boundaries record their own approval instants.
+func persistedWaivers(t *testing.T, environment *Environment, repository *Repository) string {
+	t.Helper()
+	state, err := environment.RepoState(context.Background(), repository.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isWithin(repository.Root, state) {
+		t.Fatalf("waiver state %q is inside target repository", state)
+	}
+	body, err := os.ReadFile(filepath.Join(state, "waivers.toml"))
+	if err != nil {
+		t.Fatalf("read persisted waivers: %v", err)
+	}
+	return normalizeApprovalTime(string(body))
+}
+
+var approvalTime = regexp.MustCompile(`[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z`)
+
+func normalizeApprovalTime(value string) string {
+	return approvalTime.ReplaceAllString(value, "<approved-at>")
+}
+
+// normalizeReport removes what a run cannot repeat: its identifier and its
+// clock. Repository identity and commit IDs stay compared, because a
+// date-pinned fixture makes them the same on both boundaries.
 func normalizeReport(report Report) Report {
 	report.RunID = ""
 	report.StartedAt = time.Time{}

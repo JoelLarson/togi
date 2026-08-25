@@ -36,6 +36,9 @@ func TestWorldRejectsUnavailablePort(t *testing.T) {
 	if _, err := world.History(); err != ErrUnsupportedCapability {
 		t.Fatalf("History() = %v, want ErrUnsupportedCapability", err)
 	}
+	if _, err := world.Waiver(); err != ErrUnsupportedCapability {
+		t.Fatalf("Waiver() = %v, want ErrUnsupportedCapability", err)
+	}
 }
 
 type worldFactory struct{ gauntlet *worldGauntlet }
@@ -46,6 +49,9 @@ func (*worldFactory) NewHistory(*Environment) (HistoryDriver, error) {
 	return nil, ErrUnsupportedCapability
 }
 func (*worldFactory) NewWiki(*Environment) (WikiDriver, error) { return nil, ErrUnsupportedCapability }
+func (*worldFactory) NewWaiver(*Environment) (WaiverDriver, error) {
+	return nil, ErrUnsupportedCapability
+}
 func (f *worldFactory) NewGauntlet(*Environment) (GauntletDriver, error) {
 	if f.gauntlet == nil {
 		f.gauntlet = &worldGauntlet{}

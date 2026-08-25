@@ -10,6 +10,7 @@ need to see how application language maps to a driver action.
 - [Fixing a feature diff safely](gauntlet/fixing_a_feature_diff.feature)
 - [Keeping run history](runledger/keeping_run_history.feature)
 - [Customizing gates](gate/customizing_gates.feature)
+- [Approving a finding](waiver/approving_a_finding.feature)
 - [Using principle pages](wiki/using_principle_pages.feature)
 - [Customizing principle pages](wiki/customizing_principle_pages.feature)
 - [Supporting platforms](platform/supporting_platforms.feature)
@@ -18,7 +19,8 @@ need to see how application language maps to a driver action.
 Read **Running the gauntlet** first for the core report contract, then
 **Judging a feature diff** for scope and **Fixing a feature diff safely** for
 the guarded fix loop. The remaining features can be read by domain: history,
-gate customization, principle pages, and platform support.
+gate customization, operator approvals, principle pages, and platform
+support.
 
 The default command runs the application service driver:
 

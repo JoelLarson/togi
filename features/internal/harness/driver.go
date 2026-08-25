@@ -27,6 +27,7 @@ type DriverFactory interface {
 	NewGauntlet(*Environment) (GauntletDriver, error)
 	NewHistory(*Environment) (HistoryDriver, error)
 	NewWiki(*Environment) (WikiDriver, error)
+	NewWaiver(*Environment) (WaiverDriver, error)
 }
 
 type GauntletDriver interface {
@@ -37,6 +38,20 @@ type GauntletDriver interface {
 type HistoryDriver interface {
 	Status(context.Context, StatusRequest) (CommandObservation, error)
 	Close() error
+}
+
+// WaiverDriver records operator approvals. Waivers live in the repository's
+// state directory, which the in-process service and a separately spawned
+// binary can resolve differently, so both boundaries implement it.
+type WaiverDriver interface {
+	Waive(context.Context, WaiveRequest) (CommandObservation, error)
+	Close() error
+}
+
+type WaiveRequest struct {
+	Root        string
+	Fingerprint string
+	Reason      string
 }
 
 type WikiDriver interface {
@@ -378,6 +393,7 @@ const (
 	NeedsGauntlet Capabilities = 1 << iota
 	NeedsHistory
 	NeedsWiki
+	NeedsWaiver
 )
 
 type World struct {
@@ -388,6 +404,7 @@ type World struct {
 	gauntlet     GauntletDriver
 	history      HistoryDriver
 	wiki         WikiDriver
+	waiver       WaiverDriver
 	lastRun      RunObservation
 	lastCommand  CommandObservation
 }
@@ -421,6 +438,9 @@ func (w *World) Before(ctx context.Context, _ *godog.Scenario) (context.Context,
 	if err == nil && w.capabilities&NeedsWiki != 0 {
 		w.wiki, err = w.factory.NewWiki(environment)
 	}
+	if err == nil && w.capabilities&NeedsWaiver != 0 {
+		w.waiver, err = w.factory.NewWaiver(environment)
+	}
 	if err != nil {
 		_, cleanupErr := w.After(ctx, nil, err)
 		return ctx, errors.Join(err, cleanupErr)
@@ -429,6 +449,10 @@ func (w *World) Before(ctx context.Context, _ *godog.Scenario) (context.Context,
 }
 func (w *World) After(ctx context.Context, _ *godog.Scenario, scenarioErr error) (context.Context, error) {
 	var result error
+	if w.waiver != nil {
+		result = errors.Join(result, w.waiver.Close())
+		w.waiver = nil
+	}
 	if w.wiki != nil {
 		result = errors.Join(result, w.wiki.Close())
 		w.wiki = nil
@@ -476,6 +500,24 @@ func (w *World) Wiki() (WikiDriver, error) {
 		return nil, ErrUnsupportedCapability
 	}
 	return w.wiki, nil
+}
+func (w *World) Waiver() (WaiverDriver, error) {
+	if w.waiver == nil {
+		return nil, ErrUnsupportedCapability
+	}
+	return w.waiver, nil
+}
+func (w *World) Waive(ctx context.Context, request WaiveRequest) error {
+	driver, err := w.Waiver()
+	if err != nil {
+		return err
+	}
+	observation, err := driver.Waive(ctx, request)
+	if err != nil {
+		return err
+	}
+	w.lastCommand = observation
+	return nil
 }
 func (w *World) Run(ctx context.Context, request RunRequest) error {
 	driver, err := w.Gauntlet()

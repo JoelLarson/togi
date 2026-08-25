@@ -44,6 +44,13 @@ func (serviceFactory) NewWiki(env *Environment) (WikiDriver, error) {
 	return serviceWiki{environment: env}, nil
 }
 
+func (serviceFactory) NewWaiver(env *Environment) (WaiverDriver, error) {
+	if env == nil {
+		return nil, errors.New("scenario environment is required")
+	}
+	return serviceWaiver{environment: env}, nil
+}
+
 type serviceGauntlet struct{ environment *Environment }
 
 func (d serviceGauntlet) Run(ctx context.Context, request RunRequest) (RunObservation, error) {
@@ -106,6 +113,16 @@ func (d serviceHistory) Status(ctx context.Context, request StatusRequest) (Comm
 	return CommandObservation{stdout: cloneBytes(stdout.Bytes()), stderr: cloneBytes(stderr.Bytes()), source: serviceExit{err: err}}, nil
 }
 func (serviceHistory) Close() error { return nil }
+
+type serviceWaiver struct{ environment *Environment }
+
+func (d serviceWaiver) Waive(ctx context.Context, request WaiveRequest) (CommandObservation, error) {
+	var stdout, stderr bytes.Buffer
+	_, err := (serviceGauntlet{environment: d.environment}).service(&stdout, &stderr).
+		Waive(ctx, request.Root, request.Fingerprint, request.Reason)
+	return CommandObservation{stdout: cloneBytes(stdout.Bytes()), stderr: cloneBytes(stderr.Bytes()), source: serviceExit{err: err}}, nil
+}
+func (serviceWaiver) Close() error { return nil }
 
 type serviceWiki struct{ environment *Environment }
 

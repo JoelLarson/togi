@@ -34,6 +34,12 @@ func (f cliFactory) NewWiki(env *Environment) (WikiDriver, error) {
 	}
 	return cliWiki{factory: f, environment: env}, nil
 }
+func (f cliFactory) NewWaiver(env *Environment) (WaiverDriver, error) {
+	if err := f.validate(env); err != nil {
+		return nil, err
+	}
+	return cliWaiver{factory: f, environment: env}, nil
+}
 func (f cliFactory) validate(env *Environment) error {
 	if env == nil {
 		return errors.New("scenario environment is required")
@@ -144,6 +150,21 @@ func (d cliWiki) invoke(ctx context.Context, arguments ...string) (CommandObserv
 	}
 	return newProcessCommandObservation(command), nil
 }
+
+type cliWaiver struct {
+	factory     cliFactory
+	environment *Environment
+}
+
+func (d cliWaiver) Waive(ctx context.Context, request WaiveRequest) (CommandObservation, error) {
+	command, err := (cliGauntlet{factory: d.factory, environment: d.environment}).
+		invoke(ctx, request.Root, "waive", request.Fingerprint, "--reason", request.Reason)
+	if err != nil {
+		return CommandObservation{}, err
+	}
+	return newProcessCommandObservation(command), nil
+}
+func (cliWaiver) Close() error { return nil }
 
 type processCommand struct {
 	stdout []byte
