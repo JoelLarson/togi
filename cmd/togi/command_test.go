@@ -13,6 +13,7 @@ import (
 	"github.com/joellarson/togi/internal/config"
 	"github.com/joellarson/togi/internal/enricher"
 	runpkg "github.com/joellarson/togi/internal/run"
+	"github.com/joellarson/togi/internal/waiver"
 )
 
 func TestVersionCommand(t *testing.T) {
@@ -29,13 +30,18 @@ func TestVersionCommand(t *testing.T) {
 }
 
 type fakeService struct {
-	ctx           context.Context
-	runOptions    runpkg.Options
-	runCalls      int
-	runErr        error
-	statusRoot    string
-	statusNoColor bool
-	statusErr     error
+	ctx              context.Context
+	runOptions       runpkg.Options
+	runCalls         int
+	runErr           error
+	statusRoot       string
+	statusNoColor    bool
+	statusErr        error
+	waiveRoot        string
+	waiveFingerprint string
+	waiveReason      string
+	waiveCalls       int
+	waiveErr         error
 }
 
 type commandExitError struct {
@@ -55,6 +61,13 @@ func (service *fakeService) Run(ctx context.Context, opts runpkg.Options) (runpk
 func (service *fakeService) Status(_ context.Context, root string, noColor bool) (runpkg.Report, error) {
 	service.statusRoot, service.statusNoColor = root, noColor
 	return runpkg.Report{}, service.statusErr
+}
+
+func (service *fakeService) Waive(ctx context.Context, root, fingerprint, reason string) (waiver.Record, error) {
+	service.ctx = ctx
+	service.waiveRoot, service.waiveFingerprint, service.waiveReason = root, fingerprint, reason
+	service.waiveCalls++
+	return waiver.Record{Fingerprint: fingerprint, Reason: reason}, service.waiveErr
 }
 
 func TestRunCommandPassesFlags(t *testing.T) {

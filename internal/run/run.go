@@ -259,20 +259,9 @@ type preparedRun struct {
 }
 
 func (service Service) prepareRun(ctx context.Context, opts Options) (preparedRun, error) {
-	root := opts.Root
-	if root == "" {
-		root = "."
-	}
-	resolve := service.ResolveRepo
-	if resolve == nil {
-		resolve = repoid.Resolve
-	}
-	repository, err := resolve(ctx, root)
+	repository, err := service.resolveRepository(ctx, opts.Root)
 	if err != nil {
-		return preparedRun{}, fmt.Errorf("resolve repository identity: %w", err)
-	}
-	if repository.IsZero() {
-		return preparedRun{}, errors.New("repository identity is required")
+		return preparedRun{}, err
 	}
 	repoState := service.Paths.RepoState(repository)
 	runsDir := service.Paths.RunsDir(repository)
@@ -310,25 +299,15 @@ func (service Service) Status(ctx context.Context, root string, noColor bool) (R
 	if err := service.checkPlatform(); err != nil {
 		return Report{}, err
 	}
-	if err := service.validateStatus(); err != nil {
+	if err := service.validateStateAccess(); err != nil {
 		return Report{}, err
 	}
 	if ctx == nil {
 		return Report{}, errors.New("status context is required")
 	}
-	if root == "" {
-		root = "."
-	}
-	resolve := service.ResolveRepo
-	if resolve == nil {
-		resolve = repoid.Resolve
-	}
-	repository, err := resolve(ctx, root)
+	repository, err := service.resolveRepository(ctx, root)
 	if err != nil {
-		return Report{}, fmt.Errorf("resolve repository identity: %w", err)
-	}
-	if repository.IsZero() {
-		return Report{}, errors.New("repository identity is required")
+		return Report{}, err
 	}
 	repoState := service.Paths.RepoState(repository)
 	if err := validateExternalRepoState(repository.Root(), repoState); err != nil {
@@ -364,12 +343,14 @@ func (service Service) validateRun() error {
 	return nil
 }
 
-func (service Service) validateStatus() error {
+// validateStateAccess covers every command that reads or writes external
+// repository state without running gates.
+func (service Service) validateStateAccess() error {
 	if service.Paths.IsZero() {
 		return errors.New("storage paths are required")
 	}
 	if isNilInterface(service.Stdout) {
-		return errors.New("report output is required")
+		return errors.New("output is required")
 	}
 	return nil
 }
@@ -424,6 +405,26 @@ func resolveProspectiveDirectory(destination string) (string, error) {
 		}
 		current = parent
 	}
+}
+
+// resolveRepository identifies the repository containing root through the
+// service's repository seam.
+func (service Service) resolveRepository(ctx context.Context, root string) (repoid.ID, error) {
+	if root == "" {
+		root = "."
+	}
+	resolve := service.ResolveRepo
+	if resolve == nil {
+		resolve = repoid.Resolve
+	}
+	repository, err := resolve(ctx, root)
+	if err != nil {
+		return repoid.ID{}, fmt.Errorf("resolve repository identity: %w", err)
+	}
+	if repository.IsZero() {
+		return repoid.ID{}, errors.New("repository identity is required")
+	}
+	return repository, nil
 }
 
 func (service Service) checkPlatform() error {

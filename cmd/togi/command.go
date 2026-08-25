@@ -12,6 +12,7 @@ import (
 	"github.com/joellarson/togi/internal/enricher"
 	"github.com/joellarson/togi/internal/gate"
 	runpkg "github.com/joellarson/togi/internal/run"
+	"github.com/joellarson/togi/internal/waiver"
 	"github.com/joellarson/togi/internal/wiki"
 	"github.com/spf13/cobra"
 )
@@ -26,6 +27,7 @@ type streams struct {
 type commandService interface {
 	Run(context.Context, runpkg.Options) (runpkg.Report, error)
 	Status(context.Context, string, bool) (runpkg.Report, error)
+	Waive(context.Context, string, string, string) (waiver.Record, error)
 }
 
 type wikiService interface {
@@ -42,6 +44,10 @@ func (service failingService) Run(context.Context, runpkg.Options) (runpkg.Repor
 
 func (service failingService) Status(context.Context, string, bool) (runpkg.Report, error) {
 	return runpkg.Report{}, service.err
+}
+
+func (service failingService) Waive(context.Context, string, string, string) (waiver.Record, error) {
+	return waiver.Record{}, service.err
 }
 
 func (service failingService) Show(string) error  { return service.err }
@@ -107,6 +113,7 @@ func newRootCommandWithServices(s streams, service commandService, pages wikiSer
 	})
 	root.AddCommand(newRunCommand(service))
 	root.AddCommand(newStatusCommand(service))
+	root.AddCommand(newWaiveCommand(service))
 	root.AddCommand(newWikiCommand(pages))
 
 	return root
@@ -195,6 +202,24 @@ func newStatusCommand(service commandService) *cobra.Command {
 		},
 	}
 	command.Flags().BoolVar(&noColor, "no-color", false, "disable colored output")
+	return command
+}
+
+// newWaiveCommand records an operator approval. Argument arity is the only
+// decision it makes: an approval's own rules, an absent reason included,
+// belong to the service, so both boundaries refuse identically.
+func newWaiveCommand(service commandService) *cobra.Command {
+	var reason string
+	command := &cobra.Command{
+		Use:   "waive <fingerprint>",
+		Short: "Approve one reported finding, with a reason",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			_, err := service.Waive(cmd.Context(), ".", args[0], reason)
+			return err
+		},
+	}
+	command.Flags().StringVar(&reason, "reason", "", "why this finding is approved")
 	return command
 }
 
