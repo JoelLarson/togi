@@ -144,8 +144,11 @@ largest and riskiest phase.
 **Build, roughly in this order:**
 
 - **Worktree lifecycle** — create `togi/run-<id>` from feature HEAD in the
-  cache dir; commit per validated batch; squash-land on success; refuse to
-  land if the feature branch moved (ADR-0010).
+  cache dir; commit per validated batch; land on success; refuse to land if
+  the feature branch moved (ADR-0010). The tracer squash-lands; ADR-0010's
+  amendment replaces that with a fast-forward of the batch commits, each
+  carrying a deterministic principle-page subject, and surfaces the
+  pre-landing sha in `togi status` as the revert point.
 - **Agent adapter** — the vendor-neutral interface; brief on stdin, cwd is
   the worktree, results read back as the diff (ADR-0009). Codex first; Claude
   and Kimi remain as conformance adapters.
@@ -195,6 +198,24 @@ conformance contract without weakening Codex isolation.
 > spend rails to be approximate on some adapters and absent on others — the
 > adapter interface should treat usage as optional, and the other two rails
 > must be sufficient on their own.
+
+> **Risk: behavior preservation is only as strong as the test suite.** togi's
+> promise is that a fix restructures code without changing what the software
+> does, and until Phase 5 the entire enforcement of that is "integrity gates
+> stay clean and the affected packages' tests stay green." The `complexity`
+> gate's fix policy is `llm-fix`: when gocyclo flags a declaration, the agent
+> restructures it, and the only thing between that and a silent behavior
+> change is whether a test happened to cover the branch it got wrong. On a
+> thinly-covered declaration, togi will confidently land a refactor that
+> changed what the code does.
+>
+> Phase 5's **seal** is the designed answer — mutation testing is what
+> actually proves behavior survived — but it is glacial and can never enter
+> the inner loop, so it protects a run, not a batch. The cheap interim, if
+> this bites before Phase 5, is to gate `llm-fix` on coverage: refuse to
+> restructure a declaration whose statements a `go test -coverprofile` run
+> shows are uncovered, intersected against the finding's enriched range.
+> Accepted as-is for now because the engineer reviews every landing.
 
 ---
 
@@ -270,6 +291,36 @@ exactly once per run; a genuinely clean diff exits 0.
   needs a working loop to improve (3 → 4). The one place to resist compressing
   is 2 into 3: landing the agent loop on an unproven findings pipeline means
   debugging both at once.
+- **A whole-repo report needs no whole-repo mode.** `--base <root-commit>`
+  makes every line a changed line, so touched-entity scope admits every
+  finding. Diff-scoped judgment stays the only model, and the brownfield
+  sweep is a flag value rather than a second product.
 - **Out of scope throughout v1:** pipeline stages before the gauntlet,
   languages beyond Go and Rust, parallel fix workers, any daemon or scheduled
   execution, RAG of any kind.
+
+## Deferred, deliberately
+
+Decided against for now, recorded so the reasoning is not re-litigated:
+
+- **`--path` scoping.** Narrowing a run to one file. A scratch branch touching
+  that file does the same thing through the real code path. Revisit only if
+  the scratch-branch loop actually becomes annoying; it is a small filter
+  applied where occurrences are already filtered.
+- **An oversized-base guard on fix mode.** `--base <root-commit>` in fix mode
+  licenses the agent to rewrite the entire repository, bounded only by the
+  iteration and wall-clock rails — precisely the unbounded brownfield sweep
+  the diff-scoped model exists to avoid, reachable from an innocent-looking
+  flag. Fix mode should refuse above some changed-file threshold without an
+  explicit override. Deferred while the engineer is the only user.
+- **Exported-surface integrity.** Restructuring behind an unchanged assertion
+  is safe; changing a package's exported surface is the risky edge (see
+  **behavior** in CONTEXT.md). This fits the existing machinery exactly — an
+  **integrity gate** that trips when a batch changes an exported
+  declaration's signature, released per-fingerprint by a **waiver**, which is
+  what "needs more scrutiny" means operationally. Deferred as a real but
+  not-yet-felt problem.
+- **A written run summary.** Per-batch landing commits carry what was fixed,
+  and `togi status` carries the verdict, stuck batches, and honored waivers.
+  A generated Markdown summary was designed and dropped as speculative;
+  reconsider only if `togi status` output keeps getting copied by hand.

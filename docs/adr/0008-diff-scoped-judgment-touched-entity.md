@@ -15,6 +15,12 @@ about. For point findings, touched-entity degenerates to intersection anyway.
 
 ## Consequences
 
+"Its range" means the *entity's* range, not the line the tool happened to
+report. An entity finding is resolved to its enclosing top-level declaration —
+both ends replaced — before scoping runs; otherwise the 300-line-function
+example above silently fails whenever a tool points into the middle of a
+declaration rather than at its signature.
+
 The obvious failure mode is a two-line change to a legacy monster obligating a
 large refactor. Three relief valves, in order of use: **waivers** (approve the
 specific fingerprint, with a reason, and move on), whole-repo gates staying

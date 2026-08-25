@@ -53,6 +53,17 @@ A named, compiled-in parser that converts one tool's raw output into
 findings; `exec` is the escape-hatch normalizer that delegates to an
 external command emitting findings JSON.
 
+**Enricher**:
+The language-aware step between normalizing and scoping that resolves an
+entity finding to its enclosing top-level declaration — both its range and
+its **snippet**, which becomes the declaration's signature. It is the only
+step that reads source syntax, and it is dispatched by *language*, where a
+**normalizer** is dispatched by binding. Point findings pass through
+untouched; an entity finding with no enclosing declaration degrades to a
+point.
+_Avoid_: enrichment as a general term (it resolves entity findings against
+the language's syntax, nothing else)
+
 **Cost class**:
 A gate's declared runtime tier — `instant` / `fast` / `slow` / `glacial` —
 driving which loop tier it runs in.
@@ -84,7 +95,9 @@ Identical hits are one finding, not many.
 **Fingerprint**:
 A finding's line-independent identity: hash of (gate, rule_id, file,
 whitespace-normalized snippet); the key for stalemate accounting, ratchet
-baselines, and waivers.
+baselines, and waivers. For an entity finding the snippet is the declaration
+signature the **enricher** resolved, so identity survives edits inside the
+declaration and is independent of where its tool pointed.
 
 **Snippet**:
 The finding's primary source line — for a structural finding, the enclosing
@@ -104,9 +117,12 @@ structural health.
 Whether a gate's findings identify a single point or a structural entity —
 `point` / `entity` — declared in the gate manifest alongside, and
 independently of, its scope. Location fixes a finding's range before scoping
-runs: an entity finding is widened to its enclosing declaration, a point
-finding stays on its own line. Both are then judged by the same
-touched-entity overlap rule.
+runs, via the **enricher**: an entity finding's range is *replaced* by its
+enclosing top-level declaration's range — both ends, regardless of where the
+tool pointed — while a point finding stays on its own line. An entity finding
+with no enclosing declaration (an import, a package clause) degrades to a
+point rather than erroring. Both are then judged by the same touched-entity
+overlap rule.
 _Avoid_: point-scoped, entity-scoped (scope is diff/whole-repo; location is
 a separate axis)
 
@@ -163,6 +179,16 @@ runs in one fresh agent context and commits only when validation passes. Phase
 4 replaces that grouping with (file, principle page), falling back to (file,
 rule_id).
 
+**Behavior**:
+What the software does that is meaningful to its operation — in practice,
+what the behavioral suite asserts. A fix preserves behavior when it leaves
+every assertion intact and never rewrites a test to accommodate a production
+change; restructuring behind an unchanged assertion is the work togi exists
+to do. Changing a package's exported surface is the risky edge of this, and
+warrants more scrutiny than an internal refactor.
+_Avoid_: correctness (a fix may not make wrong code right; it makes
+maintainable code out of working code)
+
 **Brief**:
 The bounded, deterministic document handed to the fix agent: normalized
 finding JSON, explicit file:line pointers, and authoritative constraints. It
@@ -175,10 +201,12 @@ results read back as the worktree diff. Codex is the implemented adapter;
 Claude and Kimi remain later conformance adapters.
 
 **Landing**:
-Squash-applying the togi branch's finished result onto the feature branch
-as one commit; refused if the feature branch moved during the run. Fixing is
-isolated from the original worktree, which is updated only by this guarded
-landing.
+Fast-forwarding the togi branch's validated **batch** commits onto the
+feature branch, one commit per batch, each message naming the finding's
+**principle page**; refused if the feature branch moved during the run.
+Fixing is isolated from the original worktree, which is updated only by this
+guarded landing. The Phase 3 tracer lands one squashed commit instead; per-
+batch landing is the decided replacement (ADR-0010).
 
 ### Execution
 
@@ -250,7 +278,10 @@ private pre-cleanup report audit.
   config may override the list, order, and thresholds.
 - A **gate** owns one **binding** per supported language; each **binding**
   declares its **aliases**; many rule_ids map onto one **principle page**.
-- A **binding** produces **findings** through exactly one **normalizer**.
+- A **binding** produces **findings** through exactly one **normalizer**; the
+  **enricher** for that binding's language then resolves each finding's range,
+  and only then is **touched-entity scope** applied. An **enricher** is
+  required only for a gate whose **location** is `entity`.
 - **Triage** turns the collected **findings** into an **action plan** of
   **batches**; the **flywheel** executes them serially via the **adapter**.
 - A **batch** commits only when instant/fast gates plus the assigned finding's
@@ -272,8 +303,8 @@ private pre-cleanup report audit.
 >
 > **Dev:** "And if the agent just deletes the failing test?"
 > **Domain expert:** "The test-integrity **integrity gate** trips and the run
-> blocks. The deferred waiver contract will allow an operator to approve that
-> finding's **fingerprint** and re-run — there will be no mid-run prompt."
+> blocks. An operator approves that finding's **fingerprint** with a reason
+> and re-runs — there is no mid-run prompt."
 >
 > **Dev:** "The count of findings didn't go down this iteration but they're
 > all different ones."
@@ -292,6 +323,13 @@ private pre-cleanup report audit.
 - "suppression" was ambiguous between code-level lint suppressions and
   operator approvals — resolved: suppressions are what integrity gates
   count; **waiver** is the operator mechanism.
+- "snippet" was ambiguous for a structural finding between the line its tool
+  reported and the enclosing declaration's signature — resolved: the
+  **enricher** resolves it to the signature, so an entity **fingerprint** is
+  the declaration's identity rather than an arbitrary interior line. Two
+  findings of one rule inside a single declaration therefore collapse into
+  one finding, which is the intent: a declaration is over-complex as a whole,
+  not at a line.
 - "scope" was doing triple duty (gate diff/whole-repo scope, diff-scoping of
   judgment, config scope) — resolved: gate manifests declare *scope*
   (diff-scoped or whole-repo); **touched-entity scope** names the in-scope

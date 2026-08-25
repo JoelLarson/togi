@@ -1,4 +1,4 @@
-# The fix loop runs in a togi-owned worktree and lands one squashed commit
+# The fix loop runs in a togi-owned worktree and lands its batch commits
 
 Fixing happens in a `git worktree` under the cache dir, on a branch
 `togi/run-<id>` cut from the feature branch's HEAD. The user's checkout is
@@ -55,3 +55,54 @@ committed feature branch before the run ledger or any agent work begins.
 
 This refinement changes neither the external-worktree decision nor the
 one-squash outcome; it records the evidence required to make both enforceable.
+
+## Amendment: 2026-08-25 — landing preserves the batch commits
+
+The one-squash conclusion above is reversed. Landing fast-forwards the
+validated `togi/run-<id>` commits onto the feature branch as they stand: one
+commit per accepted batch. The external-worktree decision, the batch-as-
+rollback-point mechanism, and every landing guard are unchanged.
+
+The original reasoning was that "thirty batch commits, resets, retries" is
+iteration mess that does not belong in a feature branch's history. That
+premise does not survive its own reset policy. A batch that fails validation
+is reset away and leaves no commit; a retry that succeeds leaves one. What
+remains on the run branch is already exactly the sequence of validated
+batches — not mess, but the cleanest possible account of what changed and
+why.
+
+Two reasons to keep it:
+
+- **Reviewability is the point.** One squashed commit touching a dozen files
+  is the hardest thing in the pull request to review. One commit per batch,
+  each naming the principle page it applied, is individually obvious.
+- **The history teaches.** Every subject line carries the principle page
+  name, which is the same string that indexes the wiki, so the commit log
+  becomes a queryable record of which practices this codebase keeps
+  violating.
+
+Batch commit messages are deterministic — generated from the finding set, not
+from the agent — so a retry that produces a different implementation still
+produces the same message:
+
+```
+togi: small-composable-functions in internal/run/fix.go
+
+gocyclo/complexity — resolveStagedDiff, prepareFixRun
+Run 01JQ8F… · batch 3/6
+```
+
+Mechanically this is a simplification: landing was already a hook-disabled
+fast-forward with the squash constructed on top, and that construction step
+goes away.
+
+### Reverting a run
+
+The squash's real advantage was that undoing a run was one `git revert`. That
+is preserved without it: landing fast-forwards onto a known feature HEAD, and
+that commit is already recorded in the run ledger, so `git reset --hard
+<pre-landing-sha>` undoes the entire run exactly. `togi status` surfaces that
+sha so it never has to be dug out of `report.json`. A dedicated `togi revert`
+was considered and rejected — it would be the only destructive Git operation
+in a tool that otherwise only ever fast-forwards, and it earns nothing over a
+reset the engineer can read before running.
