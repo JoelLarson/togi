@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -496,6 +497,10 @@ func (f *gauntletFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Step(`^the tool version is outside the gate constraint$`, func() error { return nil })
 	sc.Step(`^the gate has a version warning$`, f.warning)
 	sc.Step(`^the gate is not errored$`, f.notErrored)
+	sc.Step(`^a gate reports a non-blocking finding and a blocking finding$`, f.mixedSeverities)
+	sc.Step(`^a gate reports only a non-blocking finding$`, f.onlyInfo)
+	sc.Step(`^the report contains both findings$`, f.bothSeverities)
+	sc.Step(`^the report contains the non-blocking finding$`, f.infoFinding)
 }
 func (f *gauntletFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {
 	f.selected = nil
@@ -800,6 +805,70 @@ func (f *gauntletFeature) notErrored() error {
 	return nil
 }
 
+func (f *gauntletFeature) mixedSeverities() error {
+	issues := []map[string]any{
+		{"FromLinter": "errcheck", "Text": "blocking finding", "Severity": "warning", "Pos": map[string]any{"Filename": "feature.go", "Line": 4, "Column": 1}},
+		{"FromLinter": "unused", "Text": "non-blocking finding", "Severity": "info", "Pos": map[string]any{"Filename": "feature.go", "Line": 5, "Column": 1}},
+	}
+	body, _ := json.Marshal(map[string]any{"Issues": issues})
+	tool := "severity-tool"
+	if _, err := f.world.Environment().InstallTool(tool, harness.ToolBehavior{Stdout: body}); err != nil {
+		return err
+	}
+	return f.world.Environment().WriteGate(harness.GateDefinition{
+		Name: "severity", Description: "severity", Tool: tool, Normalizer: "golangci-json",
+		Command: []string{tool}, Scope: "repo", Location: "point",
+		SeverityMap: map[string]string{"default": "warning", "warning": "warning", "info": "info"},
+		Blocking:    []string{"error", "warning"},
+	})
+}
+
+func (f *gauntletFeature) onlyInfo() error {
+	issues := []map[string]any{
+		{"FromLinter": "unused", "Text": "non-blocking finding", "Severity": "info", "Pos": map[string]any{"Filename": "feature.go", "Line": 5, "Column": 1}},
+	}
+	body, _ := json.Marshal(map[string]any{"Issues": issues})
+	tool := "severity-tool"
+	if _, err := f.world.Environment().InstallTool(tool, harness.ToolBehavior{Stdout: body}); err != nil {
+		return err
+	}
+	return f.world.Environment().WriteGate(harness.GateDefinition{
+		Name: "severity", Description: "severity", Tool: tool, Normalizer: "golangci-json",
+		Command: []string{tool}, Scope: "repo", Location: "point",
+		SeverityMap: map[string]string{"default": "info", "info": "info"},
+		Blocking:    []string{"error", "warning"},
+	})
+}
+
+func (f *gauntletFeature) bothSeverities() error {
+	report, err := f.report()
+	if err != nil {
+		return err
+	}
+	if len(report.Findings) != 2 {
+		return fmt.Errorf("findings=%#v, want blocking and non-blocking", report.Findings)
+	}
+	severities := map[string]bool{}
+	for _, item := range report.Findings {
+		severities[item.Severity] = true
+	}
+	if !severities["warning"] || !severities["info"] {
+		return fmt.Errorf("findings=%#v, want warning and info", report.Findings)
+	}
+	return nil
+}
+
+func (f *gauntletFeature) infoFinding() error {
+	report, err := f.report()
+	if err != nil {
+		return err
+	}
+	if len(report.Findings) != 1 || report.Findings[0].Severity != "info" {
+		return fmt.Errorf("findings=%#v, want one info finding", report.Findings)
+	}
+	return nil
+}
+
 type fixFeature struct {
 	world        *harness.World
 	originalHead string
@@ -817,6 +886,9 @@ func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
 	sc.After(f.world.After)
 	sc.Step(`^a green feature with a blocking finding$`, f.greenBlocked)
 	sc.Step(`^a green feature without blockers$`, f.greenClean)
+	sc.Step(`^a green feature with a non-blocking finding and a blocking finding$`, f.greenMixed)
+	sc.Step(`^a green feature with only a non-blocking finding$`, f.greenInfoOnly)
+	sc.Step(`^the report still contains the non-blocking finding$`, f.stillHasInfo)
 	sc.Step(`^the agent removes the finding$`, f.agentFixes)
 	sc.Step(`^the selected agent is missing$`, f.missingAgent)
 	sc.Step(`^a feature whose behavioral suite is (missing|red)$`, f.baseline)
@@ -911,6 +983,73 @@ func (f *fixFeature) greenBlocked() error {
 		return err
 	}
 	return f.installQualityGate(false)
+}
+
+func (f *fixFeature) greenMixed() error {
+	if err := f.repository(fixSource, fixTest); err != nil {
+		return err
+	}
+	return f.installMixedQualityGate()
+}
+
+func (f *fixFeature) greenInfoOnly() error {
+	if err := f.repository(fixedSource, fixTest); err != nil {
+		return err
+	}
+	if err := f.installMixedQualityGate(); err != nil {
+		return err
+	}
+	return f.installAgent(harness.AgentBehavior{})
+}
+
+func (f *fixFeature) installMixedQualityGate() error {
+	tool := filepath.Join(f.world.Environment().BinRoot, "quality-tool")
+	info, err := json.Marshal(map[string]any{
+		"Issues": []map[string]any{
+			{"FromLinter": "style", "Text": "non-blocking finding", "Severity": "info", "Pos": map[string]any{"Filename": "feature.go", "Line": 1, "Column": 1}},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	blocking, err := json.Marshal(map[string]any{
+		"Issues": []map[string]any{
+			{"FromLinter": "quality", "Text": "remove BAD marker", "Severity": "warning", "Pos": map[string]any{"Filename": "feature.go", "Line": 3, "Column": 1}},
+			{"FromLinter": "style", "Text": "non-blocking finding", "Severity": "info", "Pos": map[string]any{"Filename": "feature.go", "Line": 1, "Column": 1}},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(tool+".info", info, 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(tool+".blocking", blocking, 0o600); err != nil {
+		return err
+	}
+	script := "#!/bin/sh\nset -eu\nif grep -q BAD feature.go; then cat " + strconv.Quote(tool+".blocking") + "; else cat " + strconv.Quote(tool+".info") + "; fi\n"
+	if err := os.WriteFile(tool, []byte(script), 0o700); err != nil {
+		return err
+	}
+	return f.world.Environment().WriteGate(harness.GateDefinition{
+		Name: "quality", Description: "quality", Tool: "quality-tool", Normalizer: "golangci-json",
+		RuleID: "quality/bad", Message: "remove BAD marker", Command: []string{"quality-tool"}, Scope: "repo", Location: "point",
+		SeverityMap: map[string]string{"default": "warning", "warning": "warning", "info": "info"},
+		Blocking:    []string{"error", "warning"},
+	})
+}
+
+func (f *fixFeature) stillHasInfo() error {
+	report, err := f.report()
+	if err != nil {
+		return err
+	}
+	for _, item := range report.Findings {
+		if item.Severity == "info" {
+			return nil
+		}
+	}
+	return fmt.Errorf("findings=%#v, want a remaining info finding", report.Findings)
 }
 
 func (f *fixFeature) greenClean() error {

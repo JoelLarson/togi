@@ -119,6 +119,7 @@ type GateDefinition struct {
 	Settings                                             map[string]any
 	SeverityMap                                          map[string]string
 	Aliases                                              map[string]string
+	Blocking                                             []string
 }
 
 // WriteGate writes a valid gate override in the format consumed by gate.Loader.
@@ -156,6 +157,10 @@ func (e *Environment) WriteGate(definition GateDefinition) error {
 	if definition.SeverityMap == nil {
 		definition.SeverityMap = map[string]string{"default": "warning"}
 	}
+	blocking := definition.Blocking
+	if blocking == nil {
+		blocking = []string{"error", "warning"}
+	}
 
 	root := filepath.Join(e.Paths().GateOverrides(), definition.Name)
 	if err := os.MkdirAll(filepath.Join(root, "go"), 0o700); err != nil {
@@ -164,7 +169,7 @@ func (e *Environment) WriteGate(definition GateDefinition) error {
 	manifest, err := toml.Marshal(gateManifestWire{
 		Name: definition.Name, Description: definition.Description, CostClass: "fast",
 		FixPolicy: "report-only", Scope: definition.Scope, Location: definition.Location,
-		Blocking: []string{"error", "warning"}, Timeout: definition.Timeout.String(),
+		Blocking: blocking, Timeout: definition.Timeout.String(),
 	})
 	if err != nil {
 		return fmt.Errorf("encode gate manifest: %w", err)
