@@ -806,6 +806,8 @@ type fixFeature struct {
 	mode         string
 	request      harness.RunRequest
 	landingDone  chan error
+	extraCode    string
+	snippet      string
 }
 
 func newFixFeature(factory harness.DriverFactory) *fixFeature {
@@ -816,6 +818,9 @@ func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Before(f.before)
 	sc.After(f.world.After)
 	sc.Step(`^a green feature with a blocking finding$`, f.greenBlocked)
+	sc.Step(`^a green feature whose finding file contains code beyond the snippet$`, f.greenBlockedWithExtraCode)
+	sc.Step(`^the persisted brief carries the finding JSON, file:line pointer, and snippet$`, f.briefCarriesFinding)
+	sc.Step(`^the persisted brief contains no other worktree code$`, f.briefOmitsExtraCode)
 	sc.Step(`^a green feature without blockers$`, f.greenClean)
 	sc.Step(`^the agent removes the finding$`, f.agentFixes)
 	sc.Step(`^the selected agent is missing$`, f.missingAgent)
@@ -845,7 +850,7 @@ func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
 }
 
 func (f *fixFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {
-	f.originalHead, f.mode, f.landingDone = "", "", nil
+	f.originalHead, f.mode, f.landingDone, f.extraCode, f.snippet = "", "", nil, "", ""
 	f.request = harness.RunRequest{Agent: "codex", GateNames: []string{"quality"}, MaxIterations: 4, MaxWallClock: 5 * time.Second, NoColor: true}
 	return f.world.Before(ctx, scenario)
 }
@@ -911,6 +916,81 @@ func (f *fixFeature) greenBlocked() error {
 		return err
 	}
 	return f.installQualityGate(false)
+}
+
+func (f *fixFeature) greenBlockedWithExtraCode() error {
+	f.extraCode = "func SecretWorktreeBody() int { return 99 }"
+	f.snippet = "// BAD"
+	source := "package fixture\n\n" + f.snippet + "\nfunc Feature() int { return 1 }\n\n" + f.extraCode + "\n"
+	if err := f.repository(source, fixTest); err != nil {
+		return err
+	}
+	return f.installQualityGate(false)
+}
+
+func (f *fixFeature) brief() (string, error) {
+	briefs, err := f.world.LastRun().Briefs()
+	if err != nil {
+		return "", err
+	}
+	if len(briefs) != 1 {
+		return "", fmt.Errorf("briefs = %d, want 1", len(briefs))
+	}
+	return string(briefs[0]), nil
+}
+
+func (f *fixFeature) briefCarriesFinding() error {
+	brief, err := f.brief()
+	if err != nil {
+		return err
+	}
+	dataStart := strings.Index(brief, "{\"primary_file\":")
+	if dataStart < 0 {
+		return fmt.Errorf("brief missing finding JSON:\n%s", brief)
+	}
+	dataLine, _, _ := strings.Cut(brief[dataStart:], "\n")
+	var payload struct {
+		PrimaryFile string `json:"primary_file"`
+		Findings    []struct {
+			File    string `json:"file"`
+			Line    int    `json:"line"`
+			Snippet string `json:"snippet"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal([]byte(dataLine), &payload); err != nil {
+		return fmt.Errorf("decode brief JSON: %w\n%s", err, dataLine)
+	}
+	if payload.PrimaryFile != "feature.go" || len(payload.Findings) != 1 {
+		return fmt.Errorf("brief payload = %#v", payload)
+	}
+	item := payload.Findings[0]
+	if item.File != "feature.go" || item.Line <= 0 || item.Snippet == "" {
+		return fmt.Errorf("brief finding = %#v", item)
+	}
+	if !strings.Contains(brief, fmt.Sprintf("feature.go:%d", item.Line)) && !strings.Contains(dataLine, fmt.Sprintf(`"line":%d`, item.Line)) {
+		return fmt.Errorf("brief missing file:line pointer:\n%s", brief)
+	}
+	if f.snippet != "" && !strings.Contains(item.Snippet, f.snippet) {
+		return fmt.Errorf("brief snippet %q does not contain %q", item.Snippet, f.snippet)
+	}
+	return nil
+}
+
+func (f *fixFeature) briefOmitsExtraCode() error {
+	if f.extraCode == "" {
+		return errors.New("extra worktree code was not recorded")
+	}
+	brief, err := f.brief()
+	if err != nil {
+		return err
+	}
+	if strings.Contains(brief, f.extraCode) {
+		return fmt.Errorf("brief contains worktree code beyond the snippet:\n%s", brief)
+	}
+	if !strings.Contains(brief, f.snippet) {
+		return fmt.Errorf("brief missing the finding snippet %q:\n%s", f.snippet, brief)
+	}
+	return nil
 }
 
 func (f *fixFeature) greenClean() error {
