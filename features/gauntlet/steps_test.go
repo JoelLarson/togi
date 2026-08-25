@@ -821,6 +821,7 @@ func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Step(`^the selected agent is missing$`, f.missingAgent)
 	sc.Step(`^a feature whose behavioral suite is (missing|red)$`, f.baseline)
 	sc.Step(`^a green feature whose initial gate errors$`, f.initialGateError)
+	sc.Step(`^the related file is outside the feature diff$`, f.relatedOutsideDiff)
 	sc.Step(`^the agent makes a valid cross-file fix$`, f.crossFile)
 	sc.Step(`^the agent makes no changes$`, f.noOp)
 	sc.Step(`^the agent attempts (an unauthorized Git commit|a new suppression|test deletion|an assertion change)$`, f.integrityViolation)
@@ -863,6 +864,9 @@ func (f *fixFeature) repository(source, testBody string) error {
 		return err
 	}
 	if err := repository.Write("base.go", "package fixture\n\nfunc Base() {}\n"); err != nil {
+		return err
+	}
+	if err := repository.Write("related.go", "package fixture\n\nconst Related = \"old\"\n"); err != nil {
 		return err
 	}
 	if _, err := repository.Commit("base"); err != nil {
@@ -962,18 +966,23 @@ func (f *fixFeature) initialGateError() error {
 }
 
 func (f *fixFeature) crossFile() error {
-	if err := f.world.Repository().Write("related.go", "package fixture\n\nconst Related = \"old\"\n"); err != nil {
-		return err
-	}
-	var err error
-	f.originalHead, err = f.world.Repository().Commit("related feature")
-	if err != nil {
-		return err
-	}
 	return f.installAgent(harness.AgentBehavior{Edits: map[string]string{
 		"feature.go": fixedSource,
 		"related.go": "package fixture\n\nconst Related = \"fixed\"\n",
 	}})
+}
+
+func (f *fixFeature) relatedOutsideDiff() error {
+	changed, err := f.world.Repository().Git("diff", "--name-only", f.request.Base+"..HEAD")
+	if err != nil {
+		return err
+	}
+	for _, path := range strings.Fields(changed) {
+		if path == "related.go" {
+			return errors.New("related.go is in the feature diff")
+		}
+	}
+	return nil
 }
 
 func (f *fixFeature) noOp() error { return f.installAgent(harness.AgentBehavior{}) }
