@@ -26,6 +26,40 @@ func TestNewEngineStateInitializesSemanticFindings(t *testing.T) {
 	}
 }
 
+func TestAttemptResultRetainsClassification(t *testing.T) {
+	want := Outcome{Kind: OutcomeRails, Failure: "rail"}
+	result := attemptResult{
+		kind:      attemptStopped,
+		outcome:   want,
+		failure:   "failure",
+		retryable: true,
+	}
+	if result.kind != attemptStopped || result.outcome.Kind != OutcomeRails || result.failure != "failure" || !result.retryable {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestBatchAttemptCheckpointAbortsCanceledAttempt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	workspace := &engineWorkspace{root: "/worktree"}
+	request := engineRequest(t, nil, maxAttempts)
+	state := newEngineState(&engineAudit{}, Plan{SchemaVersion: 1, Batches: []Batch{{
+		Status:   BatchRunning,
+		Attempts: []Attempt{{Number: 1, Status: AttemptRunning}},
+	}}})
+	attempt := batchAttempt{request: request, ports: Ports{Workspace: workspace}, state: state, index: 0, number: 1}
+
+	result := attempt.checkpoint(ctx)
+
+	if result.kind != attemptStopped || result.outcome.Kind != OutcomeErrored {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(workspace.resets) != 1 || !workspace.resetDeadlines[0] || state.plan.Batches[0].Attempts[0].Status != AttemptFailed {
+		t.Fatalf("resets = %d, deadlines = %v, plan = %#v", len(workspace.resets), workspace.resetDeadlines, state.plan)
+	}
+}
+
 func TestEngineExecutesBatchesSeriallyAndAuditsTransitions(t *testing.T) {
 	first := planFinding("a.go", 1, "lint/a", "a")
 	second := planFinding("b.go", 2, "lint/b", "b")

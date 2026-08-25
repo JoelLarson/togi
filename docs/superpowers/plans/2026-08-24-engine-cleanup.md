@@ -97,7 +97,7 @@ in checklist item 7 complete.
 - Modify: `internal/flywheel/engine_test.go`
 - Modify: `internal/flywheel/engine.go.cleanup.md`
 
-- [ ] **Step 1: Write failing result and checkpoint tests**
+- [x] **Step 1: Write failing result and checkpoint tests**
 
 Add table tests for an `attemptResult` with kinds `attemptSucceeded`,
 `attemptSemanticFailure`, `attemptInfrastructureFailure`, and `attemptStopped`.
@@ -117,7 +117,7 @@ func TestAttemptResultRetainsClassification(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -128,7 +128,7 @@ go test ./internal/flywheel -run 'TestAttemptResultRetainsClassification|TestBat
 Expected: compile failure because `attemptResult`, its kinds, `batchAttempt`, and
 `checkpoint` do not exist.
 
-- [ ] **Step 3: Add attempt-scoped types and the linear pipeline**
+- [x] **Step 3: Add attempt-scoped types and the linear pipeline**
 
 Define:
 
@@ -166,7 +166,7 @@ commit persistence. Preserve each existing side-effect order exactly and add the
 snapshot, validation/proof, and post-commit compensation comments from checklist
 item 8 at those sites.
 
-- [ ] **Step 4: Centralize the retry epilogue**
+- [x] **Step 4: Centralize the retry epilogue**
 
 Rewrite `executeBatch` as the admission loop over `1..maxAttempts`. It creates a
 `batchAttempt`, calls `run`, and has one switch that performs retry, stuck, errored,
@@ -185,7 +185,7 @@ func stoppedExecution(outcome Outcome) executionResult {
 }
 ```
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
 ```sh
 gofmt -w internal/flywheel/engine.go internal/flywheel/engine_test.go

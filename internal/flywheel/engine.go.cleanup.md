@@ -12,7 +12,7 @@ work is confined to the orchestration bodies.
 
 ---
 
-## 1. Extract the attempt pipeline out of `executeBatch`
+## 1. [x] Extract the attempt pipeline out of `executeBatch`
 
 `executeBatch` (engine.go:254) is a 2-iteration retry loop whose body is the entire
 attempt: brief → sink → git snapshot → adapter run → integrity check → changed files →
@@ -22,7 +22,7 @@ understand any of it.
 **Change:** split the loop body into a `runAttempt` function (or several small step
 functions), so the retry policy reads in ~15 lines and each step reads in isolation.
 
-## 2. Collapse the stop-check boilerplate
+## 2. [x] Collapse the stop-check boilerplate
 
 The pair
 
@@ -43,7 +43,7 @@ that performs the stop checks between steps in exactly one place. The policy "we
 check context and rails between every step" becomes a stated invariant instead of
 something verified by eyeball.
 
-## 3. Unify the retry epilogue
+## 3. [x] Unify the retry epilogue
 
 This shape appears at engine.go:332, 352, 371, 382, 397, 443, 453, 477 with small
 variations:
@@ -86,7 +86,7 @@ cannot see the invariant either.
 (`type stepResult struct { outcome Outcome; stop bool }`) or return `*Outcome`
 where nil means continue, so the semantics are named at every call site.
 
-## 6. Reduce the parameter caravans
+## 6. [x] Reduce the parameter caravans
 
 `(ctx, request, ports, state, index, attempt)` is threaded through six helpers
 (`failedInfrastructure`, `semanticFailure`, `stopAttemptForContext`,
@@ -120,13 +120,13 @@ to `a.semanticFailure(ctx, failure)`, and the file's call graph becomes scannabl
   adds only indirection.
 - [x] **Lazy map init** — initialize `semanticFindings` in an `engineState` constructor
   and delete the nil check at engine.go:435.
-- **Naming** — `semanticFailure` and `failedInfrastructure` read as nouns but are
+- [x] **Naming** — `semanticFailure` and `failedInfrastructure` read as nouns but are
   actions with different signatures and different stop behavior; something like
   `abortAttemptSemantic` / `abortAttemptInfra` signals both the action and the
   asymmetry. Likewise, `stopAttemptForContext` also resets the workspace (unlike
   `stopForContext`) — invisible from the name.
 
-## 8. Comment the genuinely subtle invariants
+## 8. [x] Comment the genuinely subtle invariants
 
 A few places are correct but look wrong, which is where comments earn their keep:
 

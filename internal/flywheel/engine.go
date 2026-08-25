@@ -179,8 +179,9 @@ func Execute(ctx context.Context, request Request, ports Ports) Outcome {
 		waveEnd := len(state.plan.Batches)
 		waveStuck := false
 		for index := waveStart; index < waveEnd; index++ {
-			terminal, stopped := executeBatch(ctx, request, ports, state, index)
-			if stopped {
+			result := executeBatch(ctx, request, ports, state, index)
+			if result.outcome != nil {
+				terminal := *result.outcome
 				terminal.Findings = state.outcomeFindings(terminal.Findings)
 				return terminal
 			}
@@ -262,283 +263,311 @@ func Execute(ctx context.Context, request Request, ports Ports) Outcome {
 	}
 }
 
-func executeBatch(ctx context.Context, request Request, ports Ports, state *engineState, index int) (Outcome, bool) {
+type executionResult struct {
+	outcome *Outcome
+}
+
+func continuedExecution() executionResult {
+	return executionResult{}
+}
+
+func stoppedExecution(outcome Outcome) executionResult {
+	return executionResult{outcome: &outcome}
+}
+
+type attemptResultKind uint8
+
+const (
+	attemptSucceeded attemptResultKind = iota
+	attemptSemanticFailure
+	attemptInfrastructureFailure
+	attemptStopped
+)
+
+type attemptResult struct {
+	kind            attemptResultKind
+	failure         string
+	findings        []finding.Finding
+	retryable       bool
+	stopIfCancelled bool
+	outcome         Outcome
+}
+
+type batchAttempt struct {
+	request      Request
+	ports        Ports
+	state        *engineState
+	index        int
+	number       int
+	retryFailure string
+}
+
+func executeBatch(ctx context.Context, request Request, ports Ports, state *engineState, index int) executionResult {
 	retryFailure := ""
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	for number := 1; number <= maxAttempts; number++ {
 		if outcome, stopped := stopForContext(ctx, request.Rails, state.persisted); stopped {
-			return outcome, true
+			return stoppedExecution(outcome)
 		}
 		if err := request.Rails.AdmitAttempt(); err != nil {
 			kind := OutcomeErrored
 			if errors.Is(err, ErrRailExhausted) {
 				kind = OutcomeRails
 			}
-			return engineOutcome(kind, state.persisted, nil, request.Rails, err.Error()), true
+			return stoppedExecution(engineOutcome(kind, state.persisted, nil, request.Rails, err.Error()))
 		}
 		delete(state.semanticFindings, index)
 		if outcome, stopped := stopForContext(ctx, request.Rails, state.persisted); stopped {
-			return outcome, true
+			return stoppedExecution(outcome)
 		}
 
-		batch := &state.plan.Batches[index]
-		batch.Status = BatchRunning
-		batch.Attempts = append(batch.Attempts, Attempt{Number: attempt, Status: AttemptRunning})
-		if err := state.persist(); err != nil {
-			return failedInfrastructure(ctx, request, ports, state, index, attempt, "write running plan: "+err.Error())
-		}
-		if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if outcome, stopped := stopAttemptForRail(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		brief, err := BuildBrief(BriefInput{MergeBase: request.MergeBase, OriginalHead: request.OriginalHead, Batch: *batch, RetryFailure: retryFailure})
-		if err != nil {
-			return failedInfrastructure(ctx, request, ports, state, index, attempt, "build brief: "+err.Error())
-		}
-		if err := ports.Audit.WriteBrief(batch.ID, attempt, []byte(brief)); err != nil {
-			return failedInfrastructure(ctx, request, ports, state, index, attempt, "write brief: "+err.Error())
-		}
-		if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if outcome, stopped := stopAttemptForRail(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		sink, err := ports.Audit.AdapterSink(batch.ID, attempt)
-		if err != nil {
-			return failedInfrastructure(ctx, request, ports, state, index, attempt, "allocate adapter sink: "+err.Error())
-		}
-		if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if outcome, stopped := stopAttemptForRail(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		gitState, err := ports.Workspace.SnapshotGitState(ctx)
-		if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if outcome, stopped := stopAttemptForRail(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if err != nil {
-			return failedInfrastructure(ctx, request, ports, state, index, attempt, "snapshot Git state: "+err.Error())
-		}
-		_, adapterRunErr := ports.Adapter.Run(ctx, adapter.Request{Root: ports.Workspace.Root(), Brief: brief, Sink: sink})
-		recoveryCtx, cancelRecovery := recoveryContext(ctx)
-		integrityErr := ports.Workspace.CheckGitState(recoveryCtx, gitState)
-		cancelRecovery()
-		if integrityErr != nil {
-			failure := boundedFailure("check Git state: " + integrityErr.Error())
-			if !errors.Is(integrityErr, ErrGitStateRestored) {
-				return failedInfrastructure(ctx, request, ports, state, index, attempt, failure)
+		attempt := batchAttempt{request: request, ports: ports, state: state, index: index, number: number, retryFailure: retryFailure}
+		result := attempt.run(ctx)
+		switch result.kind {
+		case attemptSucceeded:
+			return continuedExecution()
+		case attemptStopped:
+			return stoppedExecution(result.outcome)
+		case attemptSemanticFailure:
+			if outcome := attempt.abortSemantic(ctx, result.failure); outcome != nil {
+				return stoppedExecution(*outcome)
 			}
-			if terminal, stopped := semanticFailure(ctx, request, ports, state, index, attempt, failure); stopped {
-				return terminal, true
+			if result.stopIfCancelled && ctx.Err() != nil {
+				return stoppedExecution(engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, result.failure))
 			}
-			if ctx.Err() != nil {
-				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, failure), true
+			if number == maxAttempts {
+				return continuedExecution()
 			}
-			if attempt == maxAttempts {
-				return Outcome{}, false
+		case attemptInfrastructureFailure:
+			failure := result.failure
+			if resetErr := attempt.failAndReset(ctx, failure); resetErr != nil {
+				failure = resetErr.Error()
+				return stoppedExecution(engineOutcome(OutcomeErrored, state.persisted, result.findings, request.Rails, failure))
 			}
-			retryFailure = failure
-			continue
-		}
-		if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if outcome, stopped := stopAttemptForRail(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if adapterRunErr != nil {
-			retryable := false
-			var classified *adapter.Error
-			retryable = errors.As(adapterRunErr, &classified) && classified.Retryable
-			failure := boundedFailure("adapter: " + adapterRunErr.Error())
-			if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
-				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
+			if !result.retryable || number == maxAttempts {
+				return stoppedExecution(engineOutcome(OutcomeErrored, state.persisted, result.findings, request.Rails, failure))
 			}
-			if !retryable || attempt == maxAttempts {
-				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, failure), true
-			}
-			retryFailure = failure
-			continue
 		}
-
-		changed, err := ports.Workspace.ChangedFiles(ctx)
-		if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if outcome, stopped := stopAttemptForRail(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if err != nil {
-			failure := boundedFailure("inspect changed files: " + err.Error())
-			if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
-				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
-			}
-			if attempt == maxAttempts {
-				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, failure), true
-			}
-			retryFailure = failure
-			continue
-		}
-		if len(changed) == 0 {
-			failure := "agent produced no worktree changes"
-			if terminal, stopped := semanticFailure(ctx, request, ports, state, index, attempt, failure); stopped {
-				return terminal, true
-			}
-			if attempt == maxAttempts {
-				return Outcome{}, false
-			}
-			retryFailure = failure
-			continue
-		}
-		proof, err := ports.Workspace.PrepareBatch(ctx, changed)
-		if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if err != nil {
-			failure := boundedFailure("prepare batch proof: " + err.Error())
-			if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
-				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
-			}
-			if attempt == maxAttempts {
-				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, failure), true
-			}
-			retryFailure = failure
-			continue
-		}
-
-		validationBatch := cloneBatch(*batch)
-		validationBatch.proof = cloneBatchProof(proof)
-		validation := ports.Validate(ctx, validationBatch)
-		recoveryCtx, cancelRecovery = recoveryContext(ctx)
-		proofErr := ports.Workspace.VerifyBatch(recoveryCtx, proof)
-		cancelRecovery()
-		if proofErr != nil {
-			validation = ValidationResult{Kind: ValidationInfrastructureFailure, Failure: boundedFailure("verify batch proof: " + proofErr.Error()), ChangedFiles: append([]string(nil), changed...)}
-		}
-		if proofErr != nil && ctx.Err() != nil {
-			return failedInfrastructure(ctx, request, ports, state, index, attempt, validation.Failure)
-		}
-		if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if outcome, stopped := stopAttemptForRail(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if proofErr == nil && validation.Kind == ValidationPassed {
-			validation.Proof = cloneBatchProof(proof)
-		} else {
-			validation.Proof = BatchProof{}
-		}
-		if _, err := BlockingMultiset(validation.Findings); err != nil {
-			return failedInfrastructure(ctx, request, ports, state, index, attempt, "classify validation findings: "+err.Error())
-		}
-		if err := validateAttemptResult(validation); err != nil {
-			return failedInfrastructure(ctx, request, ports, state, index, attempt, "invalid batch validation: "+err.Error())
-		}
-		switch validation.Kind {
-		case ValidationSemanticFailure:
-			state.semanticFindings[index] = cloneFindings(validation.Findings)
-			failure := boundedFailure(validation.Failure)
-			if terminal, stopped := semanticFailure(ctx, request, ports, state, index, attempt, failure); stopped {
-				return terminal, true
-			}
-			if attempt == maxAttempts {
-				return Outcome{}, false
-			}
-			retryFailure = failure
-			continue
-		case ValidationInfrastructureFailure:
-			failure := boundedFailure(validation.Failure)
-			if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
-				return engineOutcome(OutcomeErrored, state.persisted, validation.Findings, request.Rails, resetErr.Error()), true
-			}
-			if attempt == maxAttempts {
-				return engineOutcome(OutcomeErrored, state.persisted, validation.Findings, request.Rails, failure), true
-			}
-			retryFailure = failure
-			continue
-		case ValidationPassed:
-			delete(state.semanticFindings, index)
-		}
-		if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-		if outcome, stopped := stopAttemptForRail(ctx, request, ports, state, index, attempt); stopped {
-			return outcome, true
-		}
-
-		commit, err := ports.Workspace.CommitBatch(ctx, batch.PrimaryFile, validation.Proof)
-		if err != nil {
-			if outcome, stopped := stopAttemptForContext(ctx, request, ports, state, index, attempt); stopped {
-				return outcome, true
-			}
-			failure := boundedFailure("commit batch: " + err.Error())
-			if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
-				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
-			}
-			if attempt == maxAttempts {
-				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, failure), true
-			}
-			retryFailure = failure
-			continue
-		}
-		batch.Attempts[len(batch.Attempts)-1] = Attempt{Number: attempt, Status: AttemptPassed, ChangedFiles: append([]string(nil), changed...), Commit: commit}
-		batch.Status = BatchDone
-		if err := state.persist(); err != nil {
-			if !planWasPublished(err) {
-				recoveryCtx, cancelRecovery := recoveryContext(ctx)
-				rollbackErr := ports.Workspace.RollbackBatch(recoveryCtx, commit)
-				cancelRecovery()
-				if rollbackErr != nil {
-					return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, "write completed plan: "+err.Error()+"; rollback committed batch: "+rollbackErr.Error()), true
-				}
-			}
-			return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, "write completed plan: "+err.Error()), true
-		}
-		if outcome, stopped := stopForContext(ctx, request.Rails, state.persisted); stopped {
-			return outcome, true
-		}
-		if outcome, stopped := stopForRail(request.Rails, state.persisted); stopped {
-			return outcome, true
-		}
-		return Outcome{}, false
+		retryFailure = result.failure
 	}
-	panic("unreachable")
+	return continuedExecution()
 }
 
-func semanticFailure(ctx context.Context, request Request, ports Ports, state *engineState, index, attempt int, failure string) (Outcome, bool) {
-	if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
-		return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
+func (attempt batchAttempt) run(ctx context.Context) attemptResult {
+	batch := &attempt.state.plan.Batches[attempt.index]
+	batch.Status = BatchRunning
+	batch.Attempts = append(batch.Attempts, Attempt{Number: attempt.number, Status: AttemptRunning})
+	if err := attempt.state.persist(); err != nil {
+		return attempt.infrastructureFailure("write running plan: "+err.Error(), false, nil)
 	}
-	if attempt == maxAttempts {
-		state.plan.Batches[index].Status = BatchStuck
-		if err := state.persist(); err != nil {
-			return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, "write stuck plan: "+err.Error()), true
+	if stopped := attempt.checkpoint(ctx); stopped.kind == attemptStopped {
+		return stopped
+	}
+
+	brief, err := BuildBrief(BriefInput{MergeBase: attempt.request.MergeBase, OriginalHead: attempt.request.OriginalHead, Batch: *batch, RetryFailure: attempt.retryFailure})
+	if err != nil {
+		return attempt.infrastructureFailure("build brief: "+err.Error(), false, nil)
+	}
+	if err := attempt.ports.Audit.WriteBrief(batch.ID, attempt.number, []byte(brief)); err != nil {
+		return attempt.infrastructureFailure("write brief: "+err.Error(), false, nil)
+	}
+	if stopped := attempt.checkpoint(ctx); stopped.kind == attemptStopped {
+		return stopped
+	}
+
+	sink, err := attempt.ports.Audit.AdapterSink(batch.ID, attempt.number)
+	if err != nil {
+		return attempt.infrastructureFailure("allocate adapter sink: "+err.Error(), false, nil)
+	}
+	if stopped := attempt.checkpoint(ctx); stopped.kind == attemptStopped {
+		return stopped
+	}
+
+	gitState, err := attempt.ports.Workspace.SnapshotGitState(ctx)
+	// A stop takes precedence because SnapshotGitState may have crossed a rail
+	// while touching the workspace, even when it also returned an error.
+	if stopped := attempt.checkpoint(ctx); stopped.kind == attemptStopped {
+		return stopped
+	}
+	if err != nil {
+		return attempt.infrastructureFailure("snapshot Git state: "+err.Error(), false, nil)
+	}
+
+	_, adapterRunErr := attempt.ports.Adapter.Run(ctx, adapter.Request{Root: attempt.ports.Workspace.Root(), Brief: brief, Sink: sink})
+	recoveryCtx, cancelRecovery := recoveryContext(ctx)
+	integrityErr := attempt.ports.Workspace.CheckGitState(recoveryCtx, gitState)
+	cancelRecovery()
+	if integrityErr != nil {
+		failure := boundedFailure("check Git state: " + integrityErr.Error())
+		if !errors.Is(integrityErr, ErrGitStateRestored) {
+			return attempt.infrastructureFailure(failure, false, nil)
+		}
+		return attemptResult{kind: attemptSemanticFailure, failure: failure, stopIfCancelled: true}
+	}
+	if stopped := attempt.checkpoint(ctx); stopped.kind == attemptStopped {
+		return stopped
+	}
+	if adapterRunErr != nil {
+		var classified *adapter.Error
+		retryable := errors.As(adapterRunErr, &classified) && classified.Retryable
+		return attempt.infrastructureFailure("adapter: "+adapterRunErr.Error(), retryable, nil)
+	}
+
+	changed, err := attempt.ports.Workspace.ChangedFiles(ctx)
+	if stopped := attempt.checkpoint(ctx); stopped.kind == attemptStopped {
+		return stopped
+	}
+	if err != nil {
+		return attempt.infrastructureFailure("inspect changed files: "+err.Error(), true, nil)
+	}
+	if len(changed) == 0 {
+		return attemptResult{kind: attemptSemanticFailure, failure: "agent produced no worktree changes"}
+	}
+
+	proof, err := attempt.ports.Workspace.PrepareBatch(ctx, changed)
+	if stopped := attempt.checkpointContext(ctx); stopped.kind == attemptStopped {
+		return stopped
+	}
+	if err != nil {
+		return attempt.infrastructureFailure("prepare batch proof: "+err.Error(), true, nil)
+	}
+
+	validationBatch := cloneBatch(*batch)
+	validationBatch.proof = cloneBatchProof(proof)
+	validation := attempt.ports.Validate(ctx, validationBatch)
+	// Validation is followed by proof verification so validator-side workspace
+	// mutation cannot be committed using evidence prepared before validation.
+	recoveryCtx, cancelRecovery = recoveryContext(ctx)
+	proofErr := attempt.ports.Workspace.VerifyBatch(recoveryCtx, proof)
+	cancelRecovery()
+	if proofErr != nil {
+		validation = ValidationResult{Kind: ValidationInfrastructureFailure, Failure: boundedFailure("verify batch proof: " + proofErr.Error()), ChangedFiles: append([]string(nil), changed...)}
+	}
+	if proofErr != nil && ctx.Err() != nil {
+		return attempt.infrastructureFailure(validation.Failure, false, nil)
+	}
+	if stopped := attempt.checkpoint(ctx); stopped.kind == attemptStopped {
+		return stopped
+	}
+	if proofErr == nil && validation.Kind == ValidationPassed {
+		validation.Proof = cloneBatchProof(proof)
+	} else {
+		validation.Proof = BatchProof{}
+	}
+	if _, err := BlockingMultiset(validation.Findings); err != nil {
+		return attempt.infrastructureFailure("classify validation findings: "+err.Error(), false, nil)
+	}
+	if err := validateAttemptResult(validation); err != nil {
+		return attempt.infrastructureFailure("invalid batch validation: "+err.Error(), false, nil)
+	}
+	switch validation.Kind {
+	case ValidationSemanticFailure:
+		attempt.state.semanticFindings[attempt.index] = cloneFindings(validation.Findings)
+		return attemptResult{kind: attemptSemanticFailure, failure: boundedFailure(validation.Failure)}
+	case ValidationInfrastructureFailure:
+		return attempt.infrastructureFailure(validation.Failure, true, validation.Findings)
+	case ValidationPassed:
+		delete(attempt.state.semanticFindings, attempt.index)
+	}
+	if stopped := attempt.checkpoint(ctx); stopped.kind == attemptStopped {
+		return stopped
+	}
+
+	commit, err := attempt.ports.Workspace.CommitBatch(ctx, batch.PrimaryFile, validation.Proof)
+	if err != nil {
+		if stopped := attempt.checkpointContext(ctx); stopped.kind == attemptStopped {
+			return stopped
+		}
+		return attempt.infrastructureFailure("commit batch: "+err.Error(), true, nil)
+	}
+	batch.Attempts[len(batch.Attempts)-1] = Attempt{Number: attempt.number, Status: AttemptPassed, ChangedFiles: append([]string(nil), changed...), Commit: commit}
+	batch.Status = BatchDone
+	if err := attempt.state.persist(); err != nil {
+		// A published plan already claims the commit. Otherwise compensate for
+		// the failed durable transition by rolling the workspace commit back.
+		if !planWasPublished(err) {
+			recoveryCtx, cancelRecovery := recoveryContext(ctx)
+			rollbackErr := attempt.ports.Workspace.RollbackBatch(recoveryCtx, commit)
+			cancelRecovery()
+			if rollbackErr != nil {
+				return attempt.stopped(OutcomeErrored, "write completed plan: "+err.Error()+"; rollback committed batch: "+rollbackErr.Error())
+			}
+		}
+		return attempt.stopped(OutcomeErrored, "write completed plan: "+err.Error())
+	}
+	if outcome, stopped := stopForContext(ctx, attempt.request.Rails, attempt.state.persisted); stopped {
+		return attemptResult{kind: attemptStopped, outcome: outcome}
+	}
+	if outcome, stopped := stopForRail(attempt.request.Rails, attempt.state.persisted); stopped {
+		return attemptResult{kind: attemptStopped, outcome: outcome}
+	}
+	return attemptResult{kind: attemptSucceeded}
+}
+
+func (attempt batchAttempt) checkpoint(ctx context.Context) attemptResult {
+	if stopped := attempt.checkpointContext(ctx); stopped.kind == attemptStopped {
+		return stopped
+	}
+	err := attempt.request.Rails.AdmitLanding()
+	if err == nil {
+		return attemptResult{kind: attemptSucceeded}
+	}
+	failure := boundedFailure(err.Error())
+	if resetErr := attempt.failAndReset(ctx, failure); resetErr != nil {
+		return attempt.stopped(OutcomeErrored, resetErr.Error())
+	}
+	kind := OutcomeErrored
+	if errors.Is(err, ErrRailExhausted) {
+		kind = OutcomeRails
+	}
+	return attempt.stopped(kind, failure)
+}
+
+func (attempt batchAttempt) checkpointContext(ctx context.Context) attemptResult {
+	if ctx.Err() == nil {
+		return attemptResult{kind: attemptSucceeded}
+	}
+	if resetErr := attempt.failAndReset(ctx, ctx.Err().Error()); resetErr != nil {
+		return attempt.stopped(OutcomeErrored, resetErr.Error())
+	}
+	outcome, _ := stopForContext(ctx, attempt.request.Rails, attempt.state.persisted)
+	return attemptResult{kind: attemptStopped, outcome: outcome}
+}
+
+func (attempt batchAttempt) abortSemantic(ctx context.Context, failure string) *Outcome {
+	if resetErr := attempt.failAndReset(ctx, failure); resetErr != nil {
+		outcome := engineOutcome(OutcomeErrored, attempt.state.persisted, nil, attempt.request.Rails, resetErr.Error())
+		return &outcome
+	}
+	if attempt.number == maxAttempts {
+		attempt.state.plan.Batches[attempt.index].Status = BatchStuck
+		if err := attempt.state.persist(); err != nil {
+			outcome := engineOutcome(OutcomeErrored, attempt.state.persisted, nil, attempt.request.Rails, "write stuck plan: "+err.Error())
+			return &outcome
 		}
 	}
-	return Outcome{}, false
+	return nil
 }
 
-func failedInfrastructure(ctx context.Context, request Request, ports Ports, state *engineState, index, attempt int, failure string) (Outcome, bool) {
-	if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
-		failure = resetErr.Error()
+func (attempt batchAttempt) infrastructureFailure(failure string, retryable bool, findings []finding.Finding) attemptResult {
+	return attemptResult{
+		kind:      attemptInfrastructureFailure,
+		failure:   boundedFailure(failure),
+		findings:  cloneFindings(findings),
+		retryable: retryable,
 	}
-	return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, failure), true
 }
 
-func failAndReset(ctx context.Context, ports Ports, state *engineState, index, attempt int, failure string) error {
+func (attempt batchAttempt) stopped(kind OutcomeKind, failure string) attemptResult {
+	return attemptResult{kind: attemptStopped, outcome: engineOutcome(kind, attempt.state.persisted, nil, attempt.request.Rails, failure)}
+}
+
+func (attempt batchAttempt) failAndReset(ctx context.Context, failure string) error {
 	failure = boundedFailure(failure)
-	batch := &state.plan.Batches[index]
-	batch.Attempts[len(batch.Attempts)-1] = Attempt{Number: attempt, Status: AttemptFailed, Failure: failure}
-	if err := state.persist(); err != nil {
+	batch := &attempt.state.plan.Batches[attempt.index]
+	batch.Attempts[len(batch.Attempts)-1] = Attempt{Number: attempt.number, Status: AttemptFailed, Failure: failure}
+	if err := attempt.state.persist(); err != nil {
 		recoveryCtx, cancelRecovery := recoveryContext(ctx)
-		resetErr := ports.Workspace.ResetAttempt(recoveryCtx)
+		resetErr := attempt.ports.Workspace.ResetAttempt(recoveryCtx)
 		cancelRecovery()
 		if resetErr != nil {
 			return fmt.Errorf("write failed plan: %v; reset attempt: %w", err, resetErr)
@@ -546,7 +575,7 @@ func failAndReset(ctx context.Context, ports Ports, state *engineState, index, a
 		return fmt.Errorf("write failed plan: %w", err)
 	}
 	recoveryCtx, cancelRecovery := recoveryContext(ctx)
-	resetErr := ports.Workspace.ResetAttempt(recoveryCtx)
+	resetErr := attempt.ports.Workspace.ResetAttempt(recoveryCtx)
 	cancelRecovery()
 	if resetErr != nil {
 		return fmt.Errorf("reset attempt: %w", resetErr)
@@ -563,6 +592,8 @@ func persistPlan(audit Audit, plan Plan) error {
 	return audit.WritePlan(raw)
 }
 
+// Audit implementations may report that a failed write published the plan,
+// allowing commit compensation to preserve the now-durable state.
 func planWasPublished(err error) bool {
 	var published interface{ PlanPublished() bool }
 	return errors.As(err, &published) && published.PlanPublished()
@@ -651,17 +682,6 @@ func stopForContext(ctx context.Context, rails *Rails, persisted Plan) (Outcome,
 	return Outcome{}, false
 }
 
-func stopAttemptForContext(ctx context.Context, request Request, ports Ports, state *engineState, index, attempt int) (Outcome, bool) {
-	if ctx.Err() == nil {
-		return Outcome{}, false
-	}
-	failure := ctx.Err().Error()
-	if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
-		return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
-	}
-	return stopForContext(ctx, request.Rails, state.persisted)
-}
-
 func stopForRail(rails *Rails, persisted Plan) (Outcome, bool) {
 	err := rails.AdmitLanding()
 	if err == nil {
@@ -672,22 +692,6 @@ func stopForRail(rails *Rails, persisted Plan) (Outcome, bool) {
 		kind = OutcomeRails
 	}
 	return engineOutcome(kind, persisted, nil, rails, err.Error()), true
-}
-
-func stopAttemptForRail(ctx context.Context, request Request, ports Ports, state *engineState, index, attempt int) (Outcome, bool) {
-	err := request.Rails.AdmitLanding()
-	if err == nil {
-		return Outcome{}, false
-	}
-	failure := boundedFailure(err.Error())
-	if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
-		return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
-	}
-	kind := OutcomeErrored
-	if errors.Is(err, ErrRailExhausted) {
-		kind = OutcomeRails
-	}
-	return engineOutcome(kind, state.persisted, nil, request.Rails, failure), true
 }
 
 func railExhaustedNow(rails *Rails) bool {
