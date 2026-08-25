@@ -174,6 +174,16 @@ both layers at the boundary that owns it.
 Issues live as GitHub issues on `JoelLarson/togi`, via the `gh` CLI.
 See [`docs/agents/issue-tracker.md`](./docs/agents/issue-tracker.md).
 
+`ready-for-agent` marks **implementable leaf tickets only**. Phase tracking
+issues and specs carry no triage label: they exist to give leaf tickets their
+context, so a label-driven frontier query returns only real work.
+
+### Working the backlog unattended
+
+[`docs/agents/backlog-agent-prompt.md`](./docs/agents/backlog-agent-prompt.md)
+is the standing prompt for an agent running the backlog with nobody watching.
+Hand it over verbatim; it needs no editing as the tracker moves.
+
 ### Triage labels
 
 The five canonical triage labels are used verbatim, and all five exist on
