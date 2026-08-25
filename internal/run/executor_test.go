@@ -373,6 +373,30 @@ func TestExecuteDiffScopeAcceptsEmptyChangedLines(t *testing.T) {
 	}
 }
 
+func TestExecuteDropsWaivedFingerprintsAfterTouchedScope(t *testing.T) {
+	root := t.TempDir()
+	writeSource(t, root, "source.go", "package source\nvar first = 1\nvar second = 2\n")
+	raw := `{"Issues":[{"FromLinter":"check","Text":"first","Severity":"warning","Pos":{"Filename":"source.go","Line":2}},{"FromLinter":"check","Text":"second","Severity":"warning","Pos":{"Filename":"source.go","Line":3}}]}`
+	binding := gate.Binding{Language: "go", Tool: "fixture", Command: emitCommand(t, raw, "", 0), SuccessExitCodes: []int{0}, Normalizer: "golangci-json", SeverityMap: map[string]finding.Severity{"warning": finding.Warning}}
+	unfiltered := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{
+		Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff}}, Binding: binding, Root: root, RawSink: &memoryRawSink{},
+		ChangedLines: finding.ChangedLines{"source.go": {{Start: 2, End: 3}}},
+	}))
+	if unfiltered.Status != GateFindings || len(unfiltered.Findings) != 2 {
+		t.Fatalf("unfiltered report = %#v", unfiltered)
+	}
+	waived := unfiltered.Findings[0].Fingerprint
+	kept := unfiltered.Findings[1]
+	report := (Executor{Enrichers: enricher.Registry{"go": enricher.Noop{}}}).Execute(context.Background(), compileRequest(t, Request{
+		Gate: gate.Gate{Manifest: gate.Manifest{Name: "lint", Timeout: time.Second, Scope: gate.Diff}}, Binding: binding, Root: root, RawSink: &memoryRawSink{},
+		ChangedLines:       finding.ChangedLines{"source.go": {{Start: 2, End: 3}}},
+		WaivedFingerprints: map[string]struct{}{waived: {}},
+	}))
+	if report.Status != GateFindings || len(report.Findings) != 1 || report.Findings[0].Fingerprint != kept.Fingerprint {
+		t.Fatalf("waived report = %#v, want only %#v", report, kept)
+	}
+}
+
 func TestExecuteRejectsNilChangedLinesForDiffScopeBeforeCommand(t *testing.T) {
 	root := t.TempDir()
 	marker := filepath.Join(root, "executed")

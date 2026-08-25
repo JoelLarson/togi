@@ -291,6 +291,13 @@ func (service Service) prepareRun(ctx context.Context, opts Options) (preparedRu
 			requests[index].ChangedLines = diff.Lines
 		}
 	}
+	waivedFingerprints, err := loadWaivedFingerprints(repoState)
+	if err != nil {
+		return preparedRun{}, err
+	}
+	for index := range requests {
+		requests[index].WaivedFingerprints = waivedFingerprints
+	}
 	return preparedRun{repository: repository, repoState: repoState, runsDir: runsDir, diff: diff, requests: requests}, nil
 }
 

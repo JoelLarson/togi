@@ -393,6 +393,33 @@ func TestServiceScopesCommittedFindingsAndProducesStableMetadata(t *testing.T) {
 	}
 }
 
+func TestServiceDropsAWaivedTouchedFindingOnRerun(t *testing.T) {
+	root, paths, _, _ := scopedFixtureRepository(t)
+	gatetest.Write(t, paths.GateOverrides(), "point", gatetest.Command(fixtureCommand(t, fixtureJSON("scope.go", 4, "fixture/point", "in-scope finding"), false)...), gatetest.Scope(gate.Diff), gatetest.Location(gate.PointLocation))
+	gatetest.Write(t, paths.GateOverrides(), "other", gatetest.Command(fixtureCommand(t, fixtureJSON("scope.go", 4, "fixture/other", "sibling finding"), false)...), gatetest.Scope(gate.Diff), gatetest.Location(gate.PointLocation))
+	service := fixtureService(paths, new(bytes.Buffer))
+	first, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"point", "other"}, ReportOnly: true, NoColor: true})
+	assertVerdictError(t, err)
+	if len(first.Findings) != 2 {
+		t.Fatalf("first findings = %#v, want both in-scope findings", first.Findings)
+	}
+	waived := first.Findings[0]
+	kept := first.Findings[1]
+	if _, err := service.Waive(context.Background(), root, waived.Fingerprint, "the flagged fixture is deliberate"); err != nil {
+		t.Fatalf("Waive() = %v", err)
+	}
+	second, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"point", "other"}, ReportOnly: true, NoColor: true})
+	assertVerdictError(t, err)
+	if len(second.Findings) != 1 || second.Findings[0].Fingerprint != kept.Fingerprint {
+		t.Fatalf("second findings = %#v, want only %#v", second.Findings, kept)
+	}
+	third, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"point", "other"}, ReportOnly: true, NoColor: true})
+	assertVerdictError(t, err)
+	if len(third.Findings) != 1 || third.Findings[0].Fingerprint != kept.Fingerprint {
+		t.Fatalf("third findings = %#v, want the waiver to still apply", third.Findings)
+	}
+}
+
 func TestServiceRejectsZeroRepositoryIdentityBeforeStateUse(t *testing.T) {
 	storage := t.TempDir()
 	paths := resolveTestPaths(t, filepath.Join(storage, "config"), filepath.Join(storage, "state"), filepath.Join(storage, "cache"))

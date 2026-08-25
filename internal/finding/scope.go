@@ -61,6 +61,22 @@ func FilterTouched(findings []Finding, changed ChangedLines) ([]Finding, error) 
 	return filtered, nil
 }
 
+// FilterWaived drops findings whose fingerprints an operator has approved.
+// Filtering never changes identity and never mutates its input.
+func FilterWaived(findings []Finding, waived map[string]struct{}) ([]Finding, error) {
+	filtered := make([]Finding, 0, len(findings))
+	for index, finding := range findings {
+		if err := Validate(finding); err != nil {
+			return nil, fmt.Errorf("finding %d: %w", index, err)
+		}
+		if _, approved := waived[finding.Fingerprint]; approved {
+			continue
+		}
+		filtered = append(filtered, clone(finding))
+	}
+	return filtered, nil
+}
+
 // ValidateChangedLines verifies that changed-line paths and ranges are safe for scope filtering.
 func ValidateChangedLines(changed ChangedLines) error {
 	_, err := validatedChangedLines(changed)

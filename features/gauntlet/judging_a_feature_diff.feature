@@ -35,6 +35,17 @@ Feature: Judging a feature diff
       When I run the gauntlet
       Then only the finding on line 8 remains
 
+    Scenario: A waived in-scope finding is dismissed
+      Given a committed feature changes lines 4 and 8
+      And a diff-scoped gate reports point findings on lines 4 and 8
+      When I run the gauntlet
+      Then the findings on lines 4 and 8 remain
+      When I waive the finding on line 4
+      And I run the gauntlet
+      Then only the finding on line 8 remains
+      When I run the gauntlet
+      Then only the finding on line 8 remains
+
     Scenario: Touching a Go declaration includes its structural finding
       Given a committed feature changes the body of function "calculate"
       And a diff-scoped gate reports an entity finding on the function signature

@@ -1,5 +1,10 @@
 # The fix loop runs in a togi-owned worktree and lands its batch commits
 
+**Superseded by [ADR-0014](./0014-in-place-run-branch-squash-landing.md):**
+the fix loop runs in the agent's own idle worktree, and landing squash-merges a
+retained run branch rather than fast-forwarding its batch commits. The
+batch-as-rollback-point mechanism and the landing guards below survive intact.
+
 Fixing happens in a `git worktree` under the cache dir, on a branch
 `togi/run-<id>` cut from the feature branch's HEAD. The user's checkout is
 never touched — no dirty-tree precondition, no stashing, and they can keep

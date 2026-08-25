@@ -24,7 +24,7 @@ type diffFeature struct {
 }
 
 func newDiffFeature(factory harness.DriverFactory) *diffFeature {
-	return &diffFeature{world: harness.NewWorld(factory, harness.NeedsGauntlet)}
+	return &diffFeature{world: harness.NewWorld(factory, harness.NeedsGauntlet|harness.NeedsWaiver)}
 }
 
 func (f *diffFeature) initialize(sc *godog.ScenarioContext) {
@@ -45,9 +45,13 @@ func (f *diffFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Step(`^the report merge base is the shared commit$`, f.mergeBase)
 	sc.Step(`^only the feature finding is in scope$`, f.onlyFeature)
 	sc.Step(`^a committed feature changes line 8 but not line 3$`, f.pointLines)
+	sc.Step(`^a committed feature changes lines 4 and 8$`, f.twoChangedLines)
 	sc.Step(`^a diff-scoped gate reports point findings on lines 3 and 8$`, f.pointGate)
+	sc.Step(`^a diff-scoped gate reports point findings on lines 4 and 8$`, f.twoPointGate)
 	sc.Step(`^I run the gauntlet$`, f.runDefault)
 	sc.Step(`^only the finding on line 8 remains$`, f.lineEight)
+	sc.Step(`^the findings on lines 4 and 8 remain$`, f.linesFourAndEight)
+	sc.Step(`^I waive the finding on line 4$`, f.waiveLineFour)
 	sc.Step(`^a committed feature changes the body of function "([^"]*)"$`, f.entityChange)
 	sc.Step(`^a diff-scoped gate reports an entity finding on the function signature$`, f.entityGate)
 	sc.Step(`^the structural finding for "([^"]*)" remains$`, f.structural)
@@ -248,6 +252,41 @@ func (f *diffFeature) pointLines() error {
 }
 func (f *diffFeature) pointGate() error {
 	return f.gate("point", "diff", "point", lint("feature.go", 3, 8))
+}
+func (f *diffFeature) twoChangedLines() error {
+	r, e := f.simple()
+	if e != nil {
+		return e
+	}
+	return f.commitChange(r, "feature.go", "package fixture\n\nfunc Feature() {\n	value := 2\n	_ = value\n}\n\nfunc Added() {}\n")
+}
+func (f *diffFeature) twoPointGate() error {
+	return f.gate("point", "diff", "point", lint("feature.go", 4, 8))
+}
+func (f *diffFeature) linesFourAndEight() error {
+	r, e := f.report()
+	if e != nil {
+		return e
+	}
+	if len(r.Findings) != 2 || r.Findings[0].Line != 4 || r.Findings[1].Line != 8 {
+		return fmt.Errorf("findings=%#v", r.Findings)
+	}
+	return nil
+}
+func (f *diffFeature) waiveLineFour(ctx context.Context) error {
+	r, e := f.report()
+	if e != nil {
+		return e
+	}
+	for _, item := range r.Findings {
+		if item.Line == 4 {
+			return f.world.Waive(ctx, harness.WaiveRequest{
+				Root: f.world.Repository().Root, Fingerprint: item.Fingerprint,
+				Reason: "the flagged fixture is deliberate",
+			})
+		}
+	}
+	return fmt.Errorf("no finding on line 4 in %#v", r.Findings)
 }
 func (f *diffFeature) runDefault(ctx context.Context) error {
 	return f.world.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.world.Repository().Root, Base: f.base, NoColor: true}))

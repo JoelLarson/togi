@@ -11,7 +11,7 @@ root. There is no `CONTEXT-MAP.md` and no per-context ADR directory.
 - **[`CONTEXT.md`](../../CONTEXT.md)** at the repo root — the glossary, and
   non-negotiable vocabulary.
 - **[`docs/adr/`](../adr/)** — read the ADRs that touch the area you are about
-  to work in. There are 13, numbered `0001`–`0013`.
+  to work in. There are 14, numbered `0001`–`0014`.
 
 Both exist and are load-bearing here, so there is no "proceed silently if
 absent" case to fall back on.
@@ -23,7 +23,7 @@ absent" case to fall back on.
 ├── CONTEXT.md              ← the glossary
 ├── AGENTS.md               ← working agreement, non-negotiables, verify commands
 ├── docs/
-│   ├── adr/                ← 0001–0013, the load-bearing decisions
+│   ├── adr/                ← 0001–0014, the load-bearing decisions
 │   ├── design.md           ← gauntlet semantics: config, rails, verdicts, exit codes
 │   ├── implementation.md   ← Go-level choices: layout, CLI surface, ledger, schemas
 │   ├── language.md         ← guided tour of the vocabulary (not a source of truth)

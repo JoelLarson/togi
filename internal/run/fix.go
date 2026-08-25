@@ -510,6 +510,7 @@ func (service Service) collectGates(ctx context.Context, active *RunLedger, requ
 		if request.Gate.Manifest.Scope == "diff" {
 			prepared[index].ChangedLines = diff.Lines
 		}
+		prepared[index].WaivedFingerprints = request.WaivedFingerprints
 		sink, err := active.RawSink(request.Gate.Manifest.Name, request.Binding.Language)
 		if err != nil {
 			return nil, fmt.Errorf("prepare raw sink: %w", err)
