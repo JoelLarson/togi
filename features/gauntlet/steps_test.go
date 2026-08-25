@@ -809,7 +809,7 @@ type fixFeature struct {
 }
 
 func newFixFeature(factory harness.DriverFactory) *fixFeature {
-	return &fixFeature{world: harness.NewWorld(factory, harness.NeedsGauntlet)}
+	return &fixFeature{world: harness.NewWorld(factory, harness.NeedsGauntlet|harness.NeedsWaiver)}
 }
 
 func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
@@ -825,6 +825,8 @@ func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Step(`^the agent makes no changes$`, f.noOp)
 	sc.Step(`^the agent attempts (an unauthorized Git commit|a new suppression|test deletion|an assertion change)$`, f.integrityViolation)
 	sc.Step(`^the agent performs a witnessed compilation-only rename$`, f.witnessedRename)
+	sc.Step(`^each blocked integrity fingerprint is printed$`, f.printedIntegrityFingerprints)
+	sc.Step(`^I waive each blocked integrity fingerprint$`, f.waiveIntegrityFingerprints)
 	sc.Step(`^only one iteration is allowed$`, f.oneIteration)
 	sc.Step(`^the agent exceeds the wall-clock budget$`, f.wallClock)
 	sc.Step(`^the agent introduces a regression outside local validation$`, f.finalRegression)
@@ -1106,6 +1108,48 @@ func (f *fixFeature) mutateLandingTarget(ctx context.Context) {
 }
 
 func (f *fixFeature) report() (harness.Report, error) { return f.world.LastRun().Report() }
+
+func (f *fixFeature) printedIntegrityFingerprints() error {
+	report, err := f.report()
+	if err != nil {
+		return err
+	}
+	if report.Fix == nil || len(report.Fix.Integrity) == 0 {
+		return fmt.Errorf("blocked report has no integrity findings: %#v", report.Fix)
+	}
+	output := f.world.LastRun().Stdout()
+	for _, item := range report.Fix.Integrity {
+		if !strings.Contains(output, "[fingerprint: "+item.Fingerprint+"]") {
+			return fmt.Errorf("output does not print integrity fingerprint %q: %q", item.Fingerprint, output)
+		}
+	}
+	return nil
+}
+
+func (f *fixFeature) waiveIntegrityFingerprints(ctx context.Context) error {
+	report, err := f.report()
+	if err != nil {
+		return err
+	}
+	if report.Fix == nil || len(report.Fix.Integrity) == 0 {
+		return fmt.Errorf("blocked report has no integrity findings: %#v", report.Fix)
+	}
+	for _, item := range report.Fix.Integrity {
+		if err := f.world.Waive(ctx, harness.WaiveRequest{
+			Root: f.request.Root, Fingerprint: item.Fingerprint, Reason: "accepted fixture change",
+		}); err != nil {
+			return err
+		}
+		outcome, err := f.world.LastCommand().Outcome()
+		if err != nil {
+			return err
+		}
+		if outcome.Code != 0 {
+			return fmt.Errorf("waive %q exited %d", item.Fingerprint, outcome.Code)
+		}
+	}
+	return nil
+}
 
 func (f *fixFeature) outcome(verdict string, code int) error {
 	if verdict == "rails-exhausted" {

@@ -706,6 +706,25 @@ func TestAttemptValidatorAllowsWaivedIntegrityFindings(t *testing.T) {
 	}
 }
 
+func TestWaivedIntegrityFindingsMatchOnlyUnchangedIdentity(t *testing.T) {
+	original := validationFinding(t, "integrity", "pkg/a_test.go", "togi/test-behavior", 3)
+	waived := map[string]struct{}{original.Fingerprint: {}}
+
+	moved := original
+	moved.Line = 30
+	moved.Fingerprint = finding.Fingerprint(moved)
+	if got := unwaivedIntegrityFindings([]finding.Finding{moved}, waived); len(got) != 0 {
+		t.Fatalf("moved finding = %#v, want waived", got)
+	}
+
+	changed := original
+	changed.Snippet = "func TestA(t *testing.T) { t.Skip(\"approved\") }"
+	changed.Fingerprint = finding.Fingerprint(changed)
+	if got := unwaivedIntegrityFindings([]finding.Finding{changed}, waived); len(got) != 1 || got[0].Fingerprint != changed.Fingerprint {
+		t.Fatalf("changed snippet = %#v, want unwaived finding", got)
+	}
+}
+
 func TestAttemptValidatorStopsOnCancellationAndPreservesCause(t *testing.T) {
 	root := t.TempDir()
 	writeValidationFile(t, root, "go.mod", "module example.test/project\n\ngo 1.25\n")

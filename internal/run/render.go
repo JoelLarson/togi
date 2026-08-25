@@ -95,7 +95,11 @@ func renderFindings(output io.Writer, report Report, opts RenderOptions) error {
 		if opts.Color && !opts.NoColor {
 			severity = colorSeverity(item.Severity, severity)
 		}
-		if _, err := fmt.Fprintf(output, "%s:%d: %s: %s (%s)\n", safeText(item.File), item.Line, severity, safeText(item.Message), safeText(item.RuleID)); err != nil {
+		fingerprint := ""
+		if item.Fingerprint != "" {
+			fingerprint = " [fingerprint: " + safeText(item.Fingerprint) + "]"
+		}
+		if _, err := fmt.Fprintf(output, "%s:%d: %s: %s (%s)%s\n", safeText(item.File), item.Line, severity, safeText(item.Message), safeText(item.RuleID), fingerprint); err != nil {
 			return err
 		}
 		if len(item.Occurrences) > 0 {

@@ -150,10 +150,11 @@ func TestValidateDiffAcceptsBinaryAndZeroLineFiles(t *testing.T) {
 }
 
 func TestRenderUsesCompilerStyleAndOccurrences(t *testing.T) {
+	fingerprint := "0f2ac1e1b8f7c8b56b6da5e0f9dc0f6e6c1a2b3c4d5e6f708192a3b4c5d6e7f8"
 	report := Report{
 		Verdict: VerdictFindings,
 		Findings: []finding.Finding{
-			{File: "z.go", Line: 8, Severity: finding.Error, Message: "later", RuleID: "tool/later"},
+			{File: "z.go", Line: 8, Severity: finding.Error, Message: "later", RuleID: "tool/later", Fingerprint: fingerprint},
 			{File: "a.go", Line: 42, Severity: finding.Warning, Message: "complexity 18", RuleID: "gocyclo/complexity", Occurrences: []finding.Occurrence{{Line: 91}, {Line: 104}}},
 		},
 		Counts: Counts{Errors: 1, Warnings: 3, Occurrences: 4},
@@ -178,6 +179,22 @@ func TestRenderUsesCompilerStyleAndOccurrences(t *testing.T) {
 	}
 	if strings.Contains(got, "\x1b[") {
 		t.Fatalf("unexpected ANSI in colorless output: %q", got)
+	}
+	if !strings.Contains(got, "[fingerprint: "+fingerprint+"]") {
+		t.Fatalf("output missing fingerprint:\n%s", got)
+	}
+}
+
+func TestRenderSanitizesFingerprint(t *testing.T) {
+	report := Report{Findings: []finding.Finding{{
+		File: "a.go", Line: 1, Severity: finding.Error, Message: "finding", RuleID: "tool/rule", Fingerprint: "approved\nforged",
+	}}}
+	var out bytes.Buffer
+	if err := Render(&out, report, RenderOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "approved\nforged") {
+		t.Fatalf("output contains unsanitized fingerprint: %q", out.String())
 	}
 }
 

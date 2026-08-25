@@ -114,12 +114,7 @@ func (validator AttemptValidator) Validate(ctx context.Context, root string, cha
 		return validationFailure(result, ValidationInfrastructureFailure, "evaluate integrity evidence: "+integrity.Err.Error(), nil)
 	}
 	if len(integrity.Findings) != 0 {
-		unwaived := integrity.Findings[:0]
-		for _, item := range integrity.Findings {
-			if _, waived := validator.WaivedFingerprints[item.Fingerprint]; !waived {
-				unwaived = append(unwaived, item)
-			}
-		}
+		unwaived := unwaivedIntegrityFindings(integrity.Findings, validator.WaivedFingerprints)
 		if len(unwaived) != 0 {
 			return validationFailure(result, ValidationSemanticFailure, "integrity validation found regressions", unwaived)
 		}
@@ -193,6 +188,16 @@ func (validator AttemptValidator) Validate(ctx context.Context, root string, cha
 	result.Findings = nil
 	result.Proof = cloneBatchProof(batch.proof)
 	return cloneValidationResult(result)
+}
+
+func unwaivedIntegrityFindings(findings []finding.Finding, waived map[string]struct{}) []finding.Finding {
+	result := findings[:0]
+	for _, item := range findings {
+		if _, approved := waived[item.Fingerprint]; !approved {
+			result = append(result, item)
+		}
+	}
+	return result
 }
 
 func verifyPreparedBatch(ctx context.Context, proof BatchProof) error {

@@ -83,6 +83,16 @@ Feature: Fixing a feature diff safely
       Then the fix run is unsealed with exit 6
       And the witnessed rename reaches the feature branch
 
+    Scenario: A waived integrity violation permits the next fix run
+      Given a green feature with a blocking finding
+      And the agent attempts a new suppression
+      When I run the fix loop
+      Then the fix run is blocked with exit 2
+      And each blocked integrity fingerprint is printed
+      When I waive each blocked integrity fingerprint
+      And I run the fix loop
+      Then the fix run is unsealed with exit 6
+
   Rule: Rails and stalemate bound unattended execution
     Scenario: The iteration rail stops retries
       Given a green feature with a blocking finding
