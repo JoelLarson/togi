@@ -28,14 +28,19 @@ func TestNewEngineStateInitializesSemanticFindings(t *testing.T) {
 
 func TestAttemptResultRetainsClassification(t *testing.T) {
 	want := Outcome{Kind: OutcomeRails, Failure: "rail"}
+	wantFinding := planFinding("a.go", 1, "lint/a", "a")
 	result := attemptResult{
 		kind:      attemptStopped,
 		outcome:   want,
 		failure:   "failure",
+		findings:  []finding.Finding{wantFinding},
 		retryable: true,
 	}
 	if result.kind != attemptStopped || result.outcome.Kind != OutcomeRails || result.failure != "failure" || !result.retryable {
 		t.Fatalf("result = %#v", result)
+	}
+	if !reflect.DeepEqual(result.findings, []finding.Finding{wantFinding}) {
+		t.Fatalf("findings = %#v", result.findings)
 	}
 }
 
@@ -73,6 +78,87 @@ func TestEvaluateBarrierPersistsOnceWhenClassificationFails(t *testing.T) {
 	}
 	if len(audit.plans) != 1 {
 		t.Fatalf("plan writes = %d, want 1", len(audit.plans))
+	}
+}
+
+func TestEvaluateBarrierClassifiesResultsAndPersistsOnce(t *testing.T) {
+	first := planFinding("a.go", 1, "lint/a", "a")
+	second := planFinding("b.go", 2, "lint/b", "b")
+	beforeBoth, err := BlockingMultiset([]finding.Finding{first, second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeFirst, err := BlockingMultiset([]finding.Finding{first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterFirst, err := BlockingMultiset([]finding.Finding{first})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		barrier     ValidationResult
+		before      map[string]int
+		waveStuck   bool
+		cancel      bool
+		exhaustRail bool
+		wantKind    OutcomeKind
+		wantFailure string
+		wantBlocker map[string]int
+		wantFinding bool
+	}{
+		{name: "cancellation", barrier: ValidationResult{Kind: ValidationPassed}, before: beforeFirst, cancel: true, wantKind: OutcomeErrored, wantFailure: context.Canceled.Error()},
+		{name: "rail exhaustion", barrier: ValidationResult{Kind: ValidationPassed}, before: beforeFirst, exhaustRail: true, wantKind: OutcomeRails, wantFailure: ErrRailExhausted.Error()},
+		{name: "invalid validation", barrier: ValidationResult{Kind: ValidationPassed, Failure: "unexpected"}, before: beforeFirst, wantKind: OutcomeErrored, wantFailure: "invalid barrier validation"},
+		{name: "infrastructure failure", barrier: ValidationResult{Kind: ValidationInfrastructureFailure, Failure: "gate crashed", Findings: []finding.Finding{first}}, before: beforeBoth, wantKind: OutcomeErrored, wantFailure: "gate crashed", wantFinding: true},
+		{name: "semantic failure", barrier: ValidationResult{Kind: ValidationSemanticFailure, Failure: "regression", Findings: []finding.Finding{first}}, before: beforeBoth, wantKind: OutcomeBlocked, wantFailure: "regression", wantFinding: true},
+		{name: "stuck wave", barrier: ValidationResult{Kind: ValidationPassed}, before: beforeFirst, waveStuck: true, wantKind: OutcomeBlocked, wantFailure: "one or more batches are stuck"},
+		{name: "ready", barrier: ValidationResult{Kind: ValidationPassed}, before: beforeFirst, wantKind: OutcomeReady},
+		{name: "stalemate", barrier: ValidationResult{Kind: ValidationPassed, Findings: []finding.Finding{first}}, before: beforeFirst, wantKind: OutcomeBlocked, wantFailure: "did not strictly shrink", wantFinding: true},
+		{name: "shrinking continuation", barrier: ValidationResult{Kind: ValidationPassed, Findings: []finding.Finding{first}}, before: beforeBoth, wantBlocker: afterFirst},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			audit := &engineAudit{}
+			state := newEngineState(audit, Plan{SchemaVersion: 1})
+			request := engineRequest(t, nil, maxAttempts)
+			if test.exhaustRail {
+				now := time.Unix(0, 0)
+				rails, err := NewRails(RailConfig{MaxIterations: maxAttempts, MaxWallClock: time.Minute}, func() time.Time { return now })
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Rails = rails
+				now = now.Add(time.Minute)
+			}
+			ctx := context.Background()
+			if test.cancel {
+				cancelled, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cancelled
+			}
+
+			result := evaluateBarrier(ctx, request, state, test.barrier, test.before, test.waveStuck)
+
+			if len(audit.plans) != 1 {
+				t.Fatalf("plan writes = %d, want 1", len(audit.plans))
+			}
+			if test.wantBlocker != nil {
+				if result.outcome != nil || !reflect.DeepEqual(result.blockers, test.wantBlocker) {
+					t.Fatalf("result = %#v, want continuation with %v", result, test.wantBlocker)
+				}
+				return
+			}
+			if result.outcome == nil || result.outcome.Kind != test.wantKind || !strings.Contains(result.outcome.Failure, test.wantFailure) {
+				t.Fatalf("outcome = %#v, blockers = %v, want kind %q containing %q", result.outcome, result.blockers, test.wantKind, test.wantFailure)
+			}
+			if gotFinding := len(result.outcome.Findings) > 0; gotFinding != test.wantFinding {
+				t.Fatalf("findings = %#v, want present %v", result.outcome.Findings, test.wantFinding)
+			}
+		})
 	}
 }
 
