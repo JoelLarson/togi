@@ -90,13 +90,24 @@ type Outcome struct {
 
 const failureTruncationMarker = "\n...[truncated]"
 
-const recoveryTimeout = 30 * time.Second
+const (
+	maxAttempts     = 2
+	recoveryTimeout = 30 * time.Second
+)
 
 type engineState struct {
 	audit            Audit
 	plan             Plan
 	persisted        Plan
 	semanticFindings map[int][]finding.Finding
+}
+
+func newEngineState(audit Audit, plan Plan) *engineState {
+	return &engineState{
+		audit:            audit,
+		plan:             plan,
+		semanticFindings: make(map[int][]finding.Finding),
+	}
 }
 
 func (state *engineState) outcomeFindings(additional []finding.Finding) []finding.Finding {
@@ -152,7 +163,7 @@ func Execute(ctx context.Context, request Request, ports Ports) Outcome {
 	if err != nil {
 		return engineOutcome(OutcomeErrored, Plan{}, nil, request.Rails, "classify initial blockers: "+err.Error())
 	}
-	state := &engineState{audit: ports.Audit, plan: plan}
+	state := newEngineState(ports.Audit, plan)
 	if outcome, stopped := stopForContext(ctx, request.Rails, state.persisted); stopped {
 		return outcome
 	}
@@ -253,7 +264,7 @@ func Execute(ctx context.Context, request Request, ports Ports) Outcome {
 
 func executeBatch(ctx context.Context, request Request, ports Ports, state *engineState, index int) (Outcome, bool) {
 	retryFailure := ""
-	for attempt := 1; attempt <= 2; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if outcome, stopped := stopForContext(ctx, request.Rails, state.persisted); stopped {
 			return outcome, true
 		}
@@ -271,7 +282,7 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 
 		batch := &state.plan.Batches[index]
 		batch.Status = BatchRunning
-		batch.Attempts = append(batch.Attempts, Attempt{Number: attempt, Status: "running"})
+		batch.Attempts = append(batch.Attempts, Attempt{Number: attempt, Status: AttemptRunning})
 		if err := state.persist(); err != nil {
 			return failedInfrastructure(ctx, request, ports, state, index, attempt, "write running plan: "+err.Error())
 		}
@@ -329,7 +340,7 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 			if ctx.Err() != nil {
 				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, failure), true
 			}
-			if attempt == 2 {
+			if attempt == maxAttempts {
 				return Outcome{}, false
 			}
 			retryFailure = failure
@@ -349,7 +360,7 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 			if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
 				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
 			}
-			if !retryable || attempt == 2 {
+			if !retryable || attempt == maxAttempts {
 				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, failure), true
 			}
 			retryFailure = failure
@@ -368,7 +379,7 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 			if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
 				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
 			}
-			if attempt == 2 {
+			if attempt == maxAttempts {
 				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, failure), true
 			}
 			retryFailure = failure
@@ -379,7 +390,7 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 			if terminal, stopped := semanticFailure(ctx, request, ports, state, index, attempt, failure); stopped {
 				return terminal, true
 			}
-			if attempt == 2 {
+			if attempt == maxAttempts {
 				return Outcome{}, false
 			}
 			retryFailure = failure
@@ -394,7 +405,7 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 			if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
 				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
 			}
-			if attempt == 2 {
+			if attempt == maxAttempts {
 				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, failure), true
 			}
 			retryFailure = failure
@@ -432,15 +443,12 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 		}
 		switch validation.Kind {
 		case ValidationSemanticFailure:
-			if state.semanticFindings == nil {
-				state.semanticFindings = make(map[int][]finding.Finding)
-			}
 			state.semanticFindings[index] = cloneFindings(validation.Findings)
 			failure := boundedFailure(validation.Failure)
 			if terminal, stopped := semanticFailure(ctx, request, ports, state, index, attempt, failure); stopped {
 				return terminal, true
 			}
-			if attempt == 2 {
+			if attempt == maxAttempts {
 				return Outcome{}, false
 			}
 			retryFailure = failure
@@ -450,7 +458,7 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 			if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
 				return engineOutcome(OutcomeErrored, state.persisted, validation.Findings, request.Rails, resetErr.Error()), true
 			}
-			if attempt == 2 {
+			if attempt == maxAttempts {
 				return engineOutcome(OutcomeErrored, state.persisted, validation.Findings, request.Rails, failure), true
 			}
 			retryFailure = failure
@@ -474,13 +482,13 @@ func executeBatch(ctx context.Context, request Request, ports Ports, state *engi
 			if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
 				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
 			}
-			if attempt == 2 {
+			if attempt == maxAttempts {
 				return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, failure), true
 			}
 			retryFailure = failure
 			continue
 		}
-		batch.Attempts[len(batch.Attempts)-1] = Attempt{Number: attempt, Status: "passed", ChangedFiles: append([]string(nil), changed...), Commit: commit}
+		batch.Attempts[len(batch.Attempts)-1] = Attempt{Number: attempt, Status: AttemptPassed, ChangedFiles: append([]string(nil), changed...), Commit: commit}
 		batch.Status = BatchDone
 		if err := state.persist(); err != nil {
 			if !planWasPublished(err) {
@@ -508,7 +516,7 @@ func semanticFailure(ctx context.Context, request Request, ports Ports, state *e
 	if resetErr := failAndReset(ctx, ports, state, index, attempt, failure); resetErr != nil {
 		return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, resetErr.Error()), true
 	}
-	if attempt == 2 {
+	if attempt == maxAttempts {
 		state.plan.Batches[index].Status = BatchStuck
 		if err := state.persist(); err != nil {
 			return engineOutcome(OutcomeErrored, state.persisted, nil, request.Rails, "write stuck plan: "+err.Error()), true
@@ -527,7 +535,7 @@ func failedInfrastructure(ctx context.Context, request Request, ports Ports, sta
 func failAndReset(ctx context.Context, ports Ports, state *engineState, index, attempt int, failure string) error {
 	failure = boundedFailure(failure)
 	batch := &state.plan.Batches[index]
-	batch.Attempts[len(batch.Attempts)-1] = Attempt{Number: attempt, Status: "failed", Failure: failure}
+	batch.Attempts[len(batch.Attempts)-1] = Attempt{Number: attempt, Status: AttemptFailed, Failure: failure}
 	if err := state.persist(); err != nil {
 		recoveryCtx, cancelRecovery := recoveryContext(ctx)
 		resetErr := ports.Workspace.ResetAttempt(recoveryCtx)

@@ -29,7 +29,7 @@
 - Modify: `internal/flywheel/engine_test.go`
 - Modify: `internal/flywheel/engine.go.cleanup.md`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add a plan JSON test that assigns `AttemptRunning`, `AttemptPassed`, and
 `AttemptFailed` to `Attempt.Status` and expects the existing string values. Add
@@ -61,7 +61,7 @@ func TestNewEngineStateInitializesSemanticFindings(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -71,14 +71,14 @@ go test ./internal/flywheel -run 'TestAttemptStatusesKeepPersistedValues|TestNew
 
 Expected: compile failure because the status constants and constructor do not exist.
 
-- [ ] **Step 3: Implement the named state**
+- [x] **Step 3: Implement the named state**
 
 In `plan.go`, define `AttemptStatus string`, constants for running/passed/failed,
 and change `Attempt.Status` from `string` to `AttemptStatus`. In `engine.go`, add
 `const maxAttempts = 2`, add `newEngineState`, and construct state through it.
 Replace raw status strings and remove the lazy semantic map initialization.
 
-- [ ] **Step 4: Verify GREEN and commit**
+- [x] **Step 4: Verify GREEN and commit**
 
 ```sh
 gofmt -w internal/flywheel/plan.go internal/flywheel/plan_test.go internal/flywheel/engine.go internal/flywheel/engine_test.go

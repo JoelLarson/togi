@@ -4,13 +4,31 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/joellarson/togi/internal/finding"
 )
+
+func TestAttemptStatusesKeepPersistedValues(t *testing.T) {
+	got, err := json.Marshal([]Attempt{
+		{Status: AttemptRunning},
+		{Status: AttemptPassed},
+		{Status: AttemptFailed},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{"running", "passed", "failed"} {
+		if !strings.Contains(string(got), `"status":"`+status+`"`) {
+			t.Fatalf("statuses = %s, want %q", got, status)
+		}
+	}
+}
 
 func TestNewPlanGroupsByPrimaryFileInStableReportOrder(t *testing.T) {
 	findings := []finding.Finding{

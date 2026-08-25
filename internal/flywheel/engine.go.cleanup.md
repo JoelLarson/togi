@@ -110,15 +110,15 @@ to `a.semanticFailure(ctx, failure)`, and the file's call graph becomes scannabl
 
 ## 7. Smaller, cheap wins
 
-- **`const maxAttempts = 2`** — the literal `attempt == 2` appears eight times; the
+- [x] **`const maxAttempts = 2`** — the literal `attempt == 2` appears eight times; the
   retry policy deserves a name.
-- **Typed attempt statuses** — `"running"`, `"passed"`, `"failed"` (engine.go:274,
+- [x] **Typed attempt statuses** — `"running"`, `"passed"`, `"failed"` (engine.go:274,
   483, 530) are raw strings while batch status gets proper constants (`BatchDone`,
   `BatchStuck`). Inconsistent, and a typo would compile fine.
 - **Dead code** — `retryable := false` at engine.go:345 is immediately overwritten on
   line 347; `railExecutionContext` (engine.go:692) is a pass-through wrapper that
   adds only indirection.
-- **Lazy map init** — initialize `semanticFindings` in an `engineState` constructor
+- [x] **Lazy map init** — initialize `semanticFindings` in an `engineState` constructor
   and delete the nil check at engine.go:435.
 - **Naming** — `semanticFailure` and `failedInfrastructure` read as nouns but are
   actions with different signatures and different stop behavior; something like

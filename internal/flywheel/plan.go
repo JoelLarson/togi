@@ -21,13 +21,22 @@ const (
 	BatchStuck   BatchStatus = "stuck"
 )
 
+// AttemptStatus records an attempt's durable execution state.
+type AttemptStatus string
+
+const (
+	AttemptRunning AttemptStatus = "running"
+	AttemptPassed  AttemptStatus = "passed"
+	AttemptFailed  AttemptStatus = "failed"
+)
+
 // Attempt records the durable outcome of one agent invocation.
 type Attempt struct {
-	Number       int      `json:"number"`
-	Status       string   `json:"status"`
-	Failure      string   `json:"failure,omitempty"`
-	ChangedFiles []string `json:"changed_files,omitempty"`
-	Commit       string   `json:"commit,omitempty"`
+	Number       int           `json:"number"`
+	Status       AttemptStatus `json:"status"`
+	Failure      string        `json:"failure,omitempty"`
+	ChangedFiles []string      `json:"changed_files,omitempty"`
+	Commit       string        `json:"commit,omitempty"`
 }
 
 // Batch is one primary-file fix unit.

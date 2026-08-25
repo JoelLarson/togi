@@ -17,6 +17,15 @@ import (
 	"github.com/joellarson/togi/internal/gitcmd/gitcmdtest"
 )
 
+func TestNewEngineStateInitializesSemanticFindings(t *testing.T) {
+	audit := &engineAudit{}
+	plan := Plan{SchemaVersion: 1}
+	state := newEngineState(audit, plan)
+	if state.audit != audit || state.plan.SchemaVersion != 1 || state.semanticFindings == nil {
+		t.Fatalf("state = %#v", state)
+	}
+}
+
 func TestEngineExecutesBatchesSeriallyAndAuditsTransitions(t *testing.T) {
 	first := planFinding("a.go", 1, "lint/a", "a")
 	second := planFinding("b.go", 2, "lint/b", "b")
