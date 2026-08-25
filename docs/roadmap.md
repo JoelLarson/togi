@@ -31,6 +31,60 @@ under [`features/`](../features/README.md). It exercises assembled Phase 1/2
 and wiki behavior through service and compiled-CLI drivers without changing
 the dependency-driven phase order below.
 
+## Domain review backlog — 2026-08-25
+
+A pass over every `.feature` file against [CONTEXT.md](../CONTEXT.md) settled
+the glossary in place (verdicts and their exit codes, `unverified` widened,
+config tiers cut to two, the fix-loop terms rewritten to lead with shipped
+behavior). What it could not settle is listed here, to be picked up as
+specification and tickets.
+
+**Defect — the enricher does less than the glossary promises.** `CONTEXT.md`
+says an entity finding's range is replaced at *both* ends by its enclosing
+declaration, and that its **snippet** becomes the declaration's signature, so
+the **fingerprint** is the declaration's identity. `internal/enricher/go.go`
+only fills `EndLine`: `Line` and `Snippet` keep whatever the tool reported.
+Consequences today — two findings of one rule inside one declaration do not
+collapse into one, and an edit inside a declaration changes its fingerprint,
+which is the stability the ratchet, stalemate accounting, and waivers all rest
+on. The glossary is the target; this is unfinished Phase 2.
+
+**Change — in-place execution and a retained run branch (ADR-0014).** The fix
+loop moves out of the cache worktree into the agent's own idle worktree,
+refusing to start unless it is clean and on the expected branch; the run branch
+is retained after a squash landing. This rewrites the dirty / detached /
+branch-moved scenarios in `fixing_a_feature_diff.feature`: the first two become
+entry preconditions, only branch-moved stays a landing-time guard, and the
+"validated run branch is absent" assertion after a successful land is reversed.
+Run-branch pruning is deliberately unspecified.
+
+**Catalog coverage — shipped behavior with no scenario.** Each needs step
+implementations against the existing drivers, so each is its own change:
+
+- **Severity thresholds.** A gate manifest declares `blocking` severities and
+  the fix loop plans only blocking findings, but nothing shows a non-blocking
+  finding being reported without driving the verdict or the fix loop. The
+  highest-value gap: it is the difference between *reported* and *blocks*.
+- **Brief boundedness.** `CONTEXT.md` says a brief "contains no code beyond
+  finding snippets" — the one containment property the catalog claims and never
+  checks. Needs a driver observation point on the persisted brief.
+- **Entity degradation.** An entity finding with no enclosing declaration (an
+  import, a package clause) stays a point rather than erroring.
+- **Adapter selection.** `--agent` ships, but the catalog only exercises the
+  missing-agent path — nothing shows selection working or the interface being
+  vendor-neutral. Pairs naturally with the Claude/Kimi conformance adapters.
+- **repo-id fallbacks.** The chain is root commit → normalized remote hash →
+  absolute path hash; only the shared-history case is covered.
+
+**Wording — `judging_a_feature_diff.feature` conflates two axes.** Its single
+Rule, "Gate scope determines which findings survive," covers both scope
+(diff / whole-repo) and location (point / entity) — the exact pairing
+`CONTEXT.md` warns against. Split into "Gate scope selects which findings are
+judged against the diff" and "Location fixes a finding's range before scoping."
+Related: the cross-file fix scenario should say which side of the diff boundary
+the related file is on, now that scope is explicitly a bound on *judgment* and
+never on *mutation*.
+
 ---
 
 ## Phase 1 — Run engine, findings, and two report-only Go gates
