@@ -299,7 +299,7 @@ git add internal/flywheel/engine.go.cleanup.md
 git commit -m "Complete engine cleanup checklist"
 ```
 
-- [ ] **Step 4: Request independent review**
+- [x] **Step 4: Request independent review**
 
 Spawn a fresh agent with no implementation history. Instruct it to read
 `internal/flywheel/engine.go.cleanup.md` and the design, inspect `main...HEAD`, and
