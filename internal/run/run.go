@@ -18,6 +18,7 @@ import (
 	"github.com/joellarson/togi/internal/flywheel"
 	"github.com/joellarson/togi/internal/gate"
 	"github.com/joellarson/togi/internal/repoid"
+	"github.com/joellarson/togi/internal/waiver"
 )
 
 const (
@@ -127,7 +128,7 @@ func (service Service) runReportOnly(ctx context.Context, opts Options, prepared
 		return Report{}, err
 	}
 	gateReports := Collect(ctx, service.Executor, prepared.requests, min(runtime.NumCPU(), defaultMaximumWorkers))
-	report, err = ComposeReport(active.runID, prepared.repository.Key(), startedAt, now().UTC(), prepared.diff, gateReports)
+	report, err = ComposeReport(active.runID, prepared.repository.Key(), startedAt, now().UTC(), prepared.diff, gateReports, prepared.waivers)
 	if err != nil {
 		return Report{}, err
 	}
@@ -168,7 +169,7 @@ func (service Service) writeVerbose(enabled bool, requests []Request) error {
 	return nil
 }
 
-func ComposeReport(runID, repoID string, startedAt, finishedAt time.Time, diff Diff, gateReports []GateReport) (Report, error) {
+func ComposeReport(runID, repoID string, startedAt, finishedAt time.Time, diff Diff, gateReports []GateReport, waivers []waiver.Record) (Report, error) {
 	if err := validateDiff(diff); err != nil {
 		return Report{}, fmt.Errorf("validate report diff: %w", err)
 	}
@@ -191,6 +192,7 @@ func ComposeReport(runID, repoID string, startedAt, finishedAt time.Time, diff D
 		FinishedAt:    finishedAt,
 		Gates:         gateReports,
 		Findings:      grouped,
+		Waivers:       cloneWaiverRecords(waivers),
 	}
 	if report.FinishedAt.Before(report.StartedAt) {
 		report.FinishedAt = report.StartedAt
@@ -201,6 +203,15 @@ func ComposeReport(runID, repoID string, startedAt, finishedAt time.Time, diff D
 		return Report{}, fmt.Errorf("validate composed report: %w", err)
 	}
 	return report, nil
+}
+
+func cloneWaiverRecords(records []waiver.Record) []waiver.Record {
+	if records == nil {
+		return []waiver.Record{}
+	}
+	cloned := make([]waiver.Record, len(records))
+	copy(cloned, records)
+	return cloned
 }
 
 func validateDiff(diff Diff) error {
@@ -256,6 +267,7 @@ type preparedRun struct {
 	runsDir    string
 	diff       Diff
 	requests   []Request
+	waivers    []waiver.Record
 }
 
 func (service Service) prepareRun(ctx context.Context, opts Options) (preparedRun, error) {
@@ -291,7 +303,11 @@ func (service Service) prepareRun(ctx context.Context, opts Options) (preparedRu
 			requests[index].ChangedLines = diff.Lines
 		}
 	}
-	return preparedRun{repository: repository, repoState: repoState, runsDir: runsDir, diff: diff, requests: requests}, nil
+	waivers, err := loadWaiverRecords(repoState)
+	if err != nil {
+		return preparedRun{}, err
+	}
+	return preparedRun{repository: repository, repoState: repoState, runsDir: runsDir, diff: diff, requests: requests, waivers: waivers}, nil
 }
 
 // Status renders the newest complete report without loading or executing gates.

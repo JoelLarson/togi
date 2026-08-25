@@ -7,10 +7,11 @@ import (
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/flywheel"
 	"github.com/joellarson/togi/internal/gate"
+	"github.com/joellarson/togi/internal/waiver"
 )
 
 // ReportSchemaVersion is the only persisted report schema accepted pre-1.0.
-const ReportSchemaVersion = 4
+const ReportSchemaVersion = 5
 
 // GateStatus describes the outcome of one gate execution.
 type GateStatus string
@@ -166,5 +167,6 @@ type Report struct {
 	Gates         []GateReport      `json:"gates"`
 	Findings      []finding.Finding `json:"findings"`
 	Counts        Counts            `json:"counts"`
+	Waivers       []waiver.Record   `json:"waivers"`
 	Fix           *FixReport        `json:"fix,omitempty"`
 }

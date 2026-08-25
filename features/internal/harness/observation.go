@@ -145,17 +145,23 @@ func clonePaths(value map[string]string) map[string]string {
 }
 
 type Report struct {
-	SchemaVersion int          `json:"schema_version"`
-	RunID         string       `json:"run_id"`
-	RepoID        string       `json:"repo_id"`
-	Diff          DiffReport   `json:"diff"`
-	StartedAt     time.Time    `json:"started_at"`
-	FinishedAt    time.Time    `json:"finished_at"`
-	Verdict       string       `json:"verdict"`
-	Gates         []GateReport `json:"gates"`
-	Findings      []Finding    `json:"findings"`
-	Counts        Counts       `json:"counts"`
-	Fix           *FixReport   `json:"fix,omitempty"`
+	SchemaVersion int            `json:"schema_version"`
+	RunID         string         `json:"run_id"`
+	RepoID        string         `json:"repo_id"`
+	Diff          DiffReport     `json:"diff"`
+	StartedAt     time.Time      `json:"started_at"`
+	FinishedAt    time.Time      `json:"finished_at"`
+	Verdict       string         `json:"verdict"`
+	Gates         []GateReport   `json:"gates"`
+	Findings      []Finding      `json:"findings"`
+	Counts        Counts         `json:"counts"`
+	Waivers       []WaiverRecord `json:"waivers"`
+	Fix           *FixReport     `json:"fix,omitempty"`
+}
+type WaiverRecord struct {
+	Fingerprint string    `json:"fingerprint"`
+	Reason      string    `json:"reason"`
+	ApprovedAt  time.Time `json:"approved_at"`
 }
 
 type FixReport struct {

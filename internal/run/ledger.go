@@ -25,6 +25,7 @@ import (
 	"github.com/joellarson/togi/internal/flywheel"
 	gatepkg "github.com/joellarson/togi/internal/gate"
 	"github.com/joellarson/togi/internal/repoid"
+	"github.com/joellarson/togi/internal/waiver"
 )
 
 var (
@@ -691,7 +692,33 @@ func validateReportHeader(report Report, runID string) error {
 	if report.Findings == nil {
 		return errors.New("report findings array is required")
 	}
+	if report.Waivers == nil {
+		return errors.New("report waivers array is required")
+	}
+	if err := validateReportWaivers(report.Waivers); err != nil {
+		return err
+	}
 	return validateDiffReport(report.Diff)
+}
+
+func validateReportWaivers(records []waiver.Record) error {
+	seen := make(map[string]struct{}, len(records))
+	for index, record := range records {
+		if !finding.ValidFingerprint(record.Fingerprint) {
+			return fmt.Errorf("waiver %d fingerprint is invalid", index)
+		}
+		if strings.TrimSpace(record.Reason) == "" || strings.ContainsAny(record.Reason, "\x00\r\n") {
+			return fmt.Errorf("waiver %d reason is invalid", index)
+		}
+		if record.ApprovedAt.IsZero() {
+			return fmt.Errorf("waiver %d approval time is required", index)
+		}
+		if _, exists := seen[record.Fingerprint]; exists {
+			return fmt.Errorf("waiver %d fingerprint is duplicated", index)
+		}
+		seen[record.Fingerprint] = struct{}{}
+	}
+	return nil
 }
 
 func (ledger Ledger) runsName() (string, error) {

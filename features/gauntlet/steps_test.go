@@ -809,7 +809,7 @@ type fixFeature struct {
 }
 
 func newFixFeature(factory harness.DriverFactory) *fixFeature {
-	return &fixFeature{world: harness.NewWorld(factory, harness.NeedsGauntlet|harness.NeedsWaiver)}
+	return &fixFeature{world: harness.NewWorld(factory, harness.NeedsGauntlet|harness.NeedsWaiver|harness.NeedsHistory)}
 }
 
 func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
@@ -827,6 +827,9 @@ func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Step(`^the agent performs a witnessed compilation-only rename$`, f.witnessedRename)
 	sc.Step(`^each blocked integrity fingerprint is printed$`, f.printedIntegrityFingerprints)
 	sc.Step(`^I waive each blocked integrity fingerprint$`, f.waiveIntegrityFingerprints)
+	sc.Step(`^the report records the honored waiver and its reason$`, f.recordsHonoredWaiver)
+	sc.Step(`^I inspect repository status$`, f.inspectStatus)
+	sc.Step(`^status renders a report containing the honored waiver$`, f.statusShowsHonoredWaiver)
 	sc.Step(`^only one iteration is allowed$`, f.oneIteration)
 	sc.Step(`^the agent exceeds the wall-clock budget$`, f.wallClock)
 	sc.Step(`^the agent introduces a regression outside local validation$`, f.finalRegression)
@@ -1146,6 +1149,43 @@ func (f *fixFeature) waiveIntegrityFingerprints(ctx context.Context) error {
 		}
 		if outcome.Code != 0 {
 			return fmt.Errorf("waive %q exited %d", item.Fingerprint, outcome.Code)
+		}
+	}
+	return nil
+}
+
+func (f *fixFeature) recordsHonoredWaiver() error {
+	report, err := f.report()
+	if err != nil {
+		return err
+	}
+	if len(report.Waivers) == 0 {
+		return fmt.Errorf("report waivers = %#v, want honored records", report.Waivers)
+	}
+	for _, record := range report.Waivers {
+		if record.Fingerprint == "" || record.Reason == "" {
+			return fmt.Errorf("honored waiver missing identity or reason: %#v", record)
+		}
+	}
+	return nil
+}
+
+func (f *fixFeature) inspectStatus(ctx context.Context) error {
+	return f.world.Status(ctx, harness.StatusRequest{Root: f.request.Root, NoColor: true})
+}
+
+func (f *fixFeature) statusShowsHonoredWaiver() error {
+	output := f.world.LastCommand().Stdout()
+	report, err := f.report()
+	if err != nil {
+		return err
+	}
+	if len(report.Waivers) == 0 {
+		return fmt.Errorf("completed report has no waivers")
+	}
+	for _, record := range report.Waivers {
+		if !strings.Contains(output, record.Fingerprint) || !strings.Contains(output, record.Reason) {
+			return fmt.Errorf("status output %q does not contain honored waiver %#v", output, record)
 		}
 	}
 	return nil

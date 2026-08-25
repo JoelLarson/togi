@@ -49,7 +49,7 @@ func TestComposeReportUsesPerGateBlockingAndPositionOrder(t *testing.T) {
 		{Gate: "advisory", Language: "go", Blocking: []finding.Severity{finding.Error}, FixPolicy: gate.ReportOnly, Position: 1, Status: GateFindings, Findings: []finding.Finding{warning}},
 		{Gate: "blocking-info", Language: "go", Blocking: []finding.Severity{finding.Info}, FixPolicy: gate.LLMFix, Position: 0, Status: GateFindings, Findings: []finding.Finding{info}},
 	}
-	report, err := ComposeReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime.Add(time.Second), fixtureDiff(), gates)
+	report, err := ComposeReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime.Add(time.Second), fixtureDiff(), gates, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestComposeReportUsesPerGateBlockingAndPositionOrder(t *testing.T) {
 	}
 
 	gates[1].Blocking = []finding.Severity{finding.Error}
-	report, err = ComposeReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime.Add(time.Second), fixtureDiff(), gates)
+	report, err = ComposeReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime.Add(time.Second), fixtureDiff(), gates, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestComposeReportErroredPrecedesBlockingFindings(t *testing.T) {
 	report, err := ComposeReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime, fixtureDiff(), []GateReport{
 		{Gate: "lint", Language: "go", Blocking: []finding.Severity{finding.Error}, FixPolicy: gate.ReportOnly, Position: 0, Status: GateFindings, Findings: []finding.Finding{item}},
 		{Gate: "broken", Language: "go", Blocking: []finding.Severity{finding.Error}, FixPolicy: gate.ReportOnly, Position: 1, Status: GateErrored, Error: "missing"},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestComposeReportRejectsInvalidExecutionMetadata(t *testing.T) {
 		candidate := base
 		candidate.Blocking = append([]finding.Severity(nil), base.Blocking...)
 		mutate(&candidate)
-		if _, err := ComposeReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime, fixtureDiff(), []GateReport{candidate}); err == nil {
+		if _, err := ComposeReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime, fixtureDiff(), []GateReport{candidate}, nil); err == nil {
 			t.Fatalf("ComposeReport accepted %#v", candidate)
 		}
 	}
@@ -117,7 +117,7 @@ func TestComposeReportSnapshotsNestedGateState(t *testing.T) {
 		FixPolicy: gate.ReportOnly, Position: 0, Status: GateFindings,
 		Warnings: []string{"version drift"}, Findings: []finding.Finding{item},
 	}}
-	report, err := ComposeReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime, fixtureDiff(), source)
+	report, err := ComposeReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime, fixtureDiff(), source, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestComposeReportLedgerRoundTripPreservesCanonicalArtifact(t *testing.T) {
 	report, err := ComposeReport(run.runID, ledgerTestRepoID, fixedTime, fixedTime.Add(time.Second), fixtureDiff(), []GateReport{{
 		Gate: "lint", Language: "go", Blocking: []finding.Severity{finding.Error, finding.Warning},
 		FixPolicy: gate.ReportOnly, Position: 0, Status: GatePassed,
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

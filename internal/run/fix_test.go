@@ -793,7 +793,7 @@ func TestRenderFixSummaryOmitsPrivateArtifacts(t *testing.T) {
 	}
 }
 
-func TestSchema4FixReportRoundTrips(t *testing.T) {
+func TestSchema5FixReportRoundTrips(t *testing.T) {
 	report := completeReportFixture("20260821T120000.000000000Z-0000")
 	report.Verdict = VerdictUnsealed
 	report.Fix = &FixReport{
@@ -811,8 +811,8 @@ func TestSchema4FixReportRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"schema_version":4`) || !strings.Contains(string(raw), `"fix":`) {
-		t.Fatalf("schema-4 JSON = %s", raw)
+	if !strings.Contains(string(raw), `"schema_version":5`) || !strings.Contains(string(raw), `"fix":`) {
+		t.Fatalf("schema-5 JSON = %s", raw)
 	}
 	if err := validateReport(report, report.RunID); err != nil {
 		t.Fatalf("validateReport() error = %v", err)
