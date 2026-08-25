@@ -20,6 +20,7 @@ import (
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/flywheel"
 	"github.com/joellarson/togi/internal/gate/gatetest"
+	"github.com/joellarson/togi/internal/repoid"
 	"github.com/joellarson/togi/internal/runner"
 )
 
@@ -571,14 +572,60 @@ func TestFixStopsBeforeAdapterForUnverifiedBaselineAndNoBlockers(t *testing.T) {
 	}
 }
 
+func TestFixRefusesOccupiedWorktreeBeforeLedgerOrGates(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		want    string
+		prepare func(*testing.T, string)
+	}{
+		{name: "dirty", want: "fix run refused: worktree is dirty", prepare: func(t *testing.T, root string) {
+			writeDiffTestFile(t, root, "pending.go", "package fixture\n")
+		}},
+		{name: "detached", want: "fix run refused: worktree is detached", prepare: func(t *testing.T, root string) {
+			gitFixture(t, root, "checkout", "--detach", "-q")
+		}},
+		{name: "another branch", want: "fix run refused: worktree is not on the expected feature branch", prepare: func(t *testing.T, root string) {
+			gitFixture(t, root, "checkout", "-q", "HEAD~1")
+			gitFixture(t, root, "checkout", "-q", "-B", "other")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, paths := fixtureRepository(t)
+			marker := filepath.Join(t.TempDir(), "executed")
+			gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(helperBinary(t), "active", marker, "1ms", marker+".done"))
+			service := fixtureService(paths, new(bytes.Buffer))
+			service.Suite = stubSuite{run: func(context.Context, string, []string, bool) (SuiteResult, error) {
+				t.Fatal("suite started")
+				return SuiteResult{}, nil
+			}}
+			service.Adapters = map[string]adapter.Adapter{"codex": stubAdapter{}}
+			test.prepare(t, root)
+			report, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}, Agent: "codex", MaxIterations: 2, MaxWallClock: time.Minute, NoColor: true})
+			if err == nil || report.RunID != "" {
+				t.Fatalf("Run() = %#v, %v", report, err)
+			}
+			if !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Run error = %v, want %q", err, test.want)
+			}
+			if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("gate helper executed: %v", statErr)
+			}
+			id, resolveErr := repoid.Resolve(context.Background(), root)
+			if resolveErr != nil {
+				t.Fatal(resolveErr)
+			}
+			if _, statErr := os.Stat(paths.RepoState(id)); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("ledger state created: %v", statErr)
+			}
+		})
+	}
+}
+
 func TestFixTreatsFeatureBranchResolutionFailureAsInfrastructure(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mutate func(*testing.T, string, *Service)
 	}{
-		{name: "detached HEAD", mutate: func(t *testing.T, root string, _ *Service) {
-			gitFixture(t, root, "checkout", "--detach", "-q")
-		}},
 		{name: "Git failure", mutate: func(_ *testing.T, _ string, service *Service) {
 			service.ResolveFeatureBranch = func(context.Context, string) (string, error) {
 				return "", errors.New("Git infrastructure unavailable")

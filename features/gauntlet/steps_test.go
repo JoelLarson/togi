@@ -806,6 +806,8 @@ type fixFeature struct {
 	mode         string
 	request      harness.RunRequest
 	landingDone  chan error
+	beforeTree   []string
+	marker       string
 }
 
 func newFixFeature(factory harness.DriverFactory) *fixFeature {
@@ -830,6 +832,9 @@ func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Step(`^only one iteration is allowed$`, f.oneIteration)
 	sc.Step(`^the agent exceeds the wall-clock budget$`, f.wallClock)
 	sc.Step(`^the agent introduces a regression outside local validation$`, f.finalRegression)
+	sc.Step(`^the worktree is (dirty|detached|on another branch)$`, f.occupiedWorktree)
+	sc.Step(`^the fix run is refused because the worktree is (dirty|detached|on another branch)$`, f.entryRefused)
+	sc.Step(`^no gate, ledger, or target-repository file is created$`, f.noSideEffects)
 	sc.Step(`^the agent fixes it while the original worktree becomes (dirty|detached|branch-moved)$`, f.landingConflict)
 	sc.Step(`^I run the fix loop$`, f.run)
 	sc.Step(`^the fix run is (unsealed|errored|unverified|blocked|rails-exhausted) with exit (\d+)$`, f.outcome)
@@ -845,7 +850,7 @@ func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
 }
 
 func (f *fixFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {
-	f.originalHead, f.mode, f.landingDone = "", "", nil
+	f.originalHead, f.mode, f.landingDone, f.marker, f.beforeTree = "", "", nil, "", nil
 	f.request = harness.RunRequest{Agent: "codex", GateNames: []string{"quality"}, MaxIterations: 4, MaxWallClock: 5 * time.Second, NoColor: true}
 	return f.world.Before(ctx, scenario)
 }
@@ -911,6 +916,79 @@ func (f *fixFeature) greenBlocked() error {
 		return err
 	}
 	return f.installQualityGate(false)
+}
+
+func (f *fixFeature) occupiedWorktree(precondition string) error {
+	repository := f.world.Repository()
+	switch precondition {
+	case "dirty":
+		if err := repository.Write("dirty.go", "package fixture\n"); err != nil {
+			return err
+		}
+	case "detached":
+		if _, err := repository.Git("checkout", "--detach", "-q"); err != nil {
+			return err
+		}
+	case "on another branch":
+		if _, err := repository.Git("checkout", "-q", "base"); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unknown occupied worktree %q", precondition)
+	}
+	tree, err := repository.Tree()
+	if err != nil {
+		return err
+	}
+	f.beforeTree = tree
+	return nil
+}
+
+func (f *fixFeature) entryRefused(precondition string) error {
+	outcome, err := f.world.LastRun().Outcome()
+	if err != nil {
+		return err
+	}
+	if outcome.Code == 0 {
+		return fmt.Errorf("outcome=%#v, want a refusal", outcome)
+	}
+	diagnostic := strings.ToLower(outcome.Message + f.world.LastRun().Stdout() + f.world.LastRun().Stderr())
+	switch precondition {
+	case "dirty":
+		if !strings.Contains(diagnostic, "dirty") && !strings.Contains(diagnostic, "clean") {
+			return fmt.Errorf("refusal %q does not name a dirty worktree", diagnostic)
+		}
+	case "detached":
+		if !strings.Contains(diagnostic, "detach") {
+			return fmt.Errorf("refusal %q does not name a detached HEAD", diagnostic)
+		}
+	case "on another branch":
+		if !strings.Contains(diagnostic, "branch") {
+			return fmt.Errorf("refusal %q does not name the unexpected branch", diagnostic)
+		}
+	}
+	return nil
+}
+
+func (f *fixFeature) noSideEffects() error {
+	if f.world.LastRun().ReportPath() != "" {
+		return fmt.Errorf("report=%q", f.world.LastRun().ReportPath())
+	}
+	state, err := f.world.Environment().RepoState(context.Background(), f.world.Repository().Root)
+	if err != nil {
+		return err
+	}
+	if _, err = os.Stat(state); !os.IsNotExist(err) {
+		return fmt.Errorf("state exists: %v", err)
+	}
+	after, err := f.world.Repository().Tree()
+	if err != nil {
+		return err
+	}
+	if strings.Join(after, "\n") != strings.Join(f.beforeTree, "\n") {
+		return fmt.Errorf("target tree changed")
+	}
+	return nil
 }
 
 func (f *fixFeature) greenClean() error {

@@ -158,26 +158,27 @@ Never overwrites an existing operator copy.
 ### The fix loop
 
 **Triage**:
-The deterministic post-barrier step: containment subordination, grouping by
-(file, principle page), ordering by gauntlet position — producing the
-action plan. Phase 3 uses deterministic primary-file batching; this richer
-triage remains a Phase 4 refinement.
+The deterministic post-barrier step that turns collected findings into the
+action plan: today, grouping blocking findings by primary file. Containment
+subordination, grouping by (file, principle page), and ordering by gauntlet
+position are the decided refinement (Phase 4).
 
 **Action plan**:
 `plan.json` in the run state dir: the ordered batch list with embedded
-findings and pending/running/done/stuck statuses; the flywheel consumes and
-rewrites it after each state transition. Phase 4 adds principle-page references
-and resume behavior.
+findings and pending/running/done/**stuck** statuses; the flywheel consumes
+and rewrites it after each state transition. Principle-page references and
+resume behavior are the decided additions (Phase 4).
 
 **Flywheel**:
 The single serial fix worker consuming the action plan batch-by-batch;
 never more than one writer in the worktree.
 
 **Batch**:
-One fix unit. The Phase 3 tracer groups findings by primary file; each attempt
-runs in one fresh agent context and commits only when validation passes. Phase
-4 replaces that grouping with (file, principle page), falling back to (file,
-rule_id).
+One fix unit: the blocking findings sharing a primary file. Each attempt runs
+in one fresh agent context and commits only when validation passes; a batch
+whose attempts keep failing to change anything goes **stuck**. Grouping by
+(file, principle page), falling back to (file, rule_id), is the decided
+replacement (Phase 4).
 
 **Behavior**:
 What the software does that is meaningful to its operation — in practice,
@@ -201,12 +202,19 @@ results read back as the worktree diff. Codex is the implemented adapter;
 Claude and Kimi remain later conformance adapters.
 
 **Landing**:
-Fast-forwarding the togi branch's validated **batch** commits onto the
-feature branch, one commit per batch, each message naming the finding's
-**principle page**; refused if the feature branch moved during the run.
-Fixing is isolated from the original worktree, which is updated only by this
-guarded landing. The Phase 3 tracer lands one squashed commit instead; per-
-batch landing is the decided replacement (ADR-0010).
+Squash-merging the **run branch**'s validated **batch** commits onto the
+feature branch as one commit; refused if the feature branch moved during the
+run. Fixing today happens in a togi-owned worktree, isolated from the
+original, which is updated only by this guarded landing. Running in the
+agent's own idle worktree, and retaining the run branch so its per-batch
+commits stay readable, is the decided replacement (ADR-0014).
+
+**Run branch**:
+`togi/run-<run-id>`, forked from the feature branch tip: where each validated
+**batch** commits, so a run's work is a readable sequence rather than a single
+opaque diff. It is the only durable thing togi leaves in a target repo's ref
+namespace, and is deleted today on a successful **landing**, preserved when
+landing is refused (ADR-0014 retains it instead).
 
 ### Execution
 
@@ -229,23 +237,58 @@ _Avoid_: raw `exec.Command("git", ...)` anywhere else
 
 ### Verdicts, rails, and state
 
+A run ends in exactly one **verdict**, and the verdict is what the exit code
+names. The codes are part of each definition below, because the report and the
+process outcome are one contract, not two.
+
 **Merge-ready**:
-The passing verdict: all enabled gates pass, none errored, integrity clean,
-behavioral suite green, seal passed.
+The passing verdict (exit 0): all enabled gates pass, none errored, integrity
+clean, behavioral suite green, seal passed. Not reachable until Phase 5 ships
+the **seal**.
+
+**Findings**:
+The verdict (exit 1) when gates completed and reported at least one blocking
+finding. A report-only run stops here; a fix run goes on to triage.
+
+**Blocked**:
+The verdict (exit 2) when togi refused to go further on evidence it does not
+trust: a **stalemate**, an **integrity gate** trip, a regression caught after
+local validation, or a **landing** the guards refused. The feature branch is
+left untouched.
+
+**Rails-exhausted**:
+The verdict (exit 3) when a **rail** — max iterations or wall-clock — stopped
+the fix loop before it reached a conclusion. Distinct from **blocked**: nothing
+was distrusted, togi simply ran out of budget.
+
+**Errored**:
+The verdict (exit 4) when infrastructure, not the code under judgment, ended
+the run: a gate **errored** during initial collection, or the selected agent
+adapter was missing or unusable. Nothing about the diff's quality is claimed.
+_Note_: a gate is also individually **errored** (see Findings) without the run
+necessarily taking this verdict.
 
 **Unverified**:
-The terminal verdict when the behavioral baseline is absent or red. No agent
-adapter runs.
+The verdict (exit 5) when togi produced no evidence the diff is merge-ready.
+Two conditions reach it: the behavioral baseline is absent or red, so no agent
+adapter runs; or a report-only run came back clear, which shows no gate
+objected but verifies nothing. Clear is not the same as good.
 
 **Unsealed**:
-The successful Phase 3 verdict after every implemented barrier passes and the
-guarded landing completes or is not needed. Phase 5's seal is absent, so
-merge-ready is not yet reachable and the CLI exits 6.
+The successful verdict (exit 6) after every implemented barrier passes and the
+guarded **landing** completes or is not needed. Phase 5's **seal** is absent,
+so merge-ready is not yet reachable.
 
 **Stalemate**:
 The finding set, compared by fingerprint and occurrence count, failed to
 strictly shrink across an iteration — covering both stalls and whack-a-mole
-churn; togi stops with a `blocked` report naming persistent fingerprints.
+churn. It is a *cause*, not a verdict: it produces a **blocked** report naming
+persistent fingerprints.
+
+The three adjacent words, smallest to largest: a **batch** goes **stuck** when
+its attempts stop changing anything; enough stuck work means the finding set
+did not shrink, which is a **stalemate**; a stalemate ends the run with the
+**blocked** verdict.
 
 **Rail**:
 A hard budget limit. Phase 3 enforces max iterations and wall-clock; agent
@@ -257,9 +300,10 @@ stored in external state, keyed by fingerprint.
 
 **Config tier**:
 Where a gate definition or principle page comes from — *shipped* (compiled
-into the binary), *operator* (XDG config, per machine), or *repository* (per
-project). An operator copy wholly overrides the shipped one; nothing is ever
-written into a target repository (ADR-0002, ADR-0003).
+into the binary) or *operator* (XDG config, per machine). An operator copy
+wholly overrides the shipped one; nothing is ever written into a target
+repository (ADR-0002, ADR-0003). There is deliberately no per-project tier
+yet: a repo cannot vary the gauntlet.
 
 **Repo-id**:
 A target repo's stable identity for external config/state: first root
@@ -274,8 +318,8 @@ private pre-cleanup report audit.
 
 ## Relationships
 
-- A **gauntlet** is an ordered list of **gate** names; a repo's per-project
-  config may override the list, order, and thresholds.
+- A **gauntlet** is an ordered list of **gate** names, fixed by the shipped and
+  **operator** tiers alone.
 - A **gate** owns one **binding** per supported language; each **binding**
   declares its **aliases**; many rule_ids map onto one **principle page**.
 - A **binding** produces **findings** through exactly one **normalizer**; the
@@ -291,8 +335,17 @@ private pre-cleanup report audit.
   identities and behavior remain protected.
 - A **waiver** neutralizes exactly one **fingerprint**; the **ratchet** and
   **stalemate** accounting are both keyed by **fingerprint**.
+- **Touched-entity scope** bounds which findings are *judged*, never which code
+  a fix may *change*: a batch may refactor beyond the feature diff, and is held
+  to the **integrity gates** and the behavioral suite rather than to a
+  boundary.
+- Validated **batch** commits accumulate on the **run branch**; **landing**
+  squash-merges them onto the feature branch it forked from.
 - **Merge-ready** requires the **seal**; Phase 3 success is **unsealed**, and
   **unverified** prevents adapter execution when no green baseline exists.
+- A **stalemate** produces the **blocked** verdict; a **rail** produces
+  **rails-exhausted**; infrastructure produces **errored**. Every verdict names
+  its exit code, so the report and the process outcome never disagree.
 
 ## Example dialogue
 

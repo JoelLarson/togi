@@ -3,6 +3,20 @@ Feature: Fixing a feature diff safely
   I want every mutation validated and bounded
   So that only witnessed improvements reach my feature branch
 
+  Rule: A fix run starts only from a clean expected worktree
+    Scenario Outline: An occupied worktree is refused before any mutation
+      Given a green feature with a blocking finding
+      And the worktree is <precondition>
+      When I run the fix loop
+      Then the fix run is refused because the worktree is <precondition>
+      And no gate, ledger, or target-repository file is created
+
+      Examples:
+        | precondition      |
+        | dirty             |
+        | detached          |
+        | on another branch |
+
   Rule: Mutation starts only from a green and complete baseline
     Scenario: A clean fix lands as one squash commit
       Given a green feature with a blocking finding
@@ -127,7 +141,5 @@ Feature: Fixing a feature diff safely
       And the concurrent feature state is preserved
 
       Examples:
-        | condition      |
-        | dirty          |
-        | detached       |
-        | branch-moved   |
+        | condition    |
+        | branch-moved |
