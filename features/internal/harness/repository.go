@@ -191,12 +191,21 @@ func fixturePath(name string) (string, error) {
 	return clean, nil
 }
 
+// fixtureCommitTime pins every fixture commit's author and committer date.
+// Without it a fixture's commit IDs — and therefore its repository identity —
+// depend on the wall clock, which makes any comparison between two separately
+// built fixtures a coin toss on how long the first one took.
+const fixtureCommitTime = "2026-08-22T00:00:00+0000"
+
 func runGit(dir string, args ...string) (string, error) {
 	safety := []string{"-c", "commit.gpgSign=false", "-c", "core.hooksPath=" + os.DevNull}
 	argv := append(safety, gitcmd.Args(gitcmd.Hermetic, args...)...)
 	command := exec.Command("git", argv...)
 	command.Dir = dir
-	command.Env = gitcmd.Env(gitcmd.Hermetic)
+	command.Env = append(gitcmd.Env(gitcmd.Hermetic),
+		"GIT_AUTHOR_DATE="+fixtureCommitTime,
+		"GIT_COMMITTER_DATE="+fixtureCommitTime,
+	)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
