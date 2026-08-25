@@ -17,6 +17,7 @@ import (
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/flywheel"
 	"github.com/joellarson/togi/internal/gate"
+	"github.com/joellarson/togi/internal/gitcmd"
 	"github.com/joellarson/togi/internal/repoid"
 )
 
@@ -90,9 +91,15 @@ func (service Service) Run(ctx context.Context, opts Options) (report Report, re
 	}
 	prepared, err := service.prepareRun(ctx, opts)
 	if err != nil {
+		if !opts.ReportOnly && isDirtyWorktree(err) {
+			return Report{}, errors.New("fix run refused: worktree is dirty")
+		}
 		return Report{}, err
 	}
 	if !opts.ReportOnly {
+		if err := refuseOccupiedFixWorktree(ctx, prepared); err != nil {
+			return Report{}, err
+		}
 		return service.runFix(ctx, opts, prepared)
 	}
 	return service.runReportOnly(ctx, opts, prepared)
@@ -292,6 +299,20 @@ func (service Service) prepareRun(ctx context.Context, opts Options) (preparedRu
 		}
 	}
 	return preparedRun{repository: repository, repoState: repoState, runsDir: runsDir, diff: diff, requests: requests}, nil
+}
+
+func refuseOccupiedFixWorktree(ctx context.Context, prepared preparedRun) error {
+	if _, err := gitcmd.Output(ctx, prepared.repository.Root(), gitcmd.Hermetic, 64<<10, "symbolic-ref", "--short", "HEAD"); err != nil {
+		return errors.New("fix run refused: worktree is detached")
+	}
+	if prepared.diff.Head != "" && prepared.diff.MergeBase != "" && prepared.diff.Head == prepared.diff.MergeBase {
+		return errors.New("fix run refused: worktree is not on the expected feature branch")
+	}
+	return nil
+}
+
+func isDirtyWorktree(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "worktree must be clean")
 }
 
 // Status renders the newest complete report without loading or executing gates.
