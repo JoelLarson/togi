@@ -18,9 +18,8 @@ Edit the right-hand column to match whatever vocabulary you actually use.
 
 ## Current state on GitHub
 
-`wontfix` already exists on `JoelLarson/togi` (it ships with GitHub's default
-label set). The other four do not exist yet. Create them once before the first
-triage run:
+All five labels exist on `JoelLarson/togi`. `wontfix` ships with GitHub's
+default label set; the other four were created with:
 
 ```sh
 gh label create needs-triage    --description "Maintainer needs to evaluate this issue" --color FBCA04

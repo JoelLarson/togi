@@ -50,8 +50,10 @@ one retry, stalemate detection, and iteration/wall-clock rails. An absent/red
 baseline is `unverified` and an errored initial gate retains all sibling gate
 signal; neither condition invokes the adapter. Spend rails remain deferred.
 
-The next slices are fingerprint-keyed waivers and Claude/Kimi adapter
-conformance. Complete those before Phase 4's richer containment triage,
+The next slice is fingerprint-keyed waivers. Claude/Kimi adapter conformance
+is the other half of Phase 3's remaining exit criterion, but it is deferred:
+Codex is the primary target, so Phase 3 stays formally open once waivers land.
+Complete the waiver work before Phase 4's richer containment triage,
 principle-aware plan and brief assembly, and resume behavior. Phase 3 already
 persists its simple `plan.json`, bounded briefs, private adapter logs, and
 schema-4 fix report; do not confuse those tracer artifacts with Phase 4's
@@ -142,8 +144,8 @@ See [`docs/agents/issue-tracker.md`](./docs/agents/issue-tracker.md).
 
 ### Triage labels
 
-The five canonical triage labels are used verbatim; only `wontfix` exists on
-GitHub so far. See [`docs/agents/triage-labels.md`](./docs/agents/triage-labels.md).
+The five canonical triage labels are used verbatim, and all five exist on
+GitHub. See [`docs/agents/triage-labels.md`](./docs/agents/triage-labels.md).
 
 ### Domain docs
 
