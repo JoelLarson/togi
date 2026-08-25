@@ -57,6 +57,21 @@ func Fingerprint(finding Finding) string {
 	return hex.EncodeToString(hash.Sum(nil))
 }
 
+// ValidFingerprint reports whether value has the shape Fingerprint produces.
+// It is the syntactic check a persisted or operator-supplied identity can be
+// held to; matching a fingerprint to a live finding is a separate question.
+func ValidFingerprint(value string) bool {
+	if len(value) != hex.EncodedLen(sha256.Size) {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func normalizeFile(file string) string {
 	return filepath.ToSlash(filepath.Clean(file))
 }

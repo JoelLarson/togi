@@ -435,3 +435,22 @@ func cloneFindings(findings []Finding) []Finding {
 	}
 	return cloned
 }
+
+func TestValidFingerprintAcceptsOnlyAProducedIdentity(t *testing.T) {
+	produced := Fingerprint(Finding{Gate: "lint", RuleID: "lint/rule", File: "a.go", Snippet: "x := 1"})
+	if !ValidFingerprint(produced) {
+		t.Fatalf("ValidFingerprint(%q) = false, want true", produced)
+	}
+	for _, value := range []string{
+		"",
+		"not-a-fingerprint",
+		strings.ToUpper(produced),
+		produced[:len(produced)-1],
+		produced + "0",
+		strings.Repeat("g", 64),
+	} {
+		if ValidFingerprint(value) {
+			t.Fatalf("ValidFingerprint(%q) = true, want false", value)
+		}
+	}
+}
