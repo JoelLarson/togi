@@ -16,4 +16,7 @@ pattern = "v?([0-9]+\\.[0-9]+\\.[0-9]+[-+0-9A-Za-z.]*)"
 constraint = ">=2.12.2 <3.0.0"
 
 [aliases]
-"golangci-lint/*" = "lint-correctness"
+"golangci-lint/errcheck" = "handling-every-error"
+"golangci-lint/unused" = "removing-dead-code"
+"golangci-lint/ineffassign" = "removing-dead-code"
+"golangci-lint/staticcheck" = "following-language-conventions"

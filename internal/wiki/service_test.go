@@ -222,12 +222,23 @@ func TestShowUnknownPageFails(t *testing.T) {
 	}
 }
 
+// The shipped bindings have no dangling alias, so this builds its own: the
+// subject is that a dangling alias warns rather than fails, not whether the
+// defaults happen to have a gap.
 func TestLintWarnsOnDanglingWithoutFailing(t *testing.T) {
-	service, stdout, stderr := newService(t, t.TempDir())
+	var stdout, stderr bytes.Buffer
+	service := Service{
+		Pages: Loader{OverrideDir: t.TempDir()},
+		Gates: gateSource{gates: []gate.Gate{
+			gatetest.Compile(t, "lint", gatetest.Aliases(map[string]string{"tool/rule": "no-such-page"})),
+		}},
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}
 	if err := service.Lint(); err != nil {
 		t.Fatalf("lint failed on a dangling alias: %v", err)
 	}
-	if !strings.Contains(stderr.String(), `"lint-correctness", which has no page`) {
+	if !strings.Contains(stderr.String(), `"no-such-page", which has no page`) {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "1 dangling, 0 conflicting") {

@@ -2,6 +2,7 @@ package gate
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -909,8 +910,16 @@ func assertDefaultLint(t *testing.T, lint Gate) {
 	if got := lint.Bindings["go"].SeverityMap; got["error"] != finding.Error || got["warning"] != finding.Warning || got["default"] != finding.Warning {
 		t.Fatalf("lint severity map = %#v", got)
 	}
-	if got := lint.Bindings["go"].Aliases["golangci-lint/*"]; got == "" {
-		t.Fatal("lint wildcard alias missing")
+	// Aliases are per-linter, not per-check: golangci-lint's JSON reports
+	// FromLinter, so every staticcheck check shares one rule ID.
+	wantAliases := map[string]string{
+		"golangci-lint/errcheck":    "handling-every-error",
+		"golangci-lint/unused":      "removing-dead-code",
+		"golangci-lint/ineffassign": "removing-dead-code",
+		"golangci-lint/staticcheck": "following-language-conventions",
+	}
+	if got := lint.Bindings["go"].Aliases; !maps.Equal(got, wantAliases) {
+		t.Fatalf("lint aliases = %#v, want %#v", got, wantAliases)
 	}
 	if binding := lint.Bindings["go"]; !slices.Equal(binding.SuccessExitCodes, []int{0}) || !slices.Equal(binding.FindingExitCodes, []int{1}) {
 		t.Fatalf("lint exits = clean %v, finding %v", binding.SuccessExitCodes, binding.FindingExitCodes)

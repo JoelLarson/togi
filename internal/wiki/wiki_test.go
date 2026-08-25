@@ -31,10 +31,11 @@ func TestLoadReadsShippedPage(t *testing.T) {
 	}
 }
 
-// Every alias in a shipped binding should either resolve to a shipped page or
-// be a deliberate gap. This pins the deliberate gaps so adding a page, or a
-// new dangling alias, is a conscious edit rather than a silent drift.
-func TestShippedAliasesResolveExceptKnownGaps(t *testing.T) {
+// Every alias in a shipped binding must resolve to a shipped page. There are
+// deliberately no gaps: an alias pointing at a page nobody wrote gives the fix
+// agent a principle-page reference it cannot read, so a new dangling alias has
+// to be a conscious edit here rather than silent drift.
+func TestShippedAliasesResolveWithoutGaps(t *testing.T) {
 	gates, err := (gate.Loader{}).LoadAll()
 	if err != nil {
 		t.Fatal(err)
@@ -50,8 +51,8 @@ func TestShippedAliasesResolveExceptKnownGaps(t *testing.T) {
 			dangling = append(dangling, page)
 		}
 	}
-	if !reflect.DeepEqual(dangling, []string{"lint-correctness"}) {
-		t.Fatalf("dangling pages = %v, want only lint-correctness", dangling)
+	if !reflect.DeepEqual(dangling, []string{}) {
+		t.Fatalf("dangling pages = %v, want none", dangling)
 	}
 }
 
