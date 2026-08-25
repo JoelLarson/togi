@@ -19,6 +19,17 @@ Feature: Fixing a feature diff safely
       And the agent was invoked 0 times
       And the feature branch is unchanged
 
+    Scenario: A clean run seals its glacial gate once
+      Given a green feature without blockers
+      And a glacial gate records its invocations
+      When I run the fix loop
+      Then the fix run is unsealed with exit 6
+      And the fix loop used 0 iterations
+      And the agent was invoked 0 times
+      And the glacial gate ran 1 time
+      And the fix report explains the gate schedule
+      And the feature branch is unchanged
+
     Scenario: A missing agent is an explicit run error
       Given a green feature with a blocking finding
       But the selected agent is missing

@@ -93,8 +93,7 @@ func markerScript(name, marker string) string {
 	}
 	quoted := shellQuote(marker)
 	return "marker=" + quoted + "\n" +
-		"(umask 077; : > \"$marker.$$\")\n" +
-		"mv -f \"$marker.$$\" \"$marker\"\n"
+		"(umask 077; printf x >> \"$marker\")\n"
 }
 
 func shellQuote(value string) string {
@@ -113,6 +112,7 @@ type GateDefinition struct {
 	Name, Description, Tool, Normalizer, RuleID, Message string
 	Scope                                                string
 	Location                                             string
+	CostClass                                            string
 	Timeout                                              time.Duration
 	Command                                              []string
 	Version                                              *VersionDefinition
@@ -134,6 +134,9 @@ func (e *Environment) WriteGate(definition GateDefinition) error {
 	}
 	if definition.Location == "" {
 		definition.Location = "point"
+	}
+	if definition.CostClass == "" {
+		definition.CostClass = "fast"
 	}
 	if definition.Timeout == 0 {
 		definition.Timeout = 5 * time.Second
@@ -162,7 +165,7 @@ func (e *Environment) WriteGate(definition GateDefinition) error {
 		return fmt.Errorf("create gate fixture %q: %w", definition.Name, err)
 	}
 	manifest, err := toml.Marshal(gateManifestWire{
-		Name: definition.Name, Description: definition.Description, CostClass: "fast",
+		Name: definition.Name, Description: definition.Description, CostClass: definition.CostClass,
 		FixPolicy: "report-only", Scope: definition.Scope, Location: definition.Location,
 		Blocking: []string{"error", "warning"}, Timeout: definition.Timeout.String(),
 	})

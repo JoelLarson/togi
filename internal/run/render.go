@@ -68,6 +68,9 @@ func renderFix(output io.Writer, fix FixReport) error {
 	if _, err := fmt.Fprintf(output, "rails: %d/%d iterations, %d/%dms wall clock\n", fix.Rails.Iterations, fix.Rails.MaxIterations, fix.Rails.ElapsedMS, fix.Rails.MaxWallClockMS); err != nil {
 		return err
 	}
+	if _, err := fmt.Fprintln(output, "gate schedule: instant/fast each batch; slow every 3 accepted batches or as owner; glacial terminal seal once"); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprintf(output, "landing: %s", safeText(fix.Landing.Status)); err != nil {
 		return err
 	}

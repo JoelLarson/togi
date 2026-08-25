@@ -59,6 +59,9 @@ type Ports struct {
 	Audit     Audit
 	Validate  func(context.Context, Batch) ValidationResult
 	Barrier   func(context.Context) ValidationResult
+	// Seal runs once after the regular barrier is clean. It is optional so the
+	// Phase 3 engine remains usable without a glacial gate.
+	Seal func(context.Context) ValidationResult
 }
 
 // Request contains immutable run facts and its shared execution rails.
@@ -201,6 +204,22 @@ func Execute(ctx context.Context, request Request, ports Ports) Outcome {
 		barrier := ports.Barrier(ctx)
 		barrierDecision := evaluateBarrier(ctx, request, state, barrier, blockers, waveStuck)
 		if barrierDecision.outcome != nil {
+			if barrierDecision.outcome.Kind == OutcomeReady && ports.Seal != nil {
+				seal := ports.Seal(ctx)
+				if err := validateBarrierResult(seal); err != nil {
+					return engineOutcome(OutcomeErrored, state.persisted, state.outcomeFindings(seal.Findings), request.Rails, "invalid seal validation: "+err.Error())
+				}
+				if seal.Kind == ValidationInfrastructureFailure {
+					return engineOutcome(OutcomeErrored, state.persisted, state.outcomeFindings(seal.Findings), request.Rails, seal.Failure)
+				}
+				if seal.Kind == ValidationSemanticFailure || len(seal.Findings) != 0 {
+					failure := seal.Failure
+					if failure == "" {
+						failure = "seal findings remain"
+					}
+					return engineOutcome(OutcomeBlocked, state.persisted, state.outcomeFindings(seal.Findings), request.Rails, failure)
+				}
+			}
 			return *barrierDecision.outcome
 		}
 
@@ -321,6 +340,16 @@ type batchAttempt struct {
 	index        int
 	number       int
 	retryFailure string
+}
+
+func acceptedBatchCount(batches []Batch) int {
+	accepted := 0
+	for _, batch := range batches {
+		if batch.Status == BatchDone {
+			accepted++
+		}
+	}
+	return accepted
 }
 
 func executeBatch(ctx context.Context, request Request, ports Ports, state *engineState, index int) executionResult {
@@ -454,6 +483,7 @@ func (attempt batchAttempt) run(ctx context.Context) attemptResult {
 
 	validationBatch := cloneBatch(*batch)
 	validationBatch.proof = cloneBatchProof(proof)
+	validationBatch.AcceptedBefore = acceptedBatchCount(attempt.state.plan.Batches)
 	validation := attempt.ports.Validate(ctx, validationBatch)
 	// Validation is followed by proof verification so validator-side workspace
 	// mutation cannot be committed using evidence prepared before validation.
