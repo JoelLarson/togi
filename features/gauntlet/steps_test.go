@@ -801,11 +801,12 @@ func (f *gauntletFeature) notErrored() error {
 }
 
 type fixFeature struct {
-	world        *harness.World
-	originalHead string
-	mode         string
-	request      harness.RunRequest
-	landingDone  chan error
+	world         *harness.World
+	originalHead  string
+	mode          string
+	request       harness.RunRequest
+	landingDone   chan error
+	glacialMarker string
 }
 
 func newFixFeature(factory harness.DriverFactory) *fixFeature {
@@ -823,6 +824,7 @@ func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Step(`^a green feature whose initial gate errors$`, f.initialGateError)
 	sc.Step(`^the agent makes a valid cross-file fix$`, f.crossFile)
 	sc.Step(`^the agent makes no changes$`, f.noOp)
+	sc.Step(`^a glacial gate records its invocations$`, f.glacialGate)
 	sc.Step(`^the agent attempts (an unauthorized Git commit|a new suppression|test deletion|an assertion change)$`, f.integrityViolation)
 	sc.Step(`^the agent performs a witnessed compilation-only rename$`, f.witnessedRename)
 	sc.Step(`^each blocked integrity fingerprint is printed$`, f.printedIntegrityFingerprints)
@@ -834,6 +836,9 @@ func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Step(`^I run the fix loop$`, f.run)
 	sc.Step(`^the fix run is (unsealed|errored|unverified|blocked|rails-exhausted) with exit (\d+)$`, f.outcome)
 	sc.Step(`^the agent was invoked (\d+) times?$`, f.invocations)
+	sc.Step(`^the fix loop used (\d+) iterations$`, f.iterations)
+	sc.Step(`^the glacial gate ran (\d+) times?$`, f.glacialInvocations)
+	sc.Step(`^the fix report explains the gate schedule$`, f.scheduleExplained)
 	sc.Step(`^one squash commit with the fixed tree reaches the feature branch$`, f.squashLanded)
 	sc.Step(`^the fix audit contains its report plan and brief$`, f.auditArtifacts)
 	sc.Step(`^the feature branch is unchanged$`, f.featureUnchanged)
@@ -845,7 +850,7 @@ func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
 }
 
 func (f *fixFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {
-	f.originalHead, f.mode, f.landingDone = "", "", nil
+	f.originalHead, f.mode, f.landingDone, f.glacialMarker = "", "", nil, ""
 	f.request = harness.RunRequest{Agent: "codex", GateNames: []string{"quality"}, MaxIterations: 4, MaxWallClock: 5 * time.Second, NoColor: true}
 	return f.world.Before(ctx, scenario)
 }
@@ -978,6 +983,18 @@ func (f *fixFeature) crossFile() error {
 
 func (f *fixFeature) noOp() error { return f.installAgent(harness.AgentBehavior{}) }
 
+func (f *fixFeature) glacialGate() error {
+	f.glacialMarker = filepath.Join(f.world.Environment().TempRoot, "glacial-invocations")
+	if _, err := f.world.Environment().InstallTool("glacial-tool", harness.ToolBehavior{InvokedMarker: f.glacialMarker}); err != nil {
+		return err
+	}
+	if err := f.world.Environment().WriteGate(harness.GateDefinition{Name: "glacial", Description: "glacial", Tool: "glacial-tool", Normalizer: "golangci-json", Command: []string{"glacial-tool"}, Scope: "repo", Location: "point", CostClass: "glacial", SeverityMap: map[string]string{"default": "warning"}}); err != nil {
+		return err
+	}
+	f.request.GateNames = append(f.request.GateNames, "glacial")
+	return nil
+}
+
 func (f *fixFeature) integrityViolation(violation string) error {
 	behavior := harness.AgentBehavior{Edits: map[string]string{"feature.go": fixedSource}}
 	switch violation {
@@ -1108,6 +1125,35 @@ func (f *fixFeature) mutateLandingTarget(ctx context.Context) {
 }
 
 func (f *fixFeature) report() (harness.Report, error) { return f.world.LastRun().Report() }
+
+func (f *fixFeature) glacialInvocations(want int) error {
+	raw, err := os.ReadFile(f.glacialMarker)
+	if err != nil {
+		return err
+	}
+	if got := len(raw); got != want {
+		return fmt.Errorf("glacial invocations = %d, want %d", got, want)
+	}
+	return nil
+}
+
+func (f *fixFeature) iterations(want int) error {
+	report, err := f.report()
+	if err != nil {
+		return err
+	}
+	if report.Fix == nil || report.Fix.Rails.Iterations != want {
+		return fmt.Errorf("fix iterations = %#v, want %d", report.Fix, want)
+	}
+	return nil
+}
+
+func (f *fixFeature) scheduleExplained() error {
+	if !strings.Contains(f.world.LastRun().Stdout(), "slow every 3 accepted batches") {
+		return errors.New("fix report does not explain slow-gate cadence")
+	}
+	return nil
+}
 
 func (f *fixFeature) printedIntegrityFingerprints() error {
 	report, err := f.report()

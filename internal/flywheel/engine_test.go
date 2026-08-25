@@ -180,10 +180,12 @@ func TestEngineExecutesBatchesSeriallyAndAuditsTransitions(t *testing.T) {
 	audit := &engineAudit{events: &events}
 	agent := &engineAdapter{events: &events}
 	validations := 0
+	acceptedBefore := []int{}
 	ports := Ports{
 		Adapter: agent, Workspace: workspace, Audit: audit,
 		Validate: func(_ context.Context, batch Batch) ValidationResult {
 			validations++
+			acceptedBefore = append(acceptedBefore, batch.AcceptedBefore)
 			events = append(events, "validate:"+batch.PrimaryFile)
 			return ValidationResult{Kind: ValidationPassed}
 		},
@@ -200,6 +202,9 @@ func TestEngineExecutesBatchesSeriallyAndAuditsTransitions(t *testing.T) {
 	}
 	if validations != 2 || len(outcome.Plan.Batches) != 2 {
 		t.Fatalf("validations = %d, plan = %#v", validations, outcome.Plan)
+	}
+	if !reflect.DeepEqual(acceptedBefore, []int{0, 1}) {
+		t.Fatalf("accepted-before values = %v", acceptedBefore)
 	}
 	for i, batch := range outcome.Plan.Batches {
 		if batch.Status != BatchDone || len(batch.Attempts) != 1 || batch.Attempts[0].Status != "passed" || batch.Attempts[0].Commit == "" {
@@ -219,6 +224,24 @@ func TestEngineExecutesBatchesSeriallyAndAuditsTransitions(t *testing.T) {
 		t.Fatalf("events =\n%v\nwant\n%v", got, want)
 	}
 	assertPlanArtifacts(t, audit.plans)
+}
+
+func TestEngineRunsTerminalSealOnceAndRetainsItsFindings(t *testing.T) {
+	item := planFinding("a.go", 1, "lint/a", "a")
+	sealed := planFinding("a.go", 2, "mutation/a", "survives")
+	seals := 0
+	outcome := Execute(context.Background(), engineRequest(t, []finding.Finding{item}, 3), Ports{
+		Adapter: &engineAdapter{}, Workspace: &engineWorkspace{root: "/worktree", changed: [][]string{{"a.go"}}}, Audit: &engineAudit{},
+		Validate: func(context.Context, Batch) ValidationResult { return ValidationResult{Kind: ValidationPassed} },
+		Barrier:  func(context.Context) ValidationResult { return ValidationResult{Kind: ValidationPassed} },
+		Seal: func(context.Context) ValidationResult {
+			seals++
+			return ValidationResult{Kind: ValidationPassed, Findings: []finding.Finding{sealed}}
+		},
+	})
+	if seals != 1 || outcome.Kind != OutcomeBlocked || len(outcome.Findings) != 1 || outcome.Findings[0].Fingerprint != sealed.Fingerprint {
+		t.Fatalf("seals=%d, outcome=%#v", seals, outcome)
+	}
 }
 
 func TestEngineRetriesSemanticFailureWithFreshBriefThenMarksStuckAndContinues(t *testing.T) {

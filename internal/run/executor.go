@@ -47,6 +47,17 @@ type commandRunner func(context.Context, string, []string) runner.Result
 // validationRequests selects the deterministic per-attempt gate subset.
 // Malformed assigned evidence fails closed by retaining every selected gate.
 func validationRequests(requests []Request, assigned []finding.Finding) []Request {
+	return selectValidationRequests(requests, assigned, 0)
+}
+
+// scheduledValidationRequests selects the Phase 5 per-attempt gate subset.
+// Instant and fast gates run every attempt; slow gates run every third attempt
+// or when they own the batch; glacial gates run only at the terminal seal.
+func scheduledValidationRequests(requests []Request, assigned []finding.Finding, attempt int) []Request {
+	return selectValidationRequests(requests, assigned, attempt)
+}
+
+func selectValidationRequests(requests []Request, assigned []finding.Finding, attempt int) []Request {
 	owners := make(map[string]struct{}, len(assigned))
 	available := make(map[string]struct{}, len(requests))
 	malformed := false
@@ -75,7 +86,7 @@ func validationRequests(requests []Request, assigned []finding.Finding) []Reques
 	for _, request := range requests {
 		cost := request.Gate.Manifest.CostClass
 		_, assignedOwner := owners[request.Gate.Manifest.Name]
-		if !malformed && cost != gate.Instant && cost != gate.Fast && !assignedOwner {
+		if !malformed && !selectCostClass(cost, assignedOwner, attempt) {
 			continue
 		}
 		selected = append(selected, cloneExecutionRequest(request))
@@ -93,6 +104,22 @@ func validationRequests(requests []Request, assigned []finding.Finding) []Reques
 		return selected[left].Root < selected[right].Root
 	})
 	return selected
+}
+
+func selectCostClass(cost gate.CostClass, assignedOwner bool, attempt int) bool {
+	if attempt == 0 {
+		return cost == gate.Instant || cost == gate.Fast || assignedOwner
+	}
+	switch cost {
+	case gate.Instant, gate.Fast:
+		return true
+	case gate.Slow:
+		return assignedOwner || attempt%3 == 0
+	case gate.Glacial:
+		return false
+	default:
+		return assignedOwner
+	}
 }
 
 func cloneExecutionRequest(request Request) Request {

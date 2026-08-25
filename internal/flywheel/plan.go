@@ -41,13 +41,14 @@ type Attempt struct {
 
 // Batch is one primary-file fix unit.
 type Batch struct {
-	ID          string            `json:"id"`
-	PrimaryFile string            `json:"primary_file"`
-	Findings    []finding.Finding `json:"findings"`
-	Status      BatchStatus       `json:"status"`
-	Attempts    []Attempt         `json:"attempts"`
-	identity    batchIdentity
-	proof       BatchProof
+	ID             string            `json:"id"`
+	PrimaryFile    string            `json:"primary_file"`
+	Findings       []finding.Finding `json:"findings"`
+	Status         BatchStatus       `json:"status"`
+	Attempts       []Attempt         `json:"attempts"`
+	AcceptedBefore int               `json:"-"`
+	identity       batchIdentity
+	proof          BatchProof
 }
 
 type batchIdentity struct {

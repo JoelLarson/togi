@@ -781,7 +781,7 @@ func TestRenderFixSummaryOmitsPrivateArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := output.String()
-	for _, want := range []string{"baseline suite: passed", "final suite: failed", "batches: 1/2 complete (3 attempts)", "rails: 2/20 iterations", "landing: blocked", "preserved branch: togi/run-safe", "verdict: blocked"} {
+	for _, want := range []string{"baseline suite: passed", "final suite: failed", "batches: 1/2 complete (3 attempts)", "rails: 2/20 iterations", "gate schedule: instant/fast each batch; slow every 3 accepted batches or as owner; glacial terminal seal once", "landing: blocked", "preserved branch: togi/run-safe", "verdict: blocked"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("rendered summary missing %q:\n%s", want, got)
 		}

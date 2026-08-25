@@ -15,6 +15,7 @@ import (
 	"github.com/joellarson/togi/internal/adapter"
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/flywheel"
+	"github.com/joellarson/togi/internal/gate"
 	"github.com/joellarson/togi/internal/gitcmd"
 	"github.com/joellarson/togi/internal/waiver"
 )
@@ -112,6 +113,26 @@ func loadWaivedFingerprints(stateDir string) (map[string]struct{}, error) {
 	return result, nil
 }
 
+func onlyCostClass(requests []Request, class gate.CostClass) []Request {
+	selected := make([]Request, 0, len(requests))
+	for _, request := range requests {
+		if request.Gate.Manifest.CostClass == class {
+			selected = append(selected, request)
+		}
+	}
+	return selected
+}
+
+func withoutCostClass(requests []Request, class gate.CostClass) []Request {
+	selected := make([]Request, 0, len(requests))
+	for _, request := range requests {
+		if request.Gate.Manifest.CostClass != class {
+			selected = append(selected, request)
+		}
+	}
+	return selected
+}
+
 func (service Service) runFix(ctx context.Context, opts Options, prepared preparedRun) (report Report, resultErr error) {
 	now := service.Now
 	if now == nil {
@@ -152,7 +173,9 @@ func (service Service) runFix(ctx context.Context, opts Options, prepared prepar
 		execution.baseline.Status = SuiteErrored
 		execution.baseline.Diagnostic = "behavioral suite infrastructure failed"
 	}
-	execution.gates, err = service.collectGates(ctx, active, prepared.requests, prepared.repository.Root(), prepared.diff)
+	regularRequests := withoutCostClass(prepared.requests, gate.Glacial)
+	glacialRequests := onlyCostClass(prepared.requests, gate.Glacial)
+	execution.gates, err = service.collectGates(ctx, active, regularRequests, prepared.repository.Root(), prepared.diff)
 	if err != nil {
 		execution.failure = err
 	}
@@ -173,10 +196,24 @@ func (service Service) runFix(ctx context.Context, opts Options, prepared prepar
 	case execution.baseline.Status != SuitePassed || baselineErr != nil:
 		execution.verdict = VerdictErrored
 	case len(blockers) == 0:
+		if len(glacialRequests) != 0 {
+			glacialReports, glacialErr := service.collectGates(ctx, active, glacialRequests, prepared.repository.Root(), prepared.diff)
+			execution.gates = append(execution.gates, glacialReports...)
+			if glacialErr != nil || gatesErrored(glacialReports) {
+				execution.verdict = VerdictErrored
+				execution.failure = errors.New("glacial seal infrastructure failed")
+				break
+			}
+			if len(blockingFindings(glacialReports)) != 0 {
+				execution.verdict = VerdictBlocked
+				execution.failure = errors.New("glacial seal findings remain")
+				break
+			}
+		}
 		execution.verdict = VerdictUnsealed
 		execution.landing.Status = string(flywheel.LandingNotNeeded)
 	default:
-		execution = service.executeFixLoop(ctx, opts, prepared, active, suite, rails, execution, blockers, waivedFingerprints)
+		execution = service.executeFixLoop(ctx, opts, prepared, active, suite, rails, execution, blockers, waivedFingerprints, regularRequests, glacialRequests)
 	}
 	cleanupDone := execution.cleanup == nil
 	defer func() {
@@ -237,7 +274,7 @@ func (service Service) runFix(ctx context.Context, opts Options, prepared prepar
 	return report, &ExitError{Code: ExitCode(report.Verdict), Err: verdictError(report.Verdict)}
 }
 
-func (service Service) executeFixLoop(ctx context.Context, opts Options, prepared preparedRun, active *RunLedger, suite SuiteRunner, rails *flywheel.Rails, execution fixExecution, blockers []finding.Finding, waivedFingerprints map[string]struct{}) (result fixExecution) {
+func (service Service) executeFixLoop(ctx context.Context, opts Options, prepared preparedRun, active *RunLedger, suite SuiteRunner, rails *flywheel.Rails, execution fixExecution, blockers []finding.Finding, waivedFingerprints map[string]struct{}, regularRequests, glacialRequests []Request) fixExecution {
 	selected, ok := service.Adapters[opts.Agent]
 	if !ok || isNilInterface(selected) {
 		execution.failure = fmt.Errorf("agent adapter %q is unavailable", opts.Agent)
@@ -281,9 +318,10 @@ func (service Service) executeFixLoop(ctx context.Context, opts Options, prepare
 
 	tracked := &usageAdapter{Adapter: selected}
 	validator := flywheel.AttemptValidator{Original: original, Baseline: blockers, WaivedFingerprints: waivedFingerprints}
-	var barrierReports []GateReport
+	var barrierReports, sealReports []GateReport
 	validator.RunGates = func(validationCtx context.Context, root string, batch flywheel.Batch) flywheel.GateValidation {
-		reports, runErr := service.collectValidationGates(validationCtx, active, prepared, workspace.Root(), root, true, validationRequests(prepared.requests, batch.Findings))
+		attempt := batch.AcceptedBefore + 1
+		reports, runErr := service.collectValidationGates(validationCtx, active, prepared, workspace.Root(), root, true, scheduledValidationRequests(prepared.requests, batch.Findings, attempt))
 		result := flywheel.GateValidation{Blocking: blockingFindings(reports)}
 		if runErr != nil {
 			result.Errored = []string{"ledger"}
@@ -312,12 +350,29 @@ func (service Service) executeFixLoop(ctx context.Context, opts Options, prepare
 			if snapshotErr != nil || isNilInterface(snapshot) {
 				return flywheel.ValidationResult{Kind: flywheel.ValidationInfrastructureFailure, Failure: "create immutable all-gate barrier snapshot"}
 			}
-			reports, runErr := service.collectValidationGates(barrierCtx, active, prepared, workspace.Root(), snapshot.Root(), false, prepared.requests)
+			reports, runErr := service.collectValidationGates(barrierCtx, active, prepared, workspace.Root(), snapshot.Root(), false, regularRequests)
 			verifyErr := snapshot.Verify(barrierCtx)
 			closeErr := snapshot.Close()
 			barrierReports = reports
 			if runErr != nil || verifyErr != nil || closeErr != nil || gatesErrored(reports) {
 				return flywheel.ValidationResult{Kind: flywheel.ValidationInfrastructureFailure, Failure: "all-gate barrier infrastructure failed", Findings: blockingFindings(reports)}
+			}
+			return flywheel.ValidationResult{Kind: flywheel.ValidationPassed, Findings: blockingFindings(reports)}
+		},
+		Seal: func(sealCtx context.Context) flywheel.ValidationResult {
+			if len(glacialRequests) == 0 {
+				return flywheel.ValidationResult{Kind: flywheel.ValidationPassed}
+			}
+			snapshot, snapshotErr := workspace.SnapshotValidated(sealCtx)
+			if snapshotErr != nil || isNilInterface(snapshot) {
+				return flywheel.ValidationResult{Kind: flywheel.ValidationInfrastructureFailure, Failure: "create immutable glacial seal snapshot"}
+			}
+			reports, runErr := service.collectValidationGates(sealCtx, active, prepared, workspace.Root(), snapshot.Root(), false, glacialRequests)
+			verifyErr := snapshot.Verify(sealCtx)
+			closeErr := snapshot.Close()
+			sealReports = reports
+			if runErr != nil || verifyErr != nil || closeErr != nil || gatesErrored(reports) {
+				return flywheel.ValidationResult{Kind: flywheel.ValidationInfrastructureFailure, Failure: "glacial seal infrastructure failed", Findings: blockingFindings(reports)}
 			}
 			return flywheel.ValidationResult{Kind: flywheel.ValidationPassed, Findings: blockingFindings(reports)}
 		},
@@ -330,6 +385,9 @@ func (service Service) executeFixLoop(ctx context.Context, opts Options, prepare
 	execution.usage = tracked.Usage()
 	if len(barrierReports) != 0 {
 		execution.gates = barrierReports
+	}
+	if len(sealReports) != 0 {
+		execution.gates = append(execution.gates, sealReports...)
 	}
 	for _, item := range execution.outcome.Findings {
 		if item.Gate == "integrity" {

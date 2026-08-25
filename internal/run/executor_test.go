@@ -907,6 +907,35 @@ func TestValidationRequestsKeepsFastAndAssignedOwnersInGauntletOrder(t *testing.
 	}
 }
 
+func TestScheduledValidationRequestsHonorsCostClasses(t *testing.T) {
+	requests := []Request{
+		validationRequest(t, "instant", gate.Instant, 0), validationRequest(t, "fast", gate.Fast, 1),
+		validationRequest(t, "slow", gate.Slow, 2), validationRequest(t, "glacial", gate.Glacial, 3),
+	}
+	for _, test := range []struct {
+		name     string
+		attempt  int
+		assigned []finding.Finding
+		want     []string
+	}{
+		{name: "first", attempt: 1, want: []string{"instant", "fast"}},
+		{name: "third", attempt: 3, want: []string{"instant", "fast", "slow"}},
+		{name: "slow owner", attempt: 1, assigned: []finding.Finding{executorFinding(t, "slow", "s.go", "tool/s")}, want: []string{"instant", "fast", "slow"}},
+		{name: "glacial owner", attempt: 3, assigned: []finding.Finding{executorFinding(t, "glacial", "g.go", "tool/g")}, want: []string{"instant", "fast", "slow"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := scheduledValidationRequests(requests, test.assigned, test.attempt)
+			names := make([]string, len(got))
+			for index, request := range got {
+				names[index] = request.Gate.Manifest.Name
+			}
+			if !slices.Equal(names, test.want) {
+				t.Fatalf("got %v, want %v", names, test.want)
+			}
+		})
+	}
+}
+
 func TestValidationRequestsDoesNotAliasInputsAndFailsClosedOnMalformedFindings(t *testing.T) {
 	requests := []Request{
 		validationRequest(t, "fast", gate.Fast, 0),
