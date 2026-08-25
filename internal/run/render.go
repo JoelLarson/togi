@@ -9,6 +9,7 @@ import (
 
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/flywheel"
+	"github.com/joellarson/togi/internal/waiver"
 )
 
 // RenderOptions controls human report presentation.
@@ -37,6 +38,9 @@ func Render(output io.Writer, report Report, opts RenderOptions) error {
 		if err := renderFix(output, *report.Fix); err != nil {
 			return err
 		}
+	}
+	if err := renderWaivers(output, report.Waivers); err != nil {
+		return err
 	}
 	verdict := string(report.Verdict)
 	if opts.Color && !opts.NoColor {
@@ -81,6 +85,21 @@ func renderFix(output io.Writer, fix FixReport) error {
 	}
 	if fix.Landing.PreservedBranch != "" {
 		if _, err := fmt.Fprintf(output, "preserved branch: %s\n", safeText(fix.Landing.PreservedBranch)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func renderWaivers(output io.Writer, records []waiver.Record) error {
+	if len(records) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(output, "waivers:"); err != nil {
+		return err
+	}
+	for _, record := range records {
+		if _, err := fmt.Fprintf(output, "  %s: %s\n", safeText(record.Fingerprint), safeText(record.Reason)); err != nil {
 			return err
 		}
 	}

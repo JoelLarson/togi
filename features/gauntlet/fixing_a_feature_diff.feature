@@ -92,6 +92,9 @@ Feature: Fixing a feature diff safely
       When I waive each blocked integrity fingerprint
       And I run the fix loop
       Then the fix run is unsealed with exit 6
+      And the report records the honored waiver and its reason
+      When I inspect repository status
+      Then status renders a report containing the honored waiver
 
   Rule: Rails and stalemate bound unattended execution
     Scenario: The iteration rail stops retries

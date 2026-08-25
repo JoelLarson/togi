@@ -44,7 +44,7 @@ func TestComposeReportRecordsDiffScopeWithoutLineRanges(t *testing.T) {
 
 	report, err := ComposeReport("run-id", strings.Repeat("d", 40), started, started.Add(time.Second), diff, []GateReport{{
 		Gate: "lint", Language: "go", Blocking: []finding.Severity{finding.Error, finding.Warning}, FixPolicy: gate.ReportOnly, Status: GatePassed,
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,14 +57,14 @@ func TestComposeReportRecordsDiffScopeWithoutLineRanges(t *testing.T) {
 		ChangedLines: diff.ChangedLines,
 	}
 	if report.SchemaVersion != ReportSchemaVersion || report.Diff != want {
-		t.Fatalf("report metadata = %#v, want schema 4 and %#v", report, want)
+		t.Fatalf("report metadata = %#v, want schema 5 and %#v", report, want)
 	}
 
 	encoded, err := json.Marshal(report)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantJSON := `{"schema_version":4,"run_id":"run-id","repo_id":"` + strings.Repeat("d", 40) + `","diff":{"base_ref":"origin/main","base_commit":"` + strings.Repeat("a", 40) + `","merge_base":"` + strings.Repeat("b", 40) + `","head":"` + strings.Repeat("c", 40) + `","changed_files":2,"changed_lines":3},"started_at":"2026-08-21T12:00:00Z","finished_at":"2026-08-21T12:00:01Z","verdict":"unverified","gates":[{"gate":"lint","language":"go","blocking":["error","warning"],"fix_policy":"report-only","position":0,"status":"passed","duration_ms":0}],"findings":[],"counts":{"errors":0,"warnings":0,"info":0,"occurrences":0}}`
+	wantJSON := `{"schema_version":5,"run_id":"run-id","repo_id":"` + strings.Repeat("d", 40) + `","diff":{"base_ref":"origin/main","base_commit":"` + strings.Repeat("a", 40) + `","merge_base":"` + strings.Repeat("b", 40) + `","head":"` + strings.Repeat("c", 40) + `","changed_files":2,"changed_lines":3},"started_at":"2026-08-21T12:00:00Z","finished_at":"2026-08-21T12:00:01Z","verdict":"unverified","gates":[{"gate":"lint","language":"go","blocking":["error","warning"],"fix_policy":"report-only","position":0,"status":"passed","duration_ms":0}],"findings":[],"counts":{"errors":0,"warnings":0,"info":0,"occurrences":0},"waivers":[]}`
 	if got := string(encoded); got != wantJSON {
 		t.Fatalf("report JSON = %s, want %s", got, wantJSON)
 	}
@@ -82,7 +82,7 @@ func TestComposeReportRejectsInvalidDiffBeforeProjection(t *testing.T) {
 	diff.ChangedLines = 1
 	if _, err := ComposeReport("run-id", strings.Repeat("d", 40), fixedTime, fixedTime, diff, []GateReport{{
 		Gate: "lint", Language: "go", Blocking: []finding.Severity{finding.Error}, FixPolicy: gate.ReportOnly, Status: GatePassed,
-	}}); err == nil {
+	}}, nil); err == nil {
 		t.Fatal("ComposeReport accepted a diff whose changed-line count cannot be verified")
 	}
 }
@@ -390,6 +390,41 @@ func TestServiceScopesCommittedFindingsAndProducesStableMetadata(t *testing.T) {
 	}
 	if after := targetTree(t, root); !reflect.DeepEqual(after, baseline) {
 		t.Fatalf("target repository changed:\nbefore %v\nafter  %v", baseline, after)
+	}
+}
+
+func TestServiceRecordsHonoredWaiversOnSubsequentRuns(t *testing.T) {
+	root, paths := fixtureRepository(t)
+	gatetest.Write(t, paths.GateOverrides(), "lint", gatetest.Command(fixtureCommand(t, fixtureJSON("lint.go", 2, "golangci-lint/errcheck", "unchecked"), false)...))
+	out := new(bytes.Buffer)
+	service := fixtureService(paths, out)
+	first, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}, ReportOnly: true, NoColor: true})
+	assertVerdictError(t, err)
+	if len(first.Findings) != 1 {
+		t.Fatalf("first findings = %#v", first.Findings)
+	}
+	if len(first.Waivers) != 0 {
+		t.Fatalf("first waivers = %#v, want none", first.Waivers)
+	}
+	reason := "the flagged fixture is deliberate"
+	if _, err := service.Waive(context.Background(), root, first.Findings[0].Fingerprint, reason); err != nil {
+		t.Fatalf("Waive() = %v", err)
+	}
+	out.Reset()
+	second, err := service.Run(context.Background(), Options{Root: root, GateNames: []string{"lint"}, ReportOnly: true, NoColor: true})
+	assertVerdictError(t, err)
+	if len(second.Waivers) != 1 || second.Waivers[0].Fingerprint != first.Findings[0].Fingerprint || second.Waivers[0].Reason != reason {
+		t.Fatalf("second waivers = %#v", second.Waivers)
+	}
+	if !strings.Contains(out.String(), first.Findings[0].Fingerprint) || !strings.Contains(out.String(), reason) {
+		t.Fatalf("rendered report missing honored waiver:\n%s", out.String())
+	}
+	out.Reset()
+	if _, err := service.Status(context.Background(), root, true); err != nil {
+		t.Fatalf("Status() = %v", err)
+	}
+	if !strings.Contains(out.String(), first.Findings[0].Fingerprint) || !strings.Contains(out.String(), reason) {
+		t.Fatalf("status missing honored waiver:\n%s", out.String())
 	}
 }
 

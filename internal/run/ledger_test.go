@@ -21,6 +21,7 @@ import (
 
 	"github.com/joellarson/togi/internal/finding"
 	"github.com/joellarson/togi/internal/gate"
+	"github.com/joellarson/togi/internal/waiver"
 )
 
 var fixedTime = time.Date(2026, time.August, 21, 15, 12, 30, 123456789, time.UTC)
@@ -1514,6 +1515,7 @@ func TestLatestReturnsNewestParseableCompleteReport(t *testing.T) {
 		}},
 		Findings: []finding.Finding{},
 		Counts:   Counts{},
+		Waivers:  []waiver.Record{},
 	}
 	wanted.Ref = RunRef{ID: wanted.RunID, Dir: filepath.Join(runsDir, wanted.RunID)}
 	writeReportFixture(t, runsDir, Report{SchemaVersion: 1, RunID: "20260821T120000.000000000Z-0000"})
@@ -1859,9 +1861,14 @@ func TestWriteReportRejectsInvalidReportsWithoutArtifacts(t *testing.T) {
 			report.SchemaVersion = 1
 			return report
 		}},
+		{name: "previous schema", report: func(runID string) Report {
+			report := completeReportFixture(runID)
+			report.SchemaVersion = 4
+			return report
+		}},
 		{name: "future schema", report: func(runID string) Report {
 			report := completeReportFixture(runID)
-			report.SchemaVersion = 5
+			report.SchemaVersion = 6
 			return report
 		}},
 		{name: "run ID", report: func(runID string) Report {
@@ -2205,6 +2212,9 @@ func completeReportDefaults(report Report) Report {
 	if report.Findings == nil {
 		report.Findings = defaults.Findings
 	}
+	if report.Waivers == nil {
+		report.Waivers = defaults.Waivers
+	}
 	if report.Diff == (DiffReport{}) {
 		report.Diff = defaults.Diff
 	}
@@ -2232,5 +2242,6 @@ func completeReportFixture(runID string) Report {
 		}},
 		Findings: []finding.Finding{},
 		Counts:   Counts{},
+		Waivers:  []waiver.Record{},
 	}
 }

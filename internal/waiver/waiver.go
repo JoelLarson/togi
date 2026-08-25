@@ -30,9 +30,9 @@ const reasonLimit = 4096
 
 // Record is one operator's approval of a single fingerprint.
 type Record struct {
-	Fingerprint string    `toml:"fingerprint"`
-	Reason      string    `toml:"reason"`
-	ApprovedAt  time.Time `toml:"approved_at"`
+	Fingerprint string    `toml:"fingerprint" json:"fingerprint"`
+	Reason      string    `toml:"reason" json:"reason"`
+	ApprovedAt  time.Time `toml:"approved_at" json:"approved_at"`
 }
 
 type document struct {

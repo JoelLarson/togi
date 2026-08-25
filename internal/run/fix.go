@@ -98,12 +98,21 @@ type fixExecution struct {
 	verdict   Verdict
 	failure   error
 	cleanup   func() error
+	waivers   []waiver.Record
 }
 
-func loadWaivedFingerprints(stateDir string) (map[string]struct{}, error) {
+func loadWaiverRecords(stateDir string) ([]waiver.Record, error) {
 	records, err := (waiver.Store{Dir: stateDir}).Load()
 	if err != nil {
 		return nil, fmt.Errorf("load waivers: %w", err)
+	}
+	return cloneWaiverRecords(records), nil
+}
+
+func loadWaivedFingerprints(stateDir string) (map[string]struct{}, error) {
+	records, err := loadWaiverRecords(stateDir)
+	if err != nil {
+		return nil, err
 	}
 	result := make(map[string]struct{}, len(records))
 	for _, record := range records {
@@ -145,6 +154,7 @@ func (service Service) runFix(ctx context.Context, opts Options, prepared prepar
 	execution := fixExecution{
 		landing: LandingReport{Status: string(flywheel.LandingBlocked)},
 		verdict: VerdictErrored,
+		waivers: prepared.waivers,
 	}
 	var baselineErr error
 	execution.baseline, baselineErr = suite.Run(ctx, prepared.repository.Root(), nil, true)
@@ -626,7 +636,7 @@ func (service Service) resolveFeatureBranch(ctx context.Context, root string) (s
 }
 
 func composeFixReport(runID, repoID string, startedAt, finishedAt time.Time, diff Diff, execution fixExecution, rails *flywheel.Rails, agentName string) (Report, error) {
-	base, err := ComposeReport(runID, repoID, startedAt, finishedAt, diff, execution.gates)
+	base, err := ComposeReport(runID, repoID, startedAt, finishedAt, diff, execution.gates, execution.waivers)
 	if err != nil {
 		return Report{}, err
 	}
