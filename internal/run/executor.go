@@ -26,12 +26,13 @@ type RawSink interface {
 
 // Request identifies one gate binding to execute against a repository.
 type Request struct {
-	Gate         gate.Gate
-	Binding      gate.Binding
-	Position     int
-	Root         string
-	RawSink      RawSink
-	ChangedLines finding.ChangedLines
+	Gate               gate.Gate
+	Binding            gate.Binding
+	Position           int
+	Root               string
+	RawSink            RawSink
+	ChangedLines       finding.ChangedLines
+	WaivedFingerprints map[string]struct{}
 }
 
 // Executor runs one gate through normalization, enrichment, and grouping.
@@ -102,6 +103,13 @@ func cloneExecutionRequest(request Request) Request {
 			cloned[file] = slices.Clone(ranges)
 		}
 		request.ChangedLines = cloned
+	}
+	if request.WaivedFingerprints != nil {
+		cloned := make(map[string]struct{}, len(request.WaivedFingerprints))
+		for fingerprint := range request.WaivedFingerprints {
+			cloned[fingerprint] = struct{}{}
+		}
+		request.WaivedFingerprints = cloned
 	}
 	if !request.Gate.Valid() || !request.Binding.Valid() || !request.Gate.Owns(request.Binding) {
 		request.Gate = gate.Gate{}
@@ -217,6 +225,10 @@ func (e Executor) finishExecution(ctx context.Context, req Request, report GateR
 	grouped, err = finding.Group(enriched)
 	if err != nil {
 		return errored(report, errors.New("group findings: invalid enriched findings"))
+	}
+	grouped, err = finding.FilterWaived(grouped, req.WaivedFingerprints)
+	if err != nil {
+		return errored(report, errors.New("filter findings by waiver: invalid findings"))
 	}
 	report.Findings = grouped
 	if len(grouped) == 0 {

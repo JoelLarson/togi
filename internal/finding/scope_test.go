@@ -153,6 +153,67 @@ func TestFilterTouchedDoesNotMutateInputOrOccurrenceStorage(t *testing.T) {
 	}
 }
 
+func TestFilterWaivedDropsApprovedFingerprint(t *testing.T) {
+	kept := scopedFinding("src/file.go", 8, 0)
+	kept.Snippet = "kept"
+	kept.Fingerprint = Fingerprint(kept)
+	dropped := scopedFinding("src/file.go", 4, 0)
+	dropped.Snippet = "dropped"
+	dropped.Fingerprint = Fingerprint(dropped)
+
+	got, err := FilterWaived([]Finding{kept, dropped}, map[string]struct{}{dropped.Fingerprint: {}})
+	if err != nil {
+		t.Fatalf("FilterWaived() error = %v", err)
+	}
+	if len(got) != 1 || got[0].Fingerprint != kept.Fingerprint || got[0].Line != 8 {
+		t.Fatalf("FilterWaived() = %#v, want only the unwaived finding", got)
+	}
+}
+
+func TestFilterWaivedLeavesUnwaivedFindingsIntact(t *testing.T) {
+	finding := scopedFinding("src/file.go", 10, 20)
+	got, err := FilterWaived([]Finding{finding}, map[string]struct{}{"0f2ac1e1b8f7c8b56b6da5e0f9dc0f6e6c1a2b3c4d5e6f708192a3b4c5d6e7f8": {}})
+	if err != nil {
+		t.Fatalf("FilterWaived() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, []Finding{finding}) {
+		t.Fatalf("FilterWaived() = %#v, want unchanged %#v", got, finding)
+	}
+}
+
+func TestFilterWaivedDoesNotMutateInput(t *testing.T) {
+	finding := scopedFinding("src/file.go", 10, 0)
+	finding.Occurrences = []Occurrence{{Line: 20}}
+	input := []Finding{finding}
+	wantInput := cloneFindings(input)
+	got, err := FilterWaived(input, map[string]struct{}{finding.Fingerprint: {}})
+	if err != nil {
+		t.Fatalf("FilterWaived() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("FilterWaived() = %#v, want no findings", got)
+	}
+	if !reflect.DeepEqual(input, wantInput) {
+		t.Fatalf("FilterWaived() mutated input: got %#v, want %#v", input, wantInput)
+	}
+}
+
+func TestFilterWaivedNilAndEmptyInputsAreDeterministic(t *testing.T) {
+	for _, waived := range []map[string]struct{}{nil, {}} {
+		got, err := FilterWaived(nil, waived)
+		if err != nil {
+			t.Fatalf("FilterWaived() error = %v", err)
+		}
+		if got == nil || len(got) != 0 {
+			t.Fatalf("FilterWaived() = %#v, want non-nil empty result", got)
+		}
+	}
+	got, err := FilterWaived([]Finding{}, map[string]struct{}{"0f2ac1e1b8f7c8b56b6da5e0f9dc0f6e6c1a2b3c4d5e6f708192a3b4c5d6e7f8": {}})
+	if err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("FilterWaived(empty) = %#v, %v; want non-nil empty result", got, err)
+	}
+}
+
 func TestFilterTouchedNilAndEmptyInputsAreDeterministic(t *testing.T) {
 	for _, changed := range []ChangedLines{nil, ChangedLines{}} {
 		got, err := FilterTouched(nil, changed)
