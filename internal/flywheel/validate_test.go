@@ -725,6 +725,22 @@ func TestWaivedIntegrityFindingsMatchOnlyUnchangedIdentity(t *testing.T) {
 	}
 }
 
+// Filtering in place would leave the caller holding a rewritten slice, which
+// is a silent corruption rather than a visible failure. Pin the contract.
+func TestUnwaivedIntegrityFindingsLeavesItsInputIntact(t *testing.T) {
+	approved := validationFinding(t, "integrity", "pkg/a_test.go", "togi/test-behavior", 3)
+	blocking := validationFinding(t, "integrity", "pkg/b_test.go", "togi/test-behavior", 4)
+	findings := []finding.Finding{approved, blocking}
+
+	result := unwaivedIntegrityFindings(findings, map[string]struct{}{approved.Fingerprint: {}})
+	if len(result) != 1 || result[0].Fingerprint != blocking.Fingerprint {
+		t.Fatalf("filtered = %#v, want only the unapproved finding", result)
+	}
+	if len(findings) != 2 || findings[0].Fingerprint != approved.Fingerprint || findings[1].Fingerprint != blocking.Fingerprint {
+		t.Fatalf("filtering rewrote its input: %#v", findings)
+	}
+}
+
 func TestAttemptValidatorStopsOnCancellationAndPreservesCause(t *testing.T) {
 	root := t.TempDir()
 	writeValidationFile(t, root, "go.mod", "module example.test/project\n\ngo 1.25\n")

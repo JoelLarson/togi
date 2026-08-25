@@ -190,8 +190,12 @@ func (validator AttemptValidator) Validate(ctx context.Context, root string, cha
 	return cloneValidationResult(result)
 }
 
+// unwaivedIntegrityFindings drops the findings an operator has approved by
+// fingerprint. It leaves its input alone: the caller still holds the full set,
+// and integrity findings are bounded by maxIntegrityFindings, so filtering in
+// place would trade a real aliasing trap for an allocation nobody would miss.
 func unwaivedIntegrityFindings(findings []finding.Finding, waived map[string]struct{}) []finding.Finding {
-	result := findings[:0]
+	result := make([]finding.Finding, 0, len(findings))
 	for _, item := range findings {
 		if _, approved := waived[item.Fingerprint]; !approved {
 			result = append(result, item)
