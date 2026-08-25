@@ -21,6 +21,12 @@ type runHistoryFeature struct {
 	beforeStatus    string
 	linked          *harness.Repository
 	linkedRun       harness.RunObservation
+	firstClone      *harness.Repository
+	secondClone     *harness.Repository
+	firstEmpty      *harness.Repository
+	secondEmpty     *harness.Repository
+	firstCloneRun   harness.RunObservation
+	firstEmptyRun   harness.RunObservation
 	firstDone       chan error
 	releasePath     string
 	firstRun        harness.RunObservation
@@ -44,6 +50,13 @@ func (f *runHistoryFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Step(`^a completed run in the linked worktree$`, f.completedLinkedRun)
 	sc.Step(`^I inspect status from the primary worktree$`, f.statusPrimary)
 	sc.Step(`^status renders the linked worktree run$`, f.rendersLinkedRun)
+	sc.Step(`^two shallow clones of the same remote using different URL forms$`, f.shallowClones)
+	sc.Step(`^a completed run in the first clone$`, f.completedFirstCloneRun)
+	sc.Step(`^I inspect status from the second clone$`, f.statusSecondClone)
+	sc.Step(`^status renders the first clone's run$`, f.rendersFirstCloneRun)
+	sc.Step(`^both clones persist under the same repository state directory$`, f.sharedCloneState)
+	sc.Step(`^two empty repositories with no remotes$`, f.emptyRepositories)
+	sc.Step(`^the repositories persist under different state directories$`, f.separateEmptyState)
 	sc.Step(`^a committed Go repository with a gate paused after startup$`, f.pausedGate)
 	sc.Step(`^I start another gauntlet run for the repository$`, f.startSecondRun)
 	sc.Step(`^the second run is rejected as locked$`, f.secondLocked)
@@ -62,9 +75,9 @@ func (f *runHistoryFeature) initialize(sc *godog.ScenarioContext) {
 
 func (f *runHistoryFeature) before(ctx context.Context, scenario *godog.Scenario) (context.Context, error) {
 	f.base, f.beforeStatus, f.completedOutput = "base", "", ""
-	f.beforeTree, f.linked = nil, nil
+	f.beforeTree, f.linked, f.firstClone, f.secondClone, f.firstEmpty, f.secondEmpty = nil, nil, nil, nil, nil, nil
 	f.firstDone, f.releasePath = nil, ""
-	f.firstRun, f.secondRun, f.linkedRun = harness.RunObservation{}, harness.RunObservation{}, harness.RunObservation{}
+	f.firstRun, f.secondRun, f.linkedRun, f.firstCloneRun, f.firstEmptyRun = harness.RunObservation{}, harness.RunObservation{}, harness.RunObservation{}, harness.RunObservation{}, harness.RunObservation{}
 	return f.world.Before(ctx, scenario)
 }
 
@@ -215,6 +228,104 @@ func (f *runHistoryFeature) statusPrimary(ctx context.Context) error {
 }
 func (f *runHistoryFeature) rendersLinkedRun() error {
 	return sameRender(f.world.LastCommand(), f.linkedRun)
+}
+
+func (f *runHistoryFeature) shallowClones() error {
+	source, err := harness.NewRepository(filepath.Join(f.world.Environment().TempRoot, "origin.git"))
+	if err != nil {
+		return err
+	}
+	for name, body := range map[string]string{
+		"go.mod":     "module fixture\n\ngo 1.25\n",
+		"feature.go": "package fixture\n\nfunc Feature() { value := 1; _ = value }\n",
+	} {
+		if err := source.Write(name, body); err != nil {
+			return err
+		}
+	}
+	if _, err := source.Commit("base"); err != nil {
+		return err
+	}
+	if err := source.Write("feature.go", "package fixture\n\nfunc Feature() { value := 2; _ = value }\n"); err != nil {
+		return err
+	}
+	if _, err := source.Commit("feature"); err != nil {
+		return err
+	}
+	firstRoot := filepath.Join(f.world.Environment().TempRoot, "clone-one")
+	secondRoot := filepath.Join(f.world.Environment().TempRoot, "clone-two")
+	if _, err := source.Git("clone", "--depth", "1", "file://"+source.Root, firstRoot); err != nil {
+		return err
+	}
+	if _, err := source.Git("clone", "--depth", "1", "file://"+source.Root+"/", secondRoot); err != nil {
+		return err
+	}
+	f.firstClone = &harness.Repository{Root: firstRoot}
+	f.secondClone = &harness.Repository{Root: secondRoot}
+	if err := f.world.UseRepository(f.firstClone); err != nil {
+		return err
+	}
+	return f.installGate(harness.ToolBehavior{Stdout: lint("feature.go", 3)})
+}
+
+func (f *runHistoryFeature) completedFirstCloneRun(ctx context.Context) error {
+	driver, err := f.world.Gauntlet()
+	if err != nil {
+		return err
+	}
+	f.firstCloneRun, err = driver.Run(ctx, harness.ReportOnly(harness.RunRequest{Root: f.firstClone.Root, NoColor: true}))
+	return err
+}
+
+func (f *runHistoryFeature) statusSecondClone(ctx context.Context) error {
+	return f.world.Status(ctx, harness.StatusRequest{Root: f.secondClone.Root, NoColor: true})
+}
+
+func (f *runHistoryFeature) rendersFirstCloneRun() error {
+	return sameRender(f.world.LastCommand(), f.firstCloneRun)
+}
+
+func (f *runHistoryFeature) sharedCloneState(ctx context.Context) error {
+	first, err := f.world.Environment().RepoState(ctx, f.firstClone.Root)
+	if err != nil {
+		return err
+	}
+	second, err := f.world.Environment().RepoState(ctx, f.secondClone.Root)
+	if err != nil {
+		return err
+	}
+	if first != second {
+		return fmt.Errorf("clone state directories = %q and %q", first, second)
+	}
+	return nil
+}
+
+func (f *runHistoryFeature) emptyRepositories() error {
+	first, err := harness.NewRepository(filepath.Join(f.world.Environment().TempRoot, "empty-one"))
+	if err != nil {
+		return err
+	}
+	second, err := harness.NewRepository(filepath.Join(f.world.Environment().TempRoot, "empty-two"))
+	if err != nil {
+		return err
+	}
+	f.firstEmpty, f.secondEmpty = first, second
+	return f.world.UseRepository(first)
+}
+
+func (f *runHistoryFeature) separateEmptyState(ctx context.Context) error {
+	first, err := f.world.Environment().RepoState(ctx, f.firstEmpty.Root)
+	if err != nil {
+		return err
+	}
+	second, err := f.world.Environment().RepoState(ctx, f.secondEmpty.Root)
+	if err != nil {
+		return err
+	}
+	if first == second {
+		return fmt.Errorf("empty repositories shared state directory %q", first)
+	}
+	return nil
 }
 
 func (f *runHistoryFeature) pausedGate() error {
