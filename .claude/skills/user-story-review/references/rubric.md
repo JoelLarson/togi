@@ -25,12 +25,9 @@ The verb is **`I want`**. This repo adopts Cohn's literal template; `I can`,
 `I receive`, `I need`, and `I should be able to` are all findings. See §C5 —
 this was decided, not left open, so report the deviation without re-arguing it.
 
-When reporting `I can` or `I receive`, also record **once** in the report's
-**Cross-file consistency** section that
-`docs/superpowers/specs/2026-08-22-executable-acceptance-specifications-design.md:341-394`
-carries the same phrasing and is its likely origin, so the conflict surfaces as
-one decision rather than one identical finding per file. Do not repeat the
-pointer in each file's section.
+When `I can` or `I receive` appears in more than one feature file, record it
+**once** in the report's **Cross-file consistency** section rather than
+repeating an identical finding per file.
 
 `Feature:` names a capability, not a component: *Running the gauntlet*, not
 *Gauntlet runner*.

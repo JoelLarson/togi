@@ -31,7 +31,7 @@ The design is settled. These documents are the source of truth:
 | [docs/design.md](./docs/design.md) | Gauntlet semantics: config, rails, verdicts, exit codes. |
 | [docs/implementation.md](./docs/implementation.md) | Go-level choices: module, deps, layout, CLI surface, ledger, TOML schemas, testing. |
 | [docs/roadmap.md](./docs/roadmap.md) | The five phases, current status, and exit criteria. |
-| [features/README.md](./features/README.md) | The executable user-story catalog and driver commands. |
+| [features/README.md](./features/README.md) | The executable user-story catalog, authoring rules, and driver commands. |
 
 Not a source of truth, but the fastest way in:
 [docs/language.md](./docs/language.md) tours the vocabulary, which terms are
@@ -56,9 +56,6 @@ principle-aware plan and brief assembly, and resume behavior. Phase 3 already
 persists its simple `plan.json`, bounded briefs, private adapter logs, and
 schema-4 fix report; do not confuse those tracer artifacts with Phase 4's
 richer semantics.
-
-Completed plans under `docs/superpowers/plans/` are historical execution
-records, not the current task queue.
 
 ## Non-negotiables
 

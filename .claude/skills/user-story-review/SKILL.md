@@ -51,11 +51,9 @@ by host — not decorative.
 1. Read `CONTEXT.md` in full — it is the glossary and the source of truth for
    vocabulary (ADR-0012). List the `docs/adr/` filenames for context; read an
    ADR only when a finding turns on it.
-2. Read § *Gherkin Authoring Rules* in
-   `docs/superpowers/specs/2026-08-22-executable-acceptance-specifications-design.md`.
-   It is the authoring convention of record — declarative language, three to
-   five steps, one event per example — and the origin of the `I can` phrasing
-   that §A1 flags.
+2. Read § *Authoring rules* in `features/README.md`. It is the authoring
+   convention of record — declarative language, three to five steps, one event
+   per example.
 3. Find the specs:
 
    ```sh
