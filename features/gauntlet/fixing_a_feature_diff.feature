@@ -19,6 +19,21 @@ Feature: Fixing a feature diff safely
       And the agent was invoked 0 times
       And the feature branch is unchanged
 
+    Scenario: A non-blocking finding does not plan a fix batch
+      Given a green feature with a non-blocking finding and a blocking finding
+      And the agent removes the finding
+      When I run the fix loop
+      Then the fix run is unsealed with exit 6
+      And the report still contains the non-blocking finding
+      And the agent was invoked 1 time
+
+    Scenario: Only a non-blocking finding needs no agent
+      Given a green feature with only a non-blocking finding
+      When I run the fix loop
+      Then the fix run is unsealed with exit 6
+      And the agent was invoked 0 times
+      And the feature branch is unchanged
+
     Scenario: A missing agent is an explicit run error
       Given a green feature with a blocking finding
       But the selected agent is missing

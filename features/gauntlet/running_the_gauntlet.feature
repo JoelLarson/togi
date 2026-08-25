@@ -81,3 +81,20 @@ Feature: Running the gauntlet
         | findings    | findings   | 1       |
         | errored     | errored    | 4       |
         | clear       | unverified | 5       |
+
+  Rule: Only blocking findings drive the verdict
+    Scenario: A non-blocking finding is reported without changing the verdict
+      Given a committed Go repository with a changed function
+      And a gate reports a non-blocking finding and a blocking finding
+      When I run the gauntlet
+      Then the report contains both findings
+      And the report verdict is findings
+      And the application outcome is 1
+
+    Scenario: Only a non-blocking finding leaves the run unverified
+      Given a committed Go repository with a changed function
+      And a gate reports only a non-blocking finding
+      When I run the gauntlet
+      Then the report contains the non-blocking finding
+      And the report verdict is unverified
+      And the application outcome is 5
