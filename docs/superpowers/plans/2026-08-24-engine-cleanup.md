@@ -205,7 +205,7 @@ Expected: PASS with the existing event order unchanged. Mark checklist items 1, 
 - Modify: `internal/flywheel/engine_test.go`
 - Modify: `internal/flywheel/engine.go.cleanup.md`
 
-- [ ] **Step 1: Write a failing barrier-helper test**
+- [x] **Step 1: Write a failing barrier-helper test**
 
 Add a direct `evaluateBarrier` test with invalid findings and an `engineAudit`.
 Assert it returns `OutcomeErrored`, includes `classify barrier blockers`, and writes
@@ -213,7 +213,7 @@ the plan exactly once. Add cases for context cancellation, rail exhaustion,
 invalid validation, infrastructure failure, semantic failure, stuck waves, ready,
 stalemate, and a shrinking result that returns the next blocker multiset.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run:
 
@@ -223,7 +223,7 @@ go test ./internal/flywheel -run TestEvaluateBarrier
 
 Expected: compile failure because `evaluateBarrier` and its named result do not exist.
 
-- [ ] **Step 3: Extract barrier classification and persistence**
+- [x] **Step 3: Extract barrier classification and persistence**
 
 Introduce the exact named result and helper signature below. Move context/rail
 admission, blocker classification, result validation, single persistence, terminal
@@ -246,7 +246,7 @@ func evaluateBarrier(
 ) barrierResult
 ```
 
-- [ ] **Step 4: Remove the rail wrapper and verify GREEN**
+- [x] **Step 4: Remove the rail wrapper and verify GREEN**
 
 Call `request.Rails.ExecutionContext(ctx)` directly and delete
 `railExecutionContext`. Run:
@@ -259,7 +259,7 @@ go test ./features/gauntlet
 
 Expected: PASS. Mark checklist item 4 and the rail-wrapper bullet in item 7 complete.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```sh
 git add internal/flywheel

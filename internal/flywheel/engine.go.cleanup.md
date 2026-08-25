@@ -64,7 +64,7 @@ keep going — but that distinction is currently smeared across eight call sites
 bottom of the loop own the entire retry/stuck/errored decision. This is the single
 change that most reduces nesting.
 
-## 4. Deduplicate the barrier section of `Execute`
+## 4. [x] Deduplicate the barrier section of `Execute`
 
 The block `if err := state.persist(); err != nil { return ..."write barrier plan"... }`
 repeats five times (engine.go:192, 200, 211, 217, 222) because persistence is
@@ -75,7 +75,7 @@ re-attempted before each possible early return.
 function also gives the wave loop in `Execute` a readable shape:
 run wave → barrier → decide → grow plan.
 
-## 5. Replace the `(Outcome, bool)` convention
+## 5. [x] Replace the `(Outcome, bool)` convention
 
 Nearly every helper returns `(Outcome, bool)` where `Outcome{}, false` means "keep
 going". The reader must learn the convention and track which bool means what, and
@@ -108,14 +108,14 @@ type batchAttempt struct {
 Call sites shrink from `semanticFailure(ctx, request, ports, state, index, attempt, failure)`
 to `a.semanticFailure(ctx, failure)`, and the file's call graph becomes scannable.
 
-## 7. Smaller, cheap wins
+## 7. [x] Smaller, cheap wins
 
 - [x] **`const maxAttempts = 2`** — the literal `attempt == 2` appears eight times; the
   retry policy deserves a name.
 - [x] **Typed attempt statuses** — `"running"`, `"passed"`, `"failed"` (engine.go:274,
   483, 530) are raw strings while batch status gets proper constants (`BatchDone`,
   `BatchStuck`). Inconsistent, and a typo would compile fine.
-- **Dead code** — `retryable := false` at engine.go:345 is immediately overwritten on
+- [x] **Dead code** — `retryable := false` at engine.go:345 is immediately overwritten on
   line 347; `railExecutionContext` (engine.go:692) is a pass-through wrapper that
   adds only indirection.
 - [x] **Lazy map init** — initialize `semanticFindings` in an `engineState` constructor

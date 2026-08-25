@@ -60,6 +60,32 @@ func TestBatchAttemptCheckpointAbortsCanceledAttempt(t *testing.T) {
 	}
 }
 
+func TestEvaluateBarrierPersistsOnceWhenClassificationFails(t *testing.T) {
+	audit := &engineAudit{}
+	state := newEngineState(audit, Plan{SchemaVersion: 1})
+	request := engineRequest(t, nil, maxAttempts)
+	barrier := ValidationResult{Kind: ValidationPassed, Findings: []finding.Finding{{}}}
+
+	result := evaluateBarrier(context.Background(), request, state, barrier, map[string]int{}, false)
+
+	if result.outcome == nil || result.outcome.Kind != OutcomeErrored || !strings.Contains(result.outcome.Failure, "classify barrier blockers") {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(audit.plans) != 1 {
+		t.Fatalf("plan writes = %d, want 1", len(audit.plans))
+	}
+}
+
+func TestStopHelpersUseNilForContinuation(t *testing.T) {
+	request := engineRequest(t, nil, maxAttempts)
+	if outcome := stopForContext(context.Background(), request.Rails, Plan{}); outcome != nil {
+		t.Fatalf("context outcome = %#v", outcome)
+	}
+	if outcome := stopForRail(request.Rails, Plan{}); outcome != nil {
+		t.Fatalf("rail outcome = %#v", outcome)
+	}
+}
+
 func TestEngineExecutesBatchesSeriallyAndAuditsTransitions(t *testing.T) {
 	first := planFinding("a.go", 1, "lint/a", "a")
 	second := planFinding("b.go", 2, "lint/b", "b")
