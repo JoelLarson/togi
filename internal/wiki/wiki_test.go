@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -29,6 +30,74 @@ func TestLoadReadsShippedPage(t *testing.T) {
 	if !strings.HasPrefix(page.Body, "# Small, composable functions\n") {
 		t.Fatalf("body does not open with its heading: %.40q", page.Body)
 	}
+}
+
+// Enumerating the embedded pages rather than naming them means a newly
+// shipped page is covered the moment it is added, instead of silently going
+// untested until someone remembers to extend a list.
+func TestEveryShippedPageLoads(t *testing.T) {
+	names := shippedPageNames(t)
+	if len(names) < 4 {
+		t.Fatalf("shipped pages = %v, want at least the four aliased pages", names)
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			page, err := (Loader{}).Load(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if page.Name != name {
+				t.Fatalf("name = %q, want %q", page.Name, name)
+			}
+			if page.Origin != Shipped {
+				t.Fatalf("origin = %q, want %q", page.Origin, Shipped)
+			}
+			if page.Title == "" {
+				t.Fatal("title is empty")
+			}
+			if !strings.HasPrefix(page.Body, "# "+page.Title+"\n") {
+				t.Fatalf("body does not open with its heading: %.40q", page.Body)
+			}
+		})
+	}
+}
+
+// A brief concatenates a page body verbatim (ADR-0006), so a page missing its
+// techniques or constraints hands the fix agent prose with nothing actionable
+// in it. The loader deliberately does not interpret markdown beyond the title,
+// so this pins the house structure of our own shipped pages rather than
+// asserting a format contract that the loader enforces.
+func TestShippedPagesCarryTechniquesAndConstraints(t *testing.T) {
+	for _, name := range shippedPageNames(t) {
+		t.Run(name, func(t *testing.T) {
+			page, err := (Loader{}).Load(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, section := range []string{"## Why this matters", "## Techniques", "## Constraints"} {
+				if !strings.Contains(page.Body, section) {
+					t.Fatalf("page %q has no %q section", name, section)
+				}
+			}
+		})
+	}
+}
+
+func shippedPageNames(t *testing.T) []string {
+	t.Helper()
+	entries, err := shipped.ReadDir(shippedRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		names = append(names, strings.TrimSuffix(entry.Name(), ".md"))
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Every alias in a shipped binding must resolve to a shipped page. There are
