@@ -29,7 +29,7 @@ The design is settled. These documents are the source of truth:
 | File | What it holds |
 |---|---|
 | [CONTEXT.md](./CONTEXT.md) | The glossary. Non-negotiable vocabulary. |
-| [docs/adr/](./docs/adr/) | 13 ADRs: the load-bearing decisions and why. |
+| [docs/adr/](./docs/adr/) | 14 ADRs: the load-bearing decisions and why. |
 | [docs/design.md](./docs/design.md) | Gauntlet semantics: config, rails, verdicts, exit codes. |
 | [docs/implementation.md](./docs/implementation.md) | Go-level choices: module, deps, layout, CLI surface, ledger, TOML schemas, testing. |
 | [docs/roadmap.md](./docs/roadmap.md) | The five phases, current status, and exit criteria. |
@@ -42,6 +42,14 @@ built, which name later phases, and which pairs get confused.
 **Do not re-litigate settled decisions.** If you think one is wrong, say so
 and stop; do not quietly build something else. If two sources of truth
 genuinely contradict each other, surface that immediately.
+
+**Working unattended, the rule bends but does not break.** When you are running
+a backlog with no one to answer you, a ticket that contradicts an ADR must
+still never be quietly built. Instead of halting the queue: comment the
+contradiction on the ticket, naming the ADR it violates, relabel the ticket
+`needs-triage`, close the branch without a PR, and move to the next unblocked
+ticket. Stopping the whole run is the interactive behaviour; leaving a triage
+pile is the unattended one.
 
 ## Active boundary: finish Phase 3
 
@@ -57,17 +65,28 @@ violation. The next slices are touched-entity scope relief by waiver, and
 showing the waivers a run honored in its report. Claude/Kimi adapter
 conformance is the other half of Phase 3's remaining exit criterion, but it is
 deferred: Codex is the primary target, so Phase 3 stays formally open once
-waivers land. Complete the waiver work before Phase 4's richer containment
-triage, principle-aware plan and brief assembly, and resume behavior. Phase 3
-already persists its simple `plan.json`, bounded briefs, private adapter logs,
-and schema-4 fix report; do not confuse those tracer artifacts with Phase 4's
+waivers land. Phase 3 also owns the ADR-0014 migration — in-place execution
+behind a clean-and-expected entry refusal, and a retained run branch — which
+rewrites the dirty and detached landing refusals into entry preconditions.
+Complete the waiver work before Phase 4's richer containment triage,
+principle-aware plan and brief assembly, and resume behavior. Phase 3 already
+persists its simple `plan.json`, bounded briefs, private adapter logs, and
+schema-4 fix report; do not confuse those tracer artifacts with Phase 4's
 richer semantics.
 
 ## Non-negotiables
 
 - **Never persist config or state in a target repo** (ADR-0002). No `.togi/`
-  directory. Phase 3 may modify code only inside a togi-owned external
-  worktree, then land through the guarded lifecycle defined by ADR-0010.
+  directory, no config, no state. ADR-0014 narrows this to one exception: a
+  retained `togi/run-*` ref lives in the target repo's ref namespace and
+  nothing else does.
+- **Code changes reach a feature branch only through the guarded landing
+  lifecycle.** ADR-0014 governs and supersedes ADR-0010: the fix loop runs in
+  place in the agent's own idle worktree, refuses to start unless that worktree
+  is clean and on the expected branch, commits each validated batch to a
+  retained `togi/run-<id>`, and squash-lands it. What is *built* today is
+  ADR-0010's cache worktree; migrating to ADR-0014 is tracked work, not licence
+  to invent a third lifecycle.
 - **Package names come from the glossary** (ADR-0012), not technical layers.
   A new concept requires a glossary entry and package together.
 - **Gates are data; normalizers are compiled Go** (ADR-0004). Adding a gate
@@ -129,6 +148,15 @@ controlled fakes and needs neither Codex nor external gate binaries.
   access.
 
 ## Conventions
+
+**One ticket, one branch, one pull request.** Never commit a ticket's work
+directly to `main`. Branch from `main`, implement the ticket, open a PR that
+references the issue, and leave it for review — merging is the engineer's call,
+not yours. Tickets are tracer-sized precisely so each PR stays small.
+
+Before opening the PR, run the full verification matrix in **Verify** below,
+including both acceptance drivers. A PR whose acceptance scenarios have not run
+under `-acceptance.driver=all` is not finished.
 
 Match the existing commit style: imperative subject, body explaining why
 rather than what, trailers preserved. Update `CONTEXT.md` when introducing
