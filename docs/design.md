@@ -125,10 +125,11 @@ togi waive <fingerprint> --reason "…"
 Waivers persist in the repo's state dir with reason and timestamp, appear in
 every subsequent report, and are honored on re-run.
 
-**Partially implemented.** Recording an approval is built: it is refused
-without a reason, is never duplicated, and is shared by every checkout of the
-repository. Honoring one on re-run, relieving touched-entity scope with one,
-and reporting the waivers a run honored are the remaining Phase 3 slices.
+**Partially implemented.** Recording an approval is built, and a fix run
+honors one past the integrity violation it approves: a blocked report prints
+each violation's fingerprint, and the next run proceeds past the ones that were
+approved. Relieving touched-entity scope with a waiver, and reporting the
+waivers a run honored, are the remaining Phase 3 slices.
 
 No interactive mid-run prompts: unattended runs are the primary mode, and an
 audited artifact beats a y/n keystroke nobody can reconstruct later. Waivers

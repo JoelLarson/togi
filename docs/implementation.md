@@ -146,8 +146,10 @@ togi wiki show <page> | lint | eject <page>
 Fix mode requires the implemented `codex` adapter. Claude and Kimi remain
 later conformance adapters. The default rails are 20 iterations and 30 minutes;
 token usage is recorded when the adapter reports it, while spend/token rails
-are not enforced. `togi waive` records a fingerprint-keyed approval; honoring
-one during a run is a remaining Phase 3 slice.
+are not enforced. `togi waive` records a fingerprint-keyed approval, and a fix
+run honors one past the integrity violation it approves. Relieving
+touched-entity scope with a waiver, and reporting the waivers a run honored,
+are the remaining Phase 3 slices.
 
 ## Waiver record schema
 
@@ -176,14 +178,20 @@ repository.
 Compiler-style, grouped by file, sorted by path then line:
 
 ```
-internal/gate/run.go:42: warning: cyclomatic complexity 18 (gocyclo/complexity)
-internal/gate/run.go:88: error: unchecked error (golangci-lint/errcheck)
+internal/gate/run.go:42: warning: cyclomatic complexity 18 (gocyclo/complexity) [fingerprint: 7c1f1846…]
+internal/gate/run.go:88: error: unchecked error (golangci-lint/errcheck) [fingerprint: 2d5746f6…]
     +2 more at lines 91, 104
 ```
 
 Every line is clickable in editors and greppable in terminals. A tail
 summarises counts, per-gate status including `errored`, and the verdict.
 Colour only when stdout is a TTY; `--no-color` forces it off.
+
+Each line ends with the finding's full fingerprint, which is what `togi waive`
+takes as its argument. It trails the line so the leading `file:line:` stays
+clickable, and it is printed for every finding rather than only for the
+integrity violations that block a run, so that the identity is to hand
+wherever an operator decides an approval is warranted.
 
 The persisted report schema is version 4. Fix-mode reports add the original
 HEAD and feature branch, baseline and final suite evidence, agent identity and

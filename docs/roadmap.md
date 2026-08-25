@@ -17,9 +17,9 @@ immediately rather than at the end.
 - **Phase 3: tracer complete.** The safe serial fix loop is implemented with
   file-based batching, a Codex adapter, Go behavioral-suite evidence,
   integrity checks, retry, iteration/wall-clock rails, immutable validation,
-  and guarded squash landing. `togi waive` records fingerprint-keyed
-  approvals; honoring them, and the Claude/Kimi conformance adapters, remain
-  before Phase 4.
+  and guarded squash landing. `togi waive` records fingerprint-keyed approvals
+  and a fix run honors them; touched-entity scope relief, waiver reporting, and
+  the Claude/Kimi conformance adapters remain before Phase 4.
 - **Phase 4: partially implemented ahead of sequence.** Principle-page
   loading, alias resolution, `wiki show`, `wiki lint`, `wiki eject`, and the
   first shipped page are built. Richer containment triage, principle-aware
@@ -171,8 +171,10 @@ largest and riskiest phase.
   deferred; adapter usage is optional evidence.
 - **`togi waive`** — fingerprint-keyed operator approvals persist with reason
   and timestamp, outside the target repository and shared by every checkout of
-  it. Honoring one during a run, relieving touched-entity scope with one, and
-  reporting the waivers a run honored are the final Phase 3 slices.
+  it. A blocked report prints each violation's fingerprint, and a fix run
+  proceeds past an approved integrity violation. Relieving touched-entity scope
+  with a waiver and reporting the waivers a run honored are the final Phase 3
+  slices.
 
 **Tracer exit criteria: complete.** On a deliberately degraded branch, togi
 fixes the findings in a togi-owned external worktree and updates the original
