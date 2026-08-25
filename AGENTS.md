@@ -135,3 +135,20 @@ surprising without context, and the result of a real trade-off.
 Treat the acceptance catalog as the behavior map and package tests as the
 exhaustive edge and security coverage. Add or change user-visible behavior in
 both layers at the boundary that owns it.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues on `JoelLarson/togi`, via the `gh` CLI.
+See [`docs/agents/issue-tracker.md`](./docs/agents/issue-tracker.md).
+
+### Triage labels
+
+The five canonical triage labels are used verbatim; only `wontfix` exists on
+GitHub so far. See [`docs/agents/triage-labels.md`](./docs/agents/triage-labels.md).
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root.
+See [`docs/agents/domain.md`](./docs/agents/domain.md).
