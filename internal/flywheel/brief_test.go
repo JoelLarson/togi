@@ -257,6 +257,21 @@ func TestBuildBriefAcceptsStatusAndAttemptMutationsOnMintedBatch(t *testing.T) {
 	}
 }
 
+func TestBuildBriefIsByteIdenticalAcrossIdenticalInputs(t *testing.T) {
+	input := briefInput(t, []finding.Finding{planFinding("internal/check.go", 12, "lint/complexity", "func Complex() {}")})
+	first, err := BuildBrief(input)
+	if err != nil {
+		t.Fatalf("BuildBrief() error = %v", err)
+	}
+	second, err := BuildBrief(input)
+	if err != nil {
+		t.Fatalf("BuildBrief() second error = %v", err)
+	}
+	if first != second {
+		t.Fatalf("identical inputs produced different briefs:\n%s\n---\n%s", first, second)
+	}
+}
+
 func TestBatchIdentityProofDoesNotChangeJSONSchema(t *testing.T) {
 	input := briefInput(t, []finding.Finding{planFinding("a.go", 1, "lint/a", "a")})
 	raw, err := json.Marshal(input.Batch)

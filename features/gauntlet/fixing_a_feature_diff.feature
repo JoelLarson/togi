@@ -12,6 +12,14 @@ Feature: Fixing a feature diff safely
       And one squash commit with the fixed tree reaches the feature branch
       And the fix audit contains its report plan and brief
 
+    Scenario: A brief contains no worktree code beyond finding snippets
+      Given a green feature whose finding file contains code beyond the snippet
+      And the agent removes the finding
+      When I run the fix loop
+      Then the fix run is unsealed with exit 6
+      And the persisted brief carries the finding JSON, file:line pointer, and snippet
+      And the persisted brief contains no other worktree code
+
     Scenario: A clean initial gauntlet needs no agent
       Given a green feature without blockers
       When I run the fix loop

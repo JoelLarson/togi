@@ -141,6 +141,15 @@ func TestRunObservationLocatesFixArtifactsBesideReport(t *testing.T) {
 			t.Errorf("ArtifactPath(%q) = %q, true; want rejected", name, path)
 		}
 	}
+	briefs, err := observation.Briefs()
+	if err != nil || len(briefs) != 2 {
+		t.Fatalf("Briefs() = %d, %v", len(briefs), err)
+	}
+	for _, brief := range briefs {
+		if string(brief) != "artifact" {
+			t.Fatalf("Briefs() content = %q", brief)
+		}
+	}
 }
 
 func TestObservationCopiesInputBytesAndRawPaths(t *testing.T) {

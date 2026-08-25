@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/joellarson/togi/internal/run"
@@ -122,6 +123,43 @@ func (o RunObservation) ArtifactCount(name string) (int, error) {
 		return 0, fmt.Errorf("read run artifact directory %q: %w", name, err)
 	}
 	return len(entries), nil
+}
+
+// Briefs reads every persisted brief beside the report without following links.
+func (o RunObservation) Briefs() ([][]byte, error) {
+	path, ok := o.ArtifactPath("briefs")
+	if !ok {
+		return nil, fmt.Errorf("run artifact %q is unavailable", "briefs")
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, fmt.Errorf("read run artifact directory %q: %w", "briefs", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	result := make([][]byte, 0, len(names))
+	for _, name := range names {
+		full := filepath.Join(path, name)
+		info, err := os.Lstat(full)
+		if err != nil {
+			return nil, fmt.Errorf("stat brief %q: %w", name, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			continue
+		}
+		raw, err := os.ReadFile(full)
+		if err != nil {
+			return nil, fmt.Errorf("read brief %q: %w", name, err)
+		}
+		result = append(result, cloneBytes(raw))
+	}
+	if len(result) == 0 {
+		return nil, errors.New("persisted brief is absent")
+	}
+	return result, nil
 }
 
 // RawPath locates one persisted gate stream. Raw filenames are opaque digests,
