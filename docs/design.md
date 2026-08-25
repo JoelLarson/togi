@@ -115,8 +115,6 @@ finding usually means a missing wiki page or a wrong threshold.
 
 ## Operator approvals: waivers
 
-**Deferred Phase 3 slice.** The contract remains:
-
 Integrity violations halt the run as `blocked`, listing each violation's
 fingerprint. The operator runs:
 
@@ -126,6 +124,11 @@ togi waive <fingerprint> --reason "…"
 
 Waivers persist in the repo's state dir with reason and timestamp, appear in
 every subsequent report, and are honored on re-run.
+
+**Partially implemented.** Recording an approval is built: it is refused
+without a reason, is never duplicated, and is shared by every checkout of the
+repository. Honoring one on re-run, relieving touched-entity scope with one,
+and reporting the waivers a run honored are the remaining Phase 3 slices.
 
 No interactive mid-run prompts: unattended runs are the primary mode, and an
 audited artifact beats a y/n keystroke nobody can reconstruct later. Waivers

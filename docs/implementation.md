@@ -37,9 +37,10 @@ git.
 
 ## Platform boundary
 
-The current runtime supports Linux only. The `run` and `status`
+The current runtime supports Linux only. The `run`, `status`, and `waive`
 orchestration entry points check the platform before gate loading, subprocess
-startup, or any ledger access and return `ErrUnsupportedPlatform` elsewhere.
+startup, or any ledger or waiver access and return `ErrUnsupportedPlatform`
+elsewhere.
 Platform-specific files retain buildable interfaces and unsupported stubs for
 future Darwin, BSD, illumos, AIX, Solaris, and Windows implementations; their
 presence is not a claim of runtime support.
@@ -53,7 +54,7 @@ capture pipes open.
 
 `cmd/togi` thin main; `internal/` split by glossary term (ADR-0012):
 `finding`, `gate`, `normalizer`, `enricher`, `triage`, `flywheel`, `adapter`,
-`wiki`, `repoid`, `config`, `runner`, `gitcmd`, `run`. No `pkg/`.
+`wiki`, `waiver`, `repoid`, `config`, `runner`, `gitcmd`, `run`. No `pkg/`.
 
 ## Gate pipeline
 
@@ -137,6 +138,7 @@ version flag; the installed module is pinned operationally instead.
 togi run --report-only [--base <ref>] [--gate <name>] [--verbose] [--no-color]
 togi run --agent codex [--base <ref>] [--gate <name>] [--max-iterations <n>] [--max-wall-clock <duration>] [--verbose] [--no-color]
 togi status [--no-color]
+togi waive <fingerprint> --reason "…"
 togi version
 togi wiki show <page> | lint | eject <page>
 ```
@@ -144,7 +146,30 @@ togi wiki show <page> | lint | eject <page>
 Fix mode requires the implemented `codex` adapter. Claude and Kimi remain
 later conformance adapters. The default rails are 20 iterations and 30 minutes;
 token usage is recorded when the adapter reports it, while spend/token rails
-are not enforced. Fingerprint-keyed `togi waive` is a remaining Phase 3 slice.
+are not enforced. `togi waive` records a fingerprint-keyed approval; honoring
+one during a run is a remaining Phase 3 slice.
+
+## Waiver record schema
+
+**Implemented contract.** `waivers.toml` sits at the repository state root, a
+sibling of `runs/`, so approvals outlive any one run and are shared by every
+checkout of that repository. It is hand-editable, which is currently the only
+way to remove an approval.
+
+```toml
+# $XDG_STATE_HOME/togi/<repo-id>/waivers.toml
+[[waiver]]
+fingerprint = "0f2ac1e1…"          # 64 hexadecimal characters, as reported
+reason      = "the deleted test covered a removed feature"
+approved_at = 2026-08-25T03:17:33Z
+```
+
+Every field is required, a reason is at most 4096 bytes, a fingerprint appears
+at most once, and the file is rejected rather than partially read when any
+record fails those rules.
+Publication replaces the file atomically; the file is mode `0600` under the
+external `0700` state directory and is never written into the target
+repository.
 
 ## Report output
 
@@ -183,7 +208,7 @@ $XDG_STATE_HOME/togi/<repo-id>/
 │   ├── briefs/attempt-<digest>.txt
 │   ├── adapter/attempt-<digest>.jsonl
 │   └── raw/gate-<digest>.{stdout,stderr}
-├── waivers.toml          # deferred Phase 3 slice
+├── waivers.toml           # operator approvals, keyed by fingerprint
 ├── ratchet.json           # phase 5
 └── lock
 ```

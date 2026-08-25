@@ -12,7 +12,8 @@ mode it requires the Codex adapter, establishes a green Go behavioral baseline
 and healthy initial gates, then fixes file-based batches in a togi-owned
 external worktree. Accepted batches pass validation and integrity checks before
 one guarded squash landing. Successful Phase 3 runs are `unsealed` with exit 6.
-`togi status` reads completed history.
+`togi status` reads completed history, and `togi waive` records a
+fingerprint-keyed operator approval that nothing yet honors.
 Principle-page loading and the `togi wiki show`, `lint`, and `eject` commands
 also landed early from Phase 4.
 
@@ -50,9 +51,11 @@ one retry, stalemate detection, and iteration/wall-clock rails. An absent/red
 baseline is `unverified` and an errored initial gate retains all sibling gate
 signal; neither condition invokes the adapter. Spend rails remain deferred.
 
-The next slice is fingerprint-keyed waivers. Claude/Kimi adapter conformance
-is the other half of Phase 3's remaining exit criterion, but it is deferred:
-Codex is the primary target, so Phase 3 stays formally open once waivers land.
+Waiver persistence has landed. The next slices honor a waiver: past an
+integrity violation on re-run, as touched-entity scope relief, and in the
+report of every run that honored one. Claude/Kimi adapter conformance is the
+other half of Phase 3's remaining exit criterion, but it is deferred: Codex is
+the primary target, so Phase 3 stays formally open once waivers land.
 Complete the waiver work before Phase 4's richer containment triage,
 principle-aware plan and brief assembly, and resume behavior. Phase 3 already
 persists its simple `plan.json`, bounded briefs, private adapter logs, and
@@ -115,7 +118,7 @@ controlled fakes and needs neither Codex nor external gate binaries.
 - **External CLI contracts.** Confirm real gate and agent command formats
   against the pinned versions before relying on them. Vendor usage reporting
   may be approximate or absent; adapters must treat it as optional.
-- **Remaining Phase 3 boundaries.** Waiver persistence and additional adapter
+- **Remaining Phase 3 boundaries.** Honoring a waiver and additional adapter
   conformance must preserve the implemented worktree, validation, integrity,
   rail, and guarded-landing contracts.
 - **`go 1.25`.** The module version against a Go 1.26 local toolchain is
