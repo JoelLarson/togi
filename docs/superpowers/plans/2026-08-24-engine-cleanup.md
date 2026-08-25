@@ -273,13 +273,13 @@ git commit -m "Isolate engine barrier evaluation"
 - Inspect: `internal/flywheel/engine.go`
 - Inspect: `internal/flywheel/engine_test.go`
 
-- [ ] **Step 1: Audit every cleanup item**
+- [x] **Step 1: Audit every cleanup item**
 
 For each numbered heading, replace `## N.` with `## N. [x]` only when every
 requested change under that heading is present. Convert item 7 bullets to `- [x]`
 individually. Confirm item 8 has all three comments in production code.
 
-- [ ] **Step 2: Run formatting, static diff checks, and the full matrix**
+- [x] **Step 2: Run formatting, static diff checks, and the full matrix**
 
 ```sh
 gofmt -w internal/flywheel/engine.go internal/flywheel/engine_test.go internal/flywheel/plan.go internal/flywheel/plan_test.go
@@ -292,7 +292,7 @@ go test ./features/... -args -acceptance.driver=all
 
 Expected: every command exits 0.
 
-- [ ] **Step 3: Commit the completed checklist**
+- [x] **Step 3: Commit the completed checklist**
 
 ```sh
 git add internal/flywheel/engine.go.cleanup.md
