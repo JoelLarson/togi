@@ -48,6 +48,7 @@ Feature: Fixing a feature diff safely
   Rule: Each agent batch earns a rollback commit through local validation
     Scenario: A primary-file batch may fix a related file
       Given a green feature with a blocking finding
+      And the related file is outside the feature diff
       And the agent makes a valid cross-file fix
       When I run the fix loop
       Then the fix run is unsealed with exit 6

@@ -28,30 +28,18 @@ Feature: Judging a feature diff
       Then the report merge base is the shared commit
       And only the feature finding is in scope
 
-  Rule: Gate scope determines which findings survive
+  Rule: Gate scope selects which findings are judged against the diff
     Scenario: A point finding survives only on a changed line
       Given a committed feature changes line 8 but not line 3
       And a diff-scoped gate reports point findings on lines 3 and 8
       When I run the gauntlet
       Then only the finding on line 8 remains
 
-    Scenario: Touching a Go declaration includes its structural finding
-      Given a committed feature changes the body of function "calculate"
-      And a diff-scoped gate reports an entity finding on the function signature
-      When I run the gauntlet
-      Then the structural finding for "calculate" remains
-
     Scenario: A repository-scoped finding survives outside the diff
       Given a committed feature changes "feature.go"
       And a whole-repo gate reports a finding in "legacy.go"
       When I run the gauntlet
       Then the finding in "legacy.go" remains
-
-    Scenario: Deleting a line owns the adjacent deletion location
-      Given a committed feature deletes line 5 from "feature.go"
-      And a diff-scoped gate reports a point finding at the deletion location
-      When I run the gauntlet
-      Then the deletion finding remains in scope
 
     Scenario: A renamed file is judged at its new path
       Given a committed feature renames "before.go" to "after.go"
@@ -63,6 +51,19 @@ Feature: Judging a feature diff
       Given a committed feature changes the binary file "image.bin"
       When I run the gauntlet
       Then the diff records one changed file and zero changed lines
+
+  Rule: Location fixes a finding's range before scoping
+    Scenario: Touching a Go declaration includes its structural finding
+      Given a committed feature changes the body of function "calculate"
+      And a diff-scoped gate reports an entity finding on the function signature
+      When I run the gauntlet
+      Then the structural finding for "calculate" remains
+
+    Scenario: Deleting a line owns the adjacent deletion location
+      Given a committed feature deletes line 5 from "feature.go"
+      And a diff-scoped gate reports a point finding at the deletion location
+      When I run the gauntlet
+      Then the deletion finding remains in scope
 
   Rule: Invalid repository state prevents a run from starting
     Scenario Outline: A repository precondition fails before tools or state
