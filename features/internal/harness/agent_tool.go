@@ -131,48 +131,59 @@ func runAgentHelperFromEnvironment() (int, bool) {
 
 func runAgentHelper(spec agentHelperSpec) error {
 	args := os.Args[1:]
-	if len(args) != 11 || args[0] != "--ask-for-approval" || args[1] != "never" || args[2] != "exec" ||
-		args[3] != "--ephemeral" || args[4] != "--json" || args[5] != "--sandbox" || args[6] != "workspace-write" ||
-		args[7] != "--ignore-user-config" || args[8] != "--cd" || args[10] != "-" {
-		return errors.New("unexpected codex arguments")
-	}
-	root, err := filepath.EvalSymlinks(args[9])
+	root, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("resolve codex root: %w", err)
+		return fmt.Errorf("resolve agent cwd: %w", err)
+	}
+	if len(args) != 0 {
+		if len(args) != 11 || args[0] != "--ask-for-approval" || args[1] != "never" || args[2] != "exec" ||
+			args[3] != "--ephemeral" || args[4] != "--json" || args[5] != "--sandbox" || args[6] != "workspace-write" ||
+			args[7] != "--ignore-user-config" || args[8] != "--cd" || args[10] != "-" {
+			return errors.New("unexpected agent arguments")
+		}
+		root, err = filepath.EvalSymlinks(args[9])
+		if err != nil {
+			return fmt.Errorf("resolve agent root: %w", err)
+		}
+	} else {
+		root, err = filepath.EvalSymlinks(root)
+		if err != nil {
+			return fmt.Errorf("resolve agent cwd: %w", err)
+		}
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return fmt.Errorf("resolve codex cwd: %w", err)
+		return fmt.Errorf("resolve agent cwd: %w", err)
 	}
 	cwd, err = filepath.EvalSymlinks(cwd)
 	if err != nil || cwd != root {
-		return errors.New("codex cwd mismatch")
+		return errors.New("agent cwd mismatch")
 	}
 	brief, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return fmt.Errorf("read agent brief: %w", err)
 	}
-	if err := recordAgentInvocation(spec.RecordRoot, args[9], brief); err != nil {
+	if err := recordAgentInvocation(spec.RecordRoot, root, brief); err != nil {
 		return err
 	}
 	if spec.Behavior.Sleep > 0 {
 		time.Sleep(spec.Behavior.Sleep)
 	}
 	if len(spec.DeletePaths) != 0 || len(spec.EditPaths) != 0 || len(spec.Behavior.GitArgs) != 0 {
-		if err := withWorkspaceMutation(args[9], func() error {
+		if err := withWorkspaceMutation(root, func() error {
 			for _, path := range spec.DeletePaths {
-				if err := secureRemove(args[9], path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				if err := secureRemove(root, path); err != nil && !errors.Is(err, os.ErrNotExist) {
 					return fmt.Errorf("delete %q: %w", path, err)
 				}
 			}
 			for _, path := range spec.EditPaths {
-				if err := secureWrite(args[9], path, []byte(spec.Behavior.Edits[path]), 0o600); err != nil {
+				if err := secureWrite(root, path, []byte(spec.Behavior.Edits[path]), 0o600); err != nil {
 					return fmt.Errorf("edit %q: %w", path, err)
 				}
 			}
 			if len(spec.Behavior.GitArgs) != 0 {
 				command := exec.Command("git", spec.Behavior.GitArgs...)
-				command.Dir = args[9]
+				command.Dir = root
 				var output bytes.Buffer
 				command.Stdout = &output
 				command.Stderr = &output

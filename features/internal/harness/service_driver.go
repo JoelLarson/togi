@@ -100,7 +100,11 @@ func (d serviceGauntlet) service(stdout, stderr *bytes.Buffer) run.Service {
 		Loader:   gate.Loader{OverrideDir: env.Paths().GateOverrides()},
 		Executor: run.Executor{Enrichers: enricher.NewRegistry(), Now: env.clock.Now},
 		Stdout:   stdout, VerboseOut: stderr, Now: env.clock.Now, Random: env.random,
-		Suite: run.NewGoSuite("go"), Adapters: map[string]adapter.Adapter{"codex": adapter.NewCodex("codex")},
+		Suite: run.NewGoSuite("go"), Adapters: map[string]adapter.Adapter{
+			"codex":  adapter.NewCodex("codex"),
+			"claude": adapter.NewCommand("claude", "claude"),
+			"kimi":   adapter.NewCommand("kimi", "kimi"),
+		},
 		GOOS: env.GOOS, ResolveRepo: env.resolveRepo,
 	}
 }

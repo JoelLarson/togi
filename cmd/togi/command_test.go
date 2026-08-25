@@ -110,6 +110,22 @@ func TestRunCommandPassesFixFlags(t *testing.T) {
 	}
 }
 
+func TestRunCommandSelectsNamedAgents(t *testing.T) {
+	for _, name := range []string{"codex", "claude", "kimi"} {
+		t.Run(name, func(t *testing.T) {
+			service := &fakeService{}
+			cmd := newRootCommandWithService(streams{out: io.Discard, err: io.Discard}, service)
+			cmd.SetArgs([]string{"run", "--agent", name})
+			if err := cmd.Execute(); err != nil {
+				t.Fatal(err)
+			}
+			if service.runOptions.Agent != name {
+				t.Fatalf("agent = %q, want %q", service.runOptions.Agent, name)
+			}
+		})
+	}
+}
+
 func TestRunCommandRejectsInvalidFixFlagsBeforeService(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -119,8 +135,6 @@ func TestRunCommandRejectsInvalidFixFlagsBeforeService(t *testing.T) {
 		{name: "report only agent", args: []string{"run", "--report-only", "--agent", "codex"}},
 		{name: "report only explicit iterations", args: []string{"run", "--report-only", "--max-iterations", "20"}},
 		{name: "report only explicit wall clock", args: []string{"run", "--report-only", "--max-wall-clock", "30m"}},
-		{name: "claude is not installed", args: []string{"run", "--agent", "claude"}},
-		{name: "kimi is not installed", args: []string{"run", "--agent", "kimi"}},
 		{name: "unsupported agent", args: []string{"run", "--agent", "unknown"}},
 		{name: "zero iterations", args: []string{"run", "--agent", "codex", "--max-iterations", "0"}},
 		{name: "negative iterations", args: []string{"run", "--agent", "codex", "--max-iterations", "-1"}},

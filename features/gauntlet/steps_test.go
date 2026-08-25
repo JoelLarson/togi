@@ -819,6 +819,9 @@ func (f *fixFeature) initialize(sc *godog.ScenarioContext) {
 	sc.Step(`^a green feature without blockers$`, f.greenClean)
 	sc.Step(`^the agent removes the finding$`, f.agentFixes)
 	sc.Step(`^the selected agent is missing$`, f.missingAgent)
+	sc.Step(`^the "([^"]*)" adapter is installed$`, f.namedAdapterInstalled)
+	sc.Step(`^I run the fix loop with --agent "([^"]*)"$`, f.runWithAgent)
+	sc.Step(`^the "([^"]*)" adapter received the brief on stdin in the worktree$`, f.adapterReceivedBrief)
 	sc.Step(`^a feature whose behavioral suite is (missing|red)$`, f.baseline)
 	sc.Step(`^a green feature whose initial gate errors$`, f.initialGateError)
 	sc.Step(`^the agent makes a valid cross-file fix$`, f.crossFile)
@@ -935,6 +938,38 @@ func (f *fixFeature) installAgent(behavior harness.AgentBehavior) error {
 func (f *fixFeature) missingAgent() error {
 	f.mode = "missing-agent"
 	return f.world.Environment().RestrictPath("go", "git", "grep")
+}
+
+func (f *fixFeature) namedAdapterInstalled(name string) error {
+	f.request.Agent = name
+	_, err := f.world.Environment().InstallAgent(name, harness.AgentBehavior{Edits: map[string]string{"feature.go": fixedSource}})
+	return err
+}
+
+func (f *fixFeature) runWithAgent(ctx context.Context, name string) error {
+	f.request.Agent = name
+	return f.run(ctx)
+}
+
+func (f *fixFeature) adapterReceivedBrief(name string) error {
+	invocations, err := f.world.Environment().AgentInvocations(name)
+	if err != nil {
+		return err
+	}
+	if len(invocations) != 1 {
+		return fmt.Errorf("%s invocations = %d, want 1", name, len(invocations))
+	}
+	if invocations[0].Brief == "" {
+		return fmt.Errorf("%s received an empty brief", name)
+	}
+	if !strings.Contains(invocations[0].Brief, "feature.go") {
+		return fmt.Errorf("%s brief missing finding pointer:\n%s", name, invocations[0].Brief)
+	}
+	worktree := invocations[0].Root
+	if worktree == "" || worktree == f.world.Repository().Root {
+		return fmt.Errorf("%s cwd = %q, want the fix worktree", name, worktree)
+	}
+	return nil
 }
 
 func (f *fixFeature) baseline(condition string) error {

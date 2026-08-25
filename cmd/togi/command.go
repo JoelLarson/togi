@@ -81,7 +81,11 @@ func defaultServices(s streams, environment config.Environment) (runpkg.Service,
 		Stdout:     s.out,
 		VerboseOut: s.err,
 		Suite:      runpkg.NewGoSuite("go"),
-		Adapters:   map[string]adapter.Adapter{"codex": adapter.NewCodex("codex")},
+		Adapters: map[string]adapter.Adapter{
+			"codex":  adapter.NewCodex("codex"),
+			"claude": adapter.NewCommand("claude", "claude"),
+			"kimi":   adapter.NewCommand("kimi", "kimi"),
+		},
 	}
 	return service, pages, nil
 }
@@ -184,10 +188,12 @@ func validateRunFlags(command *cobra.Command, flags runFlags) error {
 	if flags.agent == "" {
 		return errors.New("--agent is required unless --report-only is set")
 	}
-	if flags.agent != "codex" {
+	switch flags.agent {
+	case "codex", "claude", "kimi":
+		return nil
+	default:
 		return fmt.Errorf("unsupported agent %q", flags.agent)
 	}
-	return nil
 }
 
 func newStatusCommand(service commandService) *cobra.Command {

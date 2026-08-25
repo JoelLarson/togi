@@ -26,6 +26,19 @@ Feature: Fixing a feature diff safely
       Then the fix run is errored with exit 4
       And the feature branch is unchanged
 
+    Scenario Outline: --agent selects a vendor-neutral adapter
+      Given a green feature with a blocking finding
+      And the "<agent>" adapter is installed
+      When I run the fix loop with --agent "<agent>"
+      Then the fix run is unsealed with exit 6
+      And the "<agent>" adapter received the brief on stdin in the worktree
+      And one squash commit with the fixed tree reaches the feature branch
+
+      Examples:
+        | agent |
+        | codex |
+        | kimi  |
+
     Scenario Outline: An absent or red behavioral baseline is unverified
       Given a feature whose behavioral suite is <condition>
       When I run the fix loop
