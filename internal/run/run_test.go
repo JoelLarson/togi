@@ -172,7 +172,7 @@ func TestRenderUsesCompilerStyleAndOccurrences(t *testing.T) {
 	if strings.Index(got, "a.go:42") > strings.Index(got, "z.go:8") {
 		t.Fatalf("findings not sorted:\n%s", got)
 	}
-	for _, want := range []string{"4 findings (1 error, 3 warnings, 0 info)", "lint: errored: binary missing", "complexity: findings (12ms)", "verdict: findings"} {
+	for _, want := range []string{"2 findings across 4 occurrences (1 error, 3 warnings, 0 info)", "lint: errored: binary missing", "complexity: findings (12ms)", "verdict: findings"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("output missing %q:\n%s", want, got)
 		}
@@ -970,5 +970,42 @@ func TestFixModeOptionContracts(t *testing.T) {
 	}
 	if DefaultMaxIterations != 20 || DefaultMaxWallClock != 30*time.Minute {
 		t.Fatalf("defaults = %d/%s, want 20/30m", DefaultMaxIterations, DefaultMaxWallClock)
+	}
+}
+
+func TestRenderOmitsOccurrenceClauseWhenCountsAgree(t *testing.T) {
+	report := Report{
+		Verdict: VerdictFindings,
+		Findings: []finding.Finding{
+			{File: "a.go", Line: 1, Severity: finding.Warning, Message: "one", RuleID: "tool/one"},
+			{File: "b.go", Line: 2, Severity: finding.Warning, Message: "two", RuleID: "tool/two"},
+		},
+		Counts: Counts{Warnings: 2, Occurrences: 2},
+	}
+	var out bytes.Buffer
+	if err := Render(&out, report, RenderOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "2 findings (0 errors, 2 warnings, 0 info)") {
+		t.Fatalf("expected bare finding total:\n%s", got)
+	}
+	if strings.Contains(got, "occurrences") {
+		t.Fatalf("occurrence clause should be omitted when counts agree:\n%s", got)
+	}
+}
+
+func TestRenderSingularFindingAndOccurrence(t *testing.T) {
+	report := Report{
+		Verdict:  VerdictFindings,
+		Findings: []finding.Finding{{File: "a.go", Line: 1, Severity: finding.Error, Message: "one", RuleID: "tool/one", Occurrences: []finding.Occurrence{{Line: 9}}}},
+		Counts:   Counts{Errors: 2, Occurrences: 2},
+	}
+	var out bytes.Buffer
+	if err := Render(&out, report, RenderOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); !strings.Contains(got, "1 finding across 2 occurrences (2 errors, 0 warnings, 0 info)") {
+		t.Fatalf("expected singular finding total:\n%s", got)
 	}
 }

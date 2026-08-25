@@ -124,7 +124,13 @@ func renderFindings(output io.Writer, report Report, opts RenderOptions) error {
 			return err
 		}
 	}
-	if _, err := fmt.Fprintf(output, "%d findings (%d %s, %d %s, %d info)\n", report.Counts.Occurrences, report.Counts.Errors, plural(report.Counts.Errors, "error"), report.Counts.Warnings, plural(report.Counts.Warnings, "warning"), report.Counts.Info); err != nil {
+	// Counts are occurrence-weighted; the finding total is the number of
+	// distinct findings, which is what the stalemate rail tracks.
+	total := fmt.Sprintf("%d %s", len(items), plural(len(items), "finding"))
+	if report.Counts.Occurrences != len(items) {
+		total += fmt.Sprintf(" across %d %s", report.Counts.Occurrences, plural(report.Counts.Occurrences, "occurrence"))
+	}
+	if _, err := fmt.Fprintf(output, "%s (%d %s, %d %s, %d info)\n", total, report.Counts.Errors, plural(report.Counts.Errors, "error"), report.Counts.Warnings, plural(report.Counts.Warnings, "warning"), report.Counts.Info); err != nil {
 		return err
 	}
 	return nil

@@ -102,7 +102,9 @@ type RunRef struct {
 	Dir string
 }
 
-// Counts summarizes findings and their occurrence sites.
+// Counts summarizes occurrence sites, not findings: every field is
+// occurrence-weighted, so a finding firing at three sites contributes three.
+// The number of distinct findings is len(Report.Findings).
 type Counts struct {
 	Errors      int `json:"errors"`
 	Warnings    int `json:"warnings"`
